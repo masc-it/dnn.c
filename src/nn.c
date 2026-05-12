@@ -4,6 +4,7 @@
 #include "pool.h"
 #include "tensor_int.h"
 #include <assert.h>
+#include <math.h>
 
 linear *linear_create(int in_features, int out_features) {
     assert(in_features > 0 && out_features > 0);
@@ -11,8 +12,9 @@ linear *linear_create(int in_features, int out_features) {
     linear *l = mem_params_alloc(sizeof(linear), NULL);
     l->in_features  = in_features;
     l->out_features = out_features;
-    l->weight = tensor_randn(2, (int[]){in_features, out_features}, 1);
-    l->bias   = tensor_zeros(1, (int[]){out_features}, 1);
+    float bound = 1.0f / sqrtf((float)in_features);
+    l->weight = tensor_uniform(2, (int[]){in_features, out_features}, 1, bound);
+    l->bias   = tensor_uniform(1, (int[]){out_features}, 1, bound);
     return l;
 }
 

@@ -22,6 +22,7 @@ typedef struct tensor {
 /* ── Lifecycle ── */
 tensor *tensor_zeros(int ndim, const int *shape, int requires_grad);
 tensor *tensor_randn(int ndim, const int *shape, int requires_grad);
+tensor *tensor_uniform(int ndim, const int *shape, int requires_grad, float bound);
 
 /* ── Views ── */
 tensor *tensor_slice(tensor *t, int dim, int start, int len);

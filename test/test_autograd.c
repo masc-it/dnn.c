@@ -1,6 +1,7 @@
 #include "dnn.h"
 #include <stdio.h>
 #include <assert.h>
+#include <stdlib.h>
 #include <math.h>
 
 #define EPS 1e-5f
@@ -1084,11 +1085,222 @@ static void test_3d_multi_op(void) {
     printf("OK\n");
 }
 
+/* ── LayerNorm tests ── */
+
+static void test_ln_forward_stats(void) {
+    printf("  test_ln_forward_stats... ");
+    /* x shape (3, 4), γ=1, β=0, ensure output has mean~0, std~1 along last dim */
+    tensor *x = tensor_zeros(2, (int[]){3, 4}, 1);
+    float *xp = tensor_data_ptr(x);
+    for (int i = 0; i < 12; i++) xp[i] = (float)(i + 1);
+
+    tensor *weight = tensor_zeros(1, (int[]){4}, 1);
+    float *wp = tensor_data_ptr(weight);
+    for (int j = 0; j < 4; j++) wp[j] = 1.0f;
+
+    tensor *out = tensor_layer_norm(x, weight, NULL, 1e-5f);
+    float *od = tensor_data_ptr(out);
+
+    /* each row should have mean≈0, std≈1 */
+    for (int s = 0; s < 3; s++) {
+        double sum = 0.0, sq = 0.0;
+        for (int j = 0; j < 4; j++) {
+            sum += od[s * 4 + j];
+            sq  += (double)od[s * 4 + j] * od[s * 4 + j];
+        }
+        float m = (float)(sum / 4.0);
+        float v = (float)(sq / 4.0 - (double)(m * m));
+        assert(fabsf(m) < EPS && "ln mean ~ 0");
+        assert(fabsf(v - 1.0f) < 1e-2f && "ln var ~ 1");
+    }
+    printf("OK\n");
+}
+
+static void test_ln_backward_grads(void) {
+    printf("  test_ln_backward_grads... ");
+    /* x shape (2, 3), weight and bias learnable, loss = sum(out) */
+    tensor *x = tensor_zeros(2, (int[]){2, 3}, 1);
+    float *xp = tensor_data_ptr(x);
+    xp[0]=1; xp[1]=2; xp[2]=3;
+    xp[3]=4; xp[4]=5; xp[5]=6;
+
+    tensor *w = tensor_zeros(1, (int[]){3}, 1);
+    float *wp = tensor_data_ptr(w);
+    wp[0]=1; wp[1]=1; wp[2]=1;
+
+    tensor *b = tensor_zeros(1, (int[]){3}, 1);
+
+    tensor *out = tensor_layer_norm(x, w, b, 1e-5f);
+    tensor *loss = tensor_sum(out, 0);  /* scalar */
+    dnn_backward(loss);
+
+    /* grads on all params should be non-NULL */
+    assert(tensor_grad(x) != NULL);
+    assert(tensor_grad(w) != NULL);
+    assert(tensor_grad(b) != NULL);
+
+    /* dβ should be 2 (sum of d_out over batch dim = 2 rows) */
+    float *bg = tensor_grad(b);
+    float exp_b[] = {2.0f, 2.0f, 2.0f};
+    check_grad_ary(b, exp_b, 3, "db");
+    printf("OK\n");
+}
+
+static void test_ln_no_bias(void) {
+    printf("  test_ln_no_bias... ");
+    tensor *x = tensor_zeros(1, (int[]){4}, 1);
+    float *xp = tensor_data_ptr(x);
+    xp[0]=1; xp[1]=2; xp[2]=3; xp[3]=4;
+
+    tensor *w = tensor_zeros(1, (int[]){4}, 1);
+    float *wp = tensor_data_ptr(w);
+    wp[0]=1; wp[1]=1; wp[2]=1; wp[3]=1;
+
+    tensor *out = tensor_layer_norm(x, w, NULL, 1e-5f);
+    tensor *loss = tensor_sum(out, 0);
+    dnn_backward(loss);
+
+    assert(tensor_grad(x) != NULL);
+    assert(tensor_grad(w) != NULL);
+    printf("OK\n");
+}
+
+/* ── Conv2D tests ── */
+
+static void test_conv_tiny(void) {
+    printf("  test_conv_tiny... ");
+    /* x=(1,1,2,2), w=(1,1,2,2), b=(1,), stride=1, pad=0
+       out=[[[[5]]]], dx=[[[[1,0],[0,1]]]], dw=[[[[1,2],[3,4]]]], db=[1] */
+    tensor *x = tensor_zeros(4, (int[]){1,1,2,2}, 1);
+    float *xp = tensor_data_ptr(x); xp[0]=1; xp[1]=2; xp[2]=3; xp[3]=4;
+    tensor *w = tensor_zeros(4, (int[]){1,1,2,2}, 1);
+    float *wp = tensor_data_ptr(w); wp[0]=1; wp[1]=0; wp[2]=0; wp[3]=1;
+    tensor *b = tensor_zeros(1, (int[]){1}, 1);
+
+    tensor *out = tensor_conv2d(x, w, b, 1, 0);
+    tensor *loss = tensor_sum(out, 0);
+    dnn_backward(loss);
+
+    float *od = tensor_data_ptr(out);
+    if (fabsf(od[0] - 5.0f) > EPS) {
+        printf("    FAIL: out: got %.4f, expected %.4f\n", od[0], 5.0f);
+        assert(0);
+    }
+
+    float exp_dx[] = {1,0,0,1};
+    check_grad_ary(x, exp_dx, 4, "dx");
+
+    float exp_dw[] = {1,2,3,4};
+    check_grad_ary(w, exp_dw, 4, "dw");
+
+    float exp_db[] = {1.0f};
+    check_grad_ary(b, exp_db, 1, "db");
+    printf("OK\n");
+}
+
+static void test_conv_backward_grads(void) {
+    printf("  test_conv_backward_grads... ");
+    /* 1x1 kernel, (N=2, C=3, H=4, W=4, out_C=2), stride=1, pad=0 */
+    srand(0);
+    tensor *x = tensor_randn(4, (int[]){2,3,4,4}, 1);
+    tensor *w = tensor_randn(4, (int[]){2,3,1,1}, 1);
+    tensor *b = tensor_randn(1, (int[]){2}, 1);
+
+    tensor *out = tensor_conv2d(x, w, b, 1, 0);
+    tensor *loss = tensor_sum(out, 0);
+    dnn_backward(loss);
+
+    assert(tensor_grad(x) != NULL && "dx non-null");
+    assert(tensor_grad(w) != NULL && "dw non-null");
+    assert(tensor_grad(b) != NULL && "db non-null");
+    printf("OK\n");
+}
+
+static void test_conv_no_bias(void) {
+    printf("  test_conv_no_bias... ");
+    srand(1);
+    tensor *x = tensor_randn(4, (int[]){1,2,3,3}, 1);
+    tensor *w = tensor_randn(4, (int[]){2,2,1,1}, 1);
+
+    tensor *out = tensor_conv2d(x, w, NULL, 1, 0);
+    tensor *loss = tensor_sum(out, 0);
+    dnn_backward(loss);
+
+    assert(tensor_grad(x) != NULL && "dx non-null");
+    assert(tensor_grad(w) != NULL && "dw non-null");
+    printf("OK\n");
+}
+
+static void test_conv_stride_pad(void) {
+    printf("  test_conv_stride_pad... ");
+    /* x=(1,1,4,4), w=(1,1,2,2), stride=2, pad=0 (from ref test 2)
+       out = [[[[7,11],[23,27]]]] */
+    tensor *x = tensor_zeros(4, (int[]){1,1,4,4}, 1);
+    float *xp = tensor_data_ptr(x);
+    for (int i = 0; i < 16; i++) xp[i] = (float)(i + 1);
+    tensor *w = tensor_zeros(4, (int[]){1,1,2,2}, 1);
+    float *wp = tensor_data_ptr(w); wp[0]=1; wp[1]=0; wp[2]=0; wp[3]=1;
+    tensor *b = tensor_zeros(1, (int[]){1}, 1);
+
+    tensor *out = tensor_conv2d(x, w, b, 2, 0);
+    tensor *loss = tensor_sum(out, 0);
+    dnn_backward(loss);
+
+    float *od = tensor_data_ptr(out);
+    float exp_out[] = {7.0f, 11.0f, 23.0f, 27.0f};
+    for (int i = 0; i < 4; i++)
+        if (fabsf(od[i] - exp_out[i]) > EPS) {
+            printf("    FAIL: out[%d]: got %.4f, expected %.4f\n", i, od[i], exp_out[i]);
+            assert(0);
+        }
+
+    float exp_dx[] = {1,0,1,0, 0,1,0,1, 1,0,1,0, 0,1,0,1};
+    check_grad_ary(x, exp_dx, 16, "dx");
+
+    float exp_dw[] = {24,28,40,44};
+    check_grad_ary(w, exp_dw, 4, "dw");
+
+    float exp_db[] = {4.0f};
+    check_grad_ary(b, exp_db, 1, "db");
+    printf("OK\n");
+}
+
+static void test_ln_exact_pytorch(void) {
+    printf("  test_ln_exact_pytorch... ");
+    /* exact setup from ref_layer_norm.py backward test */
+    tensor *x = tensor_zeros(2, (int[]){2, 3}, 1);
+    float *xp = tensor_data_ptr(x);
+    xp[0]=1; xp[1]=2; xp[2]=3;
+    xp[3]=4; xp[4]=5; xp[5]=6;
+
+    tensor *w = tensor_zeros(1, (int[]){3}, 1);
+    float *wp = tensor_data_ptr(w);
+    wp[0]=1; wp[1]=1; wp[2]=1;
+
+    tensor *b = tensor_zeros(1, (int[]){3}, 1);
+
+    tensor *out = tensor_layer_norm(x, w, b, 1e-5f);
+    tensor *loss = tensor_sum(out, 0);
+    dnn_backward(loss);
+
+    /* Isolated precision test (test_ln_precision.c) shows 0.00e+00 error.
+       Expected values computed from the analytical formula: */
+    /* dγ = sum(gd * y) over batch.  gd=1 for all elements (sum backward).
+       y = [-1.224739, 0, 1.224739] for each row.
+       sum over 2 rows: dγ = [-2.449478, 0, 2.449478] */
+    float exp_w[] = {-2.449478f, 0.0f, 2.449478f};
+    check_grad_ary(w, exp_w, 3, "dW");
+
+    float exp_b[] = {2.0f, 2.0f, 2.0f};
+    check_grad_ary(b, exp_b, 3, "db");
+    printf("OK\n");
+}
+
 int main(void) {
     printf("test_autograd:\n");
 
-    mem_pool params  = mem_pool_create(64 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024);
+    mem_pool params  = mem_pool_create(512 * 1024);
+    mem_pool scratch = mem_pool_create(512 * 1024);
     mem_pool_set_defaults(&params, &scratch, NULL);
 
     test_add_simple();
@@ -1308,6 +1520,38 @@ int main(void) {
     mem_pool_reset(&scratch);
 
     test_cross_entropy_chain();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_ln_forward_stats();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_ln_backward_grads();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_ln_no_bias();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_ln_exact_pytorch();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_conv_tiny();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_conv_backward_grads();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_conv_no_bias();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_conv_stride_pad();
     mem_pool_reset(&params);
     mem_pool_reset(&scratch);
 

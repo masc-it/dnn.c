@@ -83,6 +83,17 @@ tensor *tensor_randn(int ndim, const int *shape, int requires_grad) {
     return t;
 }
 
+tensor *tensor_uniform(int ndim, const int *shape, int requires_grad, float bound) {
+    tensor *t = tensor_create_pool(ndim, shape, _mem_pool_params(), requires_grad);
+    int n = tensor_numel_(shape, ndim);
+    float *p = (float*)t->data;
+    for (int i = 0; i < n; i++) {
+        float u = (float)rand() / (float)RAND_MAX;  /* [0, 1) */
+        p[i] = (2.0f * u - 1.0f) * bound;           /* [-bound, bound) */
+    }
+    return t;
+}
+
 /* ── Views ── */
 
 tensor *tensor_slice(tensor *t, int dim, int start, int len) {
