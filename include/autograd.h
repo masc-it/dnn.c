@@ -11,6 +11,13 @@ struct grad_fn {
     int       n_saved;
 };
 
+/* ── Grad mode context ── */
+typedef struct { int _prev; } dnn_grad_ctx;
+
+int          dnn_grad_enabled(void);
+dnn_grad_ctx dnn_no_grad_enter(void);
+void         dnn_no_grad_exit(dnn_grad_ctx ctx);
+
 /* ── Backward ── */
 void dnn_backward(tensor *loss);
 

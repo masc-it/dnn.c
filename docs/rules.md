@@ -1,5 +1,9 @@
 # Coding Rules
 
+## Naming
+
+1. **`_` prefix = internal.** Non-public API functions get `_` prefix: `_mem_pool_alloc`, `_bcast_ndim`. Public API has no prefix: `tensor_add`, `dnn_backward`.
+
 ## Principles
 
 1. **Comments explain WHY, not WHAT.** Code itself documents WHAT. Comments document reasoning, context, non-obvious constraints — why this approach over alternatives.

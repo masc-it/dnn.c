@@ -12,6 +12,7 @@ typedef struct tensor {
     int      shape[DNN_MAX_DIMS];
     int      strides[DNN_MAX_DIMS];
     int      ndim;
+    unsigned int requires_grad : 1;
     int      offset;
     struct tensor *parent;
     grad_fn *grad_fn;
@@ -19,7 +20,6 @@ typedef struct tensor {
 } tensor;
 
 /* ── Lifecycle ── */
-tensor *tensor_scratch_create_(int ndim, const int *shape, int requires_grad);
 tensor *tensor_zeros(int ndim, const int *shape, int requires_grad);
 tensor *tensor_randn(int ndim, const int *shape, int requires_grad);
 
@@ -40,6 +40,10 @@ int     tensor_shape(const tensor *t, int dim);
 int     tensor_is_contiguous(const tensor *t);
 int     tensor_requires_grad(const tensor *t);
 void    tensor_set_requires_grad(tensor *t, int req);
+int     tensor_is_leaf(const tensor *t);
+void    tensor_retain_grad(tensor *t);
+float  *tensor_grad(const tensor *t);
+tensor *tensor_root(tensor *t);
 void    tensor_print(const tensor *t);
 
 #endif /* DNN_TENSOR_H */

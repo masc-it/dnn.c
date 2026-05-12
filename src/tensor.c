@@ -1,5 +1,6 @@
 #include "tensor.h"
-#include "_internal.h"
+#include "pool_int.h"
+#include "tensor_int.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -37,7 +38,7 @@ static void copy_strided_rec(const tensor *src, int dim, int src_off, float *dst
 }
 
 static tensor *tensor_copy_strided(const tensor *t) {
-    tensor *out = tensor_scratch_create_(t->ndim, t->shape, 0);
+    tensor *out = _tensor_scratch_create(t->ndim, t->shape, t->requires_grad);
     int dst_off = 0;
     copy_strided_rec(t, 0, t->offset, (float*)out->data, &dst_off);
     return out;
@@ -47,27 +48,27 @@ static tensor *tensor_copy_strided(const tensor *t) {
 
 static tensor *tensor_create_pool(int ndim, const int *shape, mem_pool *pool, int requires_grad) {
     assert(pool && "tensor_create_pool: default pool not set");
-    tensor *t = mem_pool_alloc(pool, sizeof(tensor), NULL);
+    tensor *t = _mem_pool_alloc(pool, sizeof(tensor), NULL);
     t->ndim = ndim;
     memcpy(t->shape, shape, ndim * sizeof(int));
     default_strides(ndim, shape, t->strides);
     int n = tensor_numel_(shape, ndim);
-    t->data = mem_pool_alloc(pool, n * sizeof(float), NULL);
+    t->data = _mem_pool_alloc(pool, n * sizeof(float), NULL);
     t->pool = pool;
-    if (requires_grad) tensor_set_requires_grad(t, 1);
+    t->requires_grad = requires_grad ? 1 : 0;
     return t;
 }
 
-tensor *tensor_scratch_create_(int ndim, const int *shape, int requires_grad) {
-    return tensor_create_pool(ndim, shape, mem_pool_scratch(), requires_grad);
+tensor *_tensor_scratch_create(int ndim, const int *shape, int requires_grad) {
+    return tensor_create_pool(ndim, shape, _mem_pool_scratch(), requires_grad);
 }
 
 tensor *tensor_zeros(int ndim, const int *shape, int requires_grad) {
-    return tensor_create_pool(ndim, shape, mem_pool_params(), requires_grad);
+    return tensor_create_pool(ndim, shape, _mem_pool_params(), requires_grad);
 }
 
 tensor *tensor_randn(int ndim, const int *shape, int requires_grad) {
-    tensor *t = tensor_create_pool(ndim, shape, mem_pool_params(), requires_grad);
+    tensor *t = tensor_create_pool(ndim, shape, _mem_pool_params(), requires_grad);
     int n = tensor_numel_(shape, ndim);
     float *p = (float*)t->data;
     for (int i = 0; i < n; i += 2) {
@@ -181,6 +182,25 @@ int tensor_shape(const tensor *t, int dim) {
 
 /* ── Properties ── */
 
+int tensor_is_leaf(const tensor *t) {
+    return t->requires_grad && t->grad_fn == NULL;
+}
+
+void tensor_retain_grad(tensor *t) {
+    if (!t->grad) {
+        t->grad = mem_params_alloc(tensor_numel(t) * sizeof(float), NULL);
+    }
+}
+
+float *tensor_grad(const tensor *t) {
+    return t->grad;
+}
+
+tensor *tensor_root(tensor *t) {
+    while (t->parent) t = t->parent;
+    return t;
+}
+
 int tensor_is_contiguous(const tensor *t) {
     int s = 1;
     for (int i = t->ndim - 1; i >= 0; i--) {
@@ -191,17 +211,12 @@ int tensor_is_contiguous(const tensor *t) {
 }
 
 int tensor_requires_grad(const tensor *t) {
-    return t->grad != NULL;
+    return t->requires_grad;
 }
 
 void tensor_set_requires_grad(tensor *t, int req) {
-    if (req && !t->grad) {
-        int n = tensor_numel_(t->shape, t->ndim);
-        t->grad = mem_params_alloc(n * sizeof(float), NULL);
-    } else if (!req && t->grad) {
-        /* Pool owns grad — just drop the pointer */
-        t->grad = NULL;
-    }
+    t->requires_grad = req ? 1 : 0;
+    /* grad buffer NOT allocated here — allocated lazily in backward */
 }
 
 void tensor_print(const tensor *t) {

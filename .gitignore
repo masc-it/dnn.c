@@ -6,3 +6,4 @@ obj/
 
 # Editor / OS droppings
 .DS_Store
+*.o
