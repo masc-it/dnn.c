@@ -29,7 +29,7 @@ static void add_backward(grad_fn *fn, tensor *grad_output) {
             r /= grad_output->shape[d];
         }
 
-        float g = g_data[_flat_off(grad_output, i)];
+        float g = g_data[i];
 
         /* accumulate into any tensor that needs gradient —
            either to propagate (grad_fn) or to store on leaf (requires_grad) */
@@ -37,17 +37,10 @@ static void add_backward(grad_fn *fn, tensor *grad_output) {
             float *ag = _grad_ensure(a);
             ag[_bcast_off(a, out_ndim, coord)] += g;
         }
-        if ((b->grad_fn || b->requires_grad) && b != a) {
+        if (b->grad_fn || b->requires_grad) {
             float *bg = _grad_ensure(b);
             bg[_bcast_off(b, out_ndim, coord)] += g;
         }
-    }
-
-    /* a == b: accumulated once, need d(a+a)/da = 2 */
-    if (a == b && (a->grad_fn || a->requires_grad)) {
-        float *ag = _grad_ensure(a);
-        int n = _numel(a->ndim, a->shape);
-        for (int i = 0; i < n; i++) ag[i] *= 2.0f;
     }
 }
 
@@ -120,7 +113,7 @@ static void sub_backward(grad_fn *fn, tensor *grad_output) {
             r /= grad_output->shape[d];
         }
 
-        float g = g_data[_flat_off(grad_output, i)];
+        float g = g_data[i];
 
         if (a->grad_fn || a->requires_grad) {
             float *ag = _grad_ensure(a);
@@ -195,7 +188,7 @@ static void mul_backward(grad_fn *fn, tensor *grad_output) {
             r /= grad_output->shape[d];
         }
 
-        float g = g_data[_flat_off(grad_output, i)];
+        float g = g_data[i];
         float bv = bd[_bcast_off(b, out_ndim, coord)];
         float av = ad[_bcast_off(a, out_ndim, coord)];
 
@@ -203,17 +196,10 @@ static void mul_backward(grad_fn *fn, tensor *grad_output) {
             float *ag = _grad_ensure(a);
             ag[_bcast_off(a, out_ndim, coord)] += bv * g;
         }
-        if ((b->grad_fn || b->requires_grad) && b != a) {
+        if (b->grad_fn || b->requires_grad) {
             float *bg = _grad_ensure(b);
             bg[_bcast_off(b, out_ndim, coord)] += av * g;
         }
-    }
-
-    /* a == b: d(a*a)/da = 2*a, so double the already-accumulated gradient */
-    if (a == b && (a->grad_fn || a->requires_grad)) {
-        float *ag = _grad_ensure(a);
-        int n = _numel(a->ndim, a->shape);
-        for (int i = 0; i < n; i++) ag[i] *= 2.0f;
     }
 }
 
@@ -286,7 +272,7 @@ static void div_backward(grad_fn *fn, tensor *grad_output) {
             r /= grad_output->shape[d];
         }
 
-        float g = g_data[_flat_off(grad_output, i)];
+        float g = g_data[i];
         float av = ad[_bcast_off(a, out_ndim, coord)];
         float bv = bd[_bcast_off(b, out_ndim, coord)];
 
@@ -348,26 +334,15 @@ tensor *tensor_div(const tensor *a, const tensor *b) {
 static void pow_backward(grad_fn *fn, tensor *grad_output) {
     tensor *a = fn->inputs[0];
     float exp = *(float*)fn->saved_tensors[0];
-
-    int out_ndim = grad_output->ndim;
-    int out_numel = _numel(grad_output->ndim, grad_output->shape);
+    int n = _numel(a->ndim, a->shape);
     float *g_data = (float*)grad_output->data;
     float *ad = (float*)a->data;
 
-    for (int i = 0; i < out_numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = out_ndim - 1; d >= 0; d--) {
-            coord[d] = r % grad_output->shape[d];
-            r /= grad_output->shape[d];
-        }
-
-        float g = g_data[_flat_off(grad_output, i)];
-
-        if (a->grad_fn || a->requires_grad) {
-            float *ag = _grad_ensure(a);
-            float av = ad[_bcast_off(a, out_ndim, coord)];
-            ag[_bcast_off(a, out_ndim, coord)] += exp * powf(av, exp - 1.0f) * g;
+    if (a->grad_fn || a->requires_grad) {
+        float *ag = _grad_ensure(a);
+        for (int i = 0; i < n; i++) {
+            int off = _flat_off(a, i);
+            ag[off] += exp * powf(ad[off], exp - 1.0f) * g_data[i];
         }
     }
 }
@@ -413,25 +388,13 @@ tensor *tensor_pow(const tensor *t, float exp) {
 
 static void neg_backward(grad_fn *fn, tensor *grad_output) {
     tensor *a = fn->inputs[0];
-
-    int out_ndim = grad_output->ndim;
-    int out_numel = _numel(grad_output->ndim, grad_output->shape);
+    int n = _numel(a->ndim, a->shape);
     float *g_data = (float*)grad_output->data;
 
-    for (int i = 0; i < out_numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = out_ndim - 1; d >= 0; d--) {
-            coord[d] = r % grad_output->shape[d];
-            r /= grad_output->shape[d];
-        }
-
-        float g = g_data[_flat_off(grad_output, i)];
-
-        if (a->grad_fn || a->requires_grad) {
-            float *ag = _grad_ensure(a);
-            ag[_bcast_off(a, out_ndim, coord)] -= g;
-        }
+    if (a->grad_fn || a->requires_grad) {
+        float *ag = _grad_ensure(a);
+        for (int i = 0; i < n; i++)
+            ag[_flat_off(a, i)] -= g_data[i];
     }
 }
 

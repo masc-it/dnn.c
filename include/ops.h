@@ -16,10 +16,14 @@ tensor *tensor_matmul(const tensor *a, const tensor *b);
 tensor *tensor_relu(const tensor *t);
 tensor *tensor_sigmoid(const tensor *t);
 tensor *tensor_tanh(const tensor *t);
+tensor *tensor_softmax(const tensor *t, int dim);
 
 /* ── Reduction ── */
 tensor *tensor_sum(const tensor *t, int dim);
 tensor *tensor_mean(const tensor *t, int dim);
+
+/* ── Loss ── */
+tensor *tensor_cross_entropy(const tensor *logits, const tensor *target, int dim);
 
 /* ── Utility ── */
 tensor *tensor_pow(const tensor *t, float exp);

@@ -35,7 +35,11 @@ float *_grad_ensure(tensor *t) {
     while (base->parent) base = base->parent;
     if (!base->grad) {
         int n = tensor_numel(base);
-        base->grad = mem_params_alloc(n * sizeof(float), NULL);
+        /* leaf params: persistent grads.  intermediates: ephemeral, reclaimed on scratch reset */
+        if (base->requires_grad && !base->grad_fn)
+            base->grad = mem_params_alloc(n * sizeof(float), NULL);
+        else
+            base->grad = mem_scratch_alloc(n * sizeof(float), NULL);
     }
     return base->grad;
 }
@@ -74,7 +78,10 @@ void dnn_backward(tensor *loss) {
 
     /* allocate and set loss gradient to all-ones (grad of sum(loss)) */
     if (!loss->grad) {
-        loss->grad = mem_params_alloc(tensor_numel(loss) * sizeof(float), NULL);
+        if (loss->requires_grad && !loss->grad_fn)
+            loss->grad = mem_params_alloc(tensor_numel(loss) * sizeof(float), NULL);
+        else
+            loss->grad = mem_scratch_alloc(tensor_numel(loss) * sizeof(float), NULL);
     }
     int numel = tensor_numel(loss);
     for (int i = 0; i < numel; i++) loss->grad[i] = 1.0f;
