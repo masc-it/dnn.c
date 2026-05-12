@@ -1,0 +1,8 @@
+# Build artifacts
+main
+*.dSYM/
+libdnn.a
+obj/
+
+# Editor / OS droppings
+.DS_Store

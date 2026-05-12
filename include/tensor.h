@@ -1,0 +1,45 @@
+#ifndef DNN_TENSOR_H
+#define DNN_TENSOR_H
+
+#define DNN_MAX_DIMS 8
+
+struct mem_pool;
+typedef struct grad_fn grad_fn;
+
+typedef struct tensor {
+    void    *data;
+    float   *grad;
+    int      shape[DNN_MAX_DIMS];
+    int      strides[DNN_MAX_DIMS];
+    int      ndim;
+    int      offset;
+    struct tensor *parent;
+    grad_fn *grad_fn;
+    struct mem_pool *pool;
+} tensor;
+
+/* ── Lifecycle ── */
+tensor *tensor_scratch_create_(int ndim, const int *shape, int requires_grad);
+tensor *tensor_zeros(int ndim, const int *shape, int requires_grad);
+tensor *tensor_randn(int ndim, const int *shape, int requires_grad);
+
+/* ── Views ── */
+tensor *tensor_slice(tensor *t, int dim, int start, int len);
+tensor *tensor_transpose(tensor *t, int d1, int d2);
+tensor *tensor_reshape(tensor *t, int ndim, const int *shape);
+tensor *tensor_flatten(tensor *t);
+tensor *tensor_contiguous(tensor *t);
+
+/* ── Accessors ── */
+float  *tensor_data_ptr(tensor *t);
+int     tensor_numel(const tensor *t);
+int     tensor_ndim(const tensor *t);
+int     tensor_shape(const tensor *t, int dim);
+
+/* ── Properties ── */
+int     tensor_is_contiguous(const tensor *t);
+int     tensor_requires_grad(const tensor *t);
+void    tensor_set_requires_grad(tensor *t, int req);
+void    tensor_print(const tensor *t);
+
+#endif /* DNN_TENSOR_H */
