@@ -30,6 +30,7 @@ static void ln_backward(grad_fn *fn, tensor *grad_output) {
     /* dγ = sum(d_out * y, over batch dims) — y = (x - μ) * rstd */
     if (weight && tensor_requires_grad(weight)) {
         float *wg = _grad_ensure(weight);
+#pragma omp parallel for
         for (int s = 0; s < n; s++) {
             float m = mean[s], rs = rstd[s];
             #pragma omp simd
@@ -43,6 +44,7 @@ static void ln_backward(grad_fn *fn, tensor *grad_output) {
     /* dβ = sum(d_out, over batch dims) */
     if (bias && tensor_requires_grad(bias)) {
         float *bg = _grad_ensure(bias);
+#pragma omp parallel for
         for (int s = 0; s < n; s++)
             #pragma omp simd
             for (int j = 0; j < d; j++)
@@ -52,6 +54,7 @@ static void ln_backward(grad_fn *fn, tensor *grad_output) {
     /* dx = rstd * (dy - mean(dy) - xmu * mean(dy * xmu) * rstd²) */
     if (tensor_requires_grad(x)) {
         float *xg = _grad_ensure(x);
+#pragma omp parallel for
         for (int s = 0; s < n; s++) {
             float m = mean[s], rs = rstd[s];
 
@@ -96,6 +99,7 @@ tensor *tensor_layer_norm(const tensor *x, const tensor *weight,
     float *rstd = mem_scratch_alloc(n * sizeof(float), NULL);
 
     /* pass 1: compute mean */
+#pragma omp parallel for
     for (int s = 0; s < n; s++) {
         float sum = 0.0f;
         #pragma omp simd reduction(+:sum)
@@ -105,6 +109,7 @@ tensor *tensor_layer_norm(const tensor *x, const tensor *weight,
     }
 
     /* pass 2: compute variance → rstd = 1/√(var + ε) */
+#pragma omp parallel for
     for (int s = 0; s < n; s++) {
         float m = mean[s];
         float sum = 0.0f;
@@ -122,6 +127,7 @@ tensor *tensor_layer_norm(const tensor *x, const tensor *weight,
     float *wd   = weight ? tensor_data_ptr((tensor*)weight) : NULL;
     float *bd   = bias   ? tensor_data_ptr((tensor*)bias)   : NULL;
 
+#pragma omp parallel for
     for (int s = 0; s < n; s++) {
         float m = mean[s], rs = rstd[s];
         #pragma omp simd

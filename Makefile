@@ -1,7 +1,8 @@
 CC       ?= gcc
 CFLAGS   ?= -Wall -Wextra -pedantic -std=c11 -O3 -ffast-math -g -DACCELERATE_NEW_LAPACK
-INCDIRS   = -Iinclude -Isrc
-LDFLAGS   = -lz
+INCDIRS   = -Iinclude -Isrc -I/opt/homebrew/opt/libomp/include
+LDFLAGS   = -lz -L/opt/homebrew/opt/libomp/lib -lomp
+OMPFLAGS  = -Xpreprocessor -fopenmp
 
 SRCDIR   = src
 OBJDIR   = obj
@@ -26,7 +27,7 @@ $(OBJDIR) $(TEST_OBJDIR):
 
 # compile .c -> .o with dep generation
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
-	$(CC) $(CFLAGS) $(INCDIRS) -MMD -MP -c $< -o $@
+	$(CC) $(CFLAGS) $(OMPFLAGS) $(INCDIRS) -MMD -MP -c $< -o $@
 
 # static library
 $(LIB): $(OBJS)
@@ -38,16 +39,16 @@ test: $(TEST_BINS)
 	@for t in $(TEST_BINS); do echo "  $$t:"; $$t && echo "    PASS" || echo "    FAIL"; done
 
 $(TEST_OBJDIR)/%: $(TESTDIR)/%.c $(LIB) | $(TEST_OBJDIR)
-	$(CC) $(CFLAGS) $(INCDIRS) $< -L. -ldnn -framework Accelerate $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) $(OMPFLAGS) $(INCDIRS) $< -L. -ldnn -framework Accelerate $(LDFLAGS) -o $@
 
 run: main $(LIB)
 	./main
 
 main: main.c $(LIB)
-	$(CC) $(CFLAGS) $(INCDIRS) $< -L. -ldnn -framework Accelerate $(LDFLAGS) -o $@
+	$(CC) $(CFLAGS) $(OMPFLAGS) $(INCDIRS) $< -L. -ldnn -framework Accelerate $(LDFLAGS) -o $@
 
-BENCH_CFLAGS = -Wall -Wextra -pedantic -std=c11 -O3 -ffast-math -g -DACCELERATE_NEW_LAPACK
-BENCH_LIBS  = -L. -ldnn -framework Accelerate
+BENCH_CFLAGS = -Wall -Wextra -pedantic -std=c11 -O3 -ffast-math -g -DACCELERATE_NEW_LAPACK $(OMPFLAGS)
+BENCH_LIBS  = -L. -ldnn -framework Accelerate $(LDFLAGS)
 
 bench_all: clean
 	mkdir -p $(OBJDIR) $(TEST_OBJDIR)

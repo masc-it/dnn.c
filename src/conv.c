@@ -22,6 +22,8 @@
 #  define NO_CBLAS 1
 #endif
 
+#include <omp.h>
+
 /* ══════════════════════════════════════════════════════════════════
  *  im2col / col2im helpers
  *
@@ -65,6 +67,7 @@ static void im2col(const float *x, float *col,
      *   — writes col sequentially (ow increments the M index)
      *   — padding positions remain zero from the memset above
      */
+#pragma omp parallel for
     for (int n = 0; n < N; n++) {
         int n_off = n * H_out * W_out;
         for (int c = 0; c < C; c++) {
@@ -116,6 +119,7 @@ static void col2im(const float *dcol, float *dx,
      * (oh, ow) ranges precomputed per (kh, kw) — bounds peel eliminates
      * all per-pixel conditionals in the hot path.
      */
+#pragma omp parallel for
     for (int c = 0; c < C; c++) {
         int k_c = c * kH * kW * M;
 
@@ -192,47 +196,49 @@ static void conv2d_backward(grad_fn *fn, tensor *grad_output) {
     /* ── d_bias: sum over (N, H_out, W_out) ── */
     if (bias && tensor_requires_grad(bias)) {
         float *bg = _grad_ensure(bias);
-        for (int n = 0; n < N; n++) {
-            for (int oc = 0; oc < out_C; oc++) {
-                float acc = 0.0f;
+#pragma omp parallel for
+        for (int oc = 0; oc < out_C; oc++) {
+            float acc = 0.0f;
+            for (int n = 0; n < N; n++)
                 for (int oh = 0; oh < H_out; oh++)
                     for (int ow = 0; ow < W_out; ow++)
                         acc += gd[(n * out_C + oc) * H_out * W_out
                                   + oh * W_out + ow];
-                bg[oc] += acc;
-            }
+            bg[oc] += acc;
         }
     }
 
     /* ── d_weight: gd^T @ col^T  =  (out_C,K) ← gd^T(out_C,M) @ col^T(M,K)
      *
-     *   col is (K, M); no transposition needed for the gd term, but col
-     *   must be transposed to get back to (M, K) for the matmul.
-     *   Both operands transposed keeps gd in its natural row-major stride.
+     *   col is (K, M).  gd is (M, out_C).
+     *   Parallelize over blocks of output channels.  Each thread does
+     *   a small sgemm on its slice of gd and wg.
      */
     if (tensor_requires_grad(weight)) {
         float *col = (float*)fn->saved_tensors[2];  /* reuse forward's col */
         float *wg = _grad_ensure(weight);
+        int dw_block = out_C > 16 ? 16 : out_C;
+#pragma omp parallel for
+        for (int oc = 0; oc < out_C; oc += dw_block) {
+            int oc_this = out_C - oc;
+            if (oc_this > dw_block) oc_this = dw_block;
 #if NO_CBLAS
-        for (int oc = 0; oc < out_C; oc++)
-            for (int k = 0; k < K; k++) {
-                float sum = 0.0f;
-                for (int m = 0; m < M; m++)
-                    sum += col[(size_t)k * M + m]   /* col(k, m) */
-                         * gd[(size_t)m * out_C + oc];
-                wg[(size_t)oc * K + k] += sum;
-            }
+            for (int oci = 0; oci < oc_this; oci++)
+                for (int k = 0; k < K; k++) {
+                    float sum = 0.0f;
+                    for (int m = 0; m < M; m++)
+                        sum += col[(size_t)k * M + m]
+                             * gd[(size_t)m * out_C + oc + oci];
+                    wg[(size_t)(oc + oci) * K + k] += sum;
+                }
 #else
-        /* wg(out_C,K) += gd^T(out_C,M) @ col^T(M,K)
-         *   gd is (M,out_C), ld=out_C → Trans → (out_C,M)
-         *   col is (K,M),   ld=M     → Trans → (M,K)
-         */
-        cblas_sgemm(CblasRowMajor, CblasTrans, CblasTrans,
-                    out_C, K, M,
-                    1.0f, gd, out_C,
-                    col, M,
-                    1.0f, wg, K);
+            cblas_sgemm(CblasRowMajor, CblasTrans, CblasTrans,
+                        oc_this, K, M,
+                        1.0f, gd + oc, out_C,
+                        col, M,
+                        1.0f, wg + (size_t)oc * K, K);
 #endif
+        }
     }
 
     /* ── d_input: col2im( gd(M,out_C) @ weight(out_C,K) ) ── */
@@ -242,26 +248,32 @@ static void conv2d_backward(grad_fn *fn, tensor *grad_output) {
         size_t _dcm = mem_pool_mark(_mem_pool_scratch());
         float *dcol = mem_scratch_alloc((size_t)K * M * sizeof(float), NULL);
 
+        /* dcol(K,M) = wd^T(K,out_C) @ gd^T(out_C,M)
+         *   Each row k of dcol is independent: sum_oc wd[oc][k] * gd[:,oc].
+         *   Parallelize over kernel elements — each thread writes one row.
+         */
+#pragma omp parallel for
+        for (int k = 0; k < K; k++) {
 #if NO_CBLAS
-        for (int k = 0; k < K; k++)
+            float *dcol_row = dcol + (size_t)k * M;
             for (int m = 0; m < M; m++) {
                 float sum = 0.0f;
                 for (int oc = 0; oc < out_C; oc++)
                     sum += gd[(size_t)m * out_C + oc]
                          * wd[(size_t)oc * K + k];
-                dcol[(size_t)k * M + m] = sum;
+                dcol_row[m] = sum;
             }
 #else
-        /* dcol(K,M) = wd^T(K,out_C) @ gd^T(out_C,M)
-         *   wd is (out_C,K), ld=K → Trans → (K,out_C)
-         *   gd is (M,out_C), ld=out_C → Trans → (out_C,M)
-         */
-        cblas_sgemm(CblasRowMajor, CblasTrans, CblasTrans,
-                    K, M, out_C,
-                    1.0f, wd, K,
-                    gd, out_C,
-                    0.0f, dcol, M);
+            /* y(M) = gd(M,out_C) @ wd_col_k(out_C,)  — sgemv NoTrans
+             *   gd: M×out_C, lda=out_C
+             *   wd[:,k]: out_C elements, stride=K
+             *   y: M elements, stride=1
+             */
+            cblas_sgemv(CblasRowMajor, CblasNoTrans,
+                        M, out_C, 1.0f, gd, out_C, wd + k, K,
+                        0.0f, dcol + (size_t)k * M, 1);
 #endif
+        }
 
         col2im(dcol, xg, N, C, H, W, kH, kW, pad, stride);
 
@@ -314,32 +326,48 @@ tensor *tensor_conv2d(tensor *input, tensor *weight, tensor *bias,
 
     im2col(xd, col, N, C, H, W, kH, kW, pad, stride);
 
-    /* matmul: col^T(M,K) @ wd^T(K,out_C) = out(M,out_C)
+    /* matmul with channel-parallel sgemm/blocks
      *
      * col stored as (K, M).  wd stored as (out_C, K).
-     * Both transposed gives the correct inner-product order.
-     *
-     * BLAS: C = A^T @ B^T   →   od = col^T @ wd^T
+     * Split out_C into blocks (~16 channels each), run each block's
+     * sgemm on a separate thread.  Each writes disjoint columns of od.
      */
 #if NO_CBLAS
-    for (int m = 0; m < M; m++) {
-        for (int oc = 0; oc < out_C; oc++) {
+#pragma omp parallel for
+    for (int oc = 0; oc < out_C; oc++) {
+        for (int m = 0; m < M; m++) {
             float sum = 0.0f;
             for (int k = 0; k < K; k++)
                 sum += col[(size_t)k * M + m] * wd[(size_t)oc * K + k];
-            od[(size_t)m * out_C + oc] = sum;
+            od[(size_t)m * out_C + oc] = sum + (bd ? bd[oc] : 0.0f);
         }
     }
 #else
-    if (bd) {
-        /* pre-fill od with bias, then sgemm adds A@B via beta=1 */
-        for (int m = 0; m < M; m++)
-            memcpy(&od[(size_t)m * out_C], bd, (size_t)out_C * sizeof(float));
-        cblas_sgemm(CblasRowMajor, CblasTrans, CblasTrans,
-                    M, out_C, K, 1.0f, col, M, wd, K, 1.0f, od, out_C);
-    } else {
-        cblas_sgemm(CblasRowMajor, CblasTrans, CblasTrans,
-                    M, out_C, K, 1.0f, col, M, wd, K, 0.0f, od, out_C);
+    {
+        int block_c = out_C > 16 ? 16 : out_C;
+        if (bd) {
+            /* pre-fill od with bias then beta=1 accum */
+#pragma omp parallel for
+            for (int oc = 0; oc < out_C; oc += block_c) {
+                int oc_this = out_C - oc;
+                if (oc_this > block_c) oc_this = block_c;
+                for (int m = 0; m < M; m++)
+                    memcpy(&od[(size_t)m * out_C + oc], bd + oc,
+                           (size_t)oc_this * sizeof(float));
+                cblas_sgemm(CblasRowMajor, CblasTrans, CblasTrans,
+                            M, oc_this, K, 1.0f, col, M, wd + (size_t)oc * K, K,
+                            1.0f, od + oc, out_C);
+            }
+        } else {
+#pragma omp parallel for
+            for (int oc = 0; oc < out_C; oc += block_c) {
+                int oc_this = out_C - oc;
+                if (oc_this > block_c) oc_this = block_c;
+                cblas_sgemm(CblasRowMajor, CblasTrans, CblasTrans,
+                            M, oc_this, K, 1.0f, col, M, wd + (size_t)oc * K, K,
+                            0.0f, od + oc, out_C);
+            }
+        }
     }
 #endif
 

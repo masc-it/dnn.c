@@ -7,6 +7,7 @@
 #include <math.h>
 #include <assert.h>
 #include <zlib.h>
+#include <time.h>
 
 /* ================================================================
  *  Internal helpers
@@ -256,6 +257,9 @@ static void mnist_train_impl(
 
         double epoch_loss = 0.0;
 
+        struct timespec epoch_t0;
+        clock_gettime(CLOCK_MONOTONIC, &epoch_t0);
+
         for (int b = 0; b < n_batches; b++) {
             int start = b * batch_size;
             int bs    = (b == n_batches - 1) ? tr_n - start : batch_size;
@@ -295,6 +299,12 @@ static void mnist_train_impl(
             if (b > 0 && b % 100 == 0)
                 printf("    batch %4d/%d  loss %.6f\r", b, n_batches, loss_val);
         }
+
+        struct timespec epoch_t1;
+        clock_gettime(CLOCK_MONOTONIC, &epoch_t1);
+        double epoch_sec = (double)(epoch_t1.tv_sec - epoch_t0.tv_sec)
+                         + (double)(epoch_t1.tv_nsec - epoch_t0.tv_nsec) / 1e9;
+        double batches_per_sec = (double)n_batches / epoch_sec;
 
         printf("  epoch %3d/%d  loss %.6f",
                epoch + 1, epochs, epoch_loss / n_batches);
@@ -358,7 +368,7 @@ static void mnist_train_impl(
             }
         }
 
-        printf("\n");
+        printf("  %.1f batch/s\n", batches_per_sec);
     }
 
     free(indices);
