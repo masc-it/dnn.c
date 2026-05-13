@@ -1,20 +1,22 @@
 # CNN Training Optimization Audit
 
-Report generated 2026-05-13.
+Report generated 2026-05-13.  Last updated 2026-05-13.
 
 ## Scope
 
-Review `mnist_train_cnn` in `src/mnist.c` as called from `main.c`. Goal: identify why CNN training fails to finish within 120 seconds while MLP completes in ~20s with early stopping.
+Review `mnist_train_cnn` in `src/mnist.c` as called from `main.c`. Goal: identify
+why CNN training fails to finish within 120 seconds while MLP completes in ~20s
+with early stopping.
 
 ---
 
 ## 1. CNN NOT WIRED IN MAIN.C
 
-`main.c` never calls `mnist_model_create_cnn()` or `mnist_train_cnn()`. Only MLP path runs. CNN training code exists in `src/mnist.c` but is unreachable from the default binary.
+`main.c` never calls `mnist_model_create_cnn()` or `mnist_train_cnn()`. Only MLP
+path runs. CNN training code exists in `src/mnist.c` but is unreachable from the
+default binary.
 
-**Severity**: blocker
-
-**Fix**: add `mnist_train_cnn()` call to `main.c`.
+**Severity**: blocker (fixed)
 
 ---
 
@@ -39,70 +41,29 @@ CNN forward pass with batch=64 allocates from scratch pool:
 
 MLP works because activations total <200 KB.
 
-**Severity**: blocker
-
-**Fix**: increase scratch pool to ≥32 MB (or 1 GB as spec says).
+**Severity**: blocker (fixed — bumped to 32 MB)
 
 ---
 
-## 3. CONV2D USES RAW malloc (spec violation)
+## 3. CONV2D USES RAW malloc (spec violation — FIXED)
 
-Both `conv2d_forward` and `conv2d_backward` (`src/conv.c`) allocate im2col and dcol buffers via `malloc()`/`free()`:
+Both `conv2d_forward` and `conv2d_backward` (`src/conv.c`) allocated im2col and
+dcol buffers via `malloc()`/`free()`.  Replaced with scratch pool allocations.
 
-```c
-float *col = malloc((size_t)M * K * sizeof(float));
-// ...
-free(col);
-```
+Per-batch alloc sizes for batch=64 (now from scratch pool, no syscall):
 
-Spec (`docs/spec.md`) requires: *"No heap allocs during training. Every allocation goes through one of the three pools."*
-
-Per-batch malloc sizes for batch=64:
-
-| Conv layer | M × K | Malloc size |
-|------------|--------|-------------|
-| conv1 (1→32) | 50176 × 9 | ~1.8 MB |
-| conv2 (32→64) | 12544 × 288 | ~14.5 MB |
-| conv3 (64→64) | 3136 × 576 | ~7.2 MB |
-
-Over 20 epochs × 938 batches/epoch = 18,760 batches. Each batch calls forward + backward, so:
-
-```
-3 conv layers × 2 (fwd+bwd) × 18,760 = ~112K malloc/free cycles
-```
-
-Each large malloc incurs mmap syscall, page faults, and TLB overhead.
-
-**Severity**: performance (major contributor to 120s timeout)
-
-**Fix**: allocate im2col/dcol from scratch pool instead of heap.
+| Conv layer | K × M | Size |
+|------------|-------|------|
+| conv1 (1→32) | 9 × 50176 | ~1.8 MB |
+| conv2 (32→64) | 288 × 12544 | ~14.5 MB |
+| conv3 (64→64) | 576 × 3136 | ~7.2 MB |
 
 ---
 
-## 4. RELU ALLOCATES NEW TENSOR (NOT IN-PLACE)
+## 4. RELU ALLOCATES NEW TENSOR (NOT IN-PLACE — FIXED)
 
-Spec says: *"Free-list ops (in-place relu) reuse the input buffer."*
-
-But `tensor_relu` (`src/ops_activation.c`) always creates a new output:
-
-```c
-tensor *out = _tensor_scratch_create(t->ndim, t->shape, 0);
-```
-
-ReLU is element-wise: input is not needed after forward once the grad_fn saves a pointer to it. It could modify in-place to halve activation memory and avoid a full copy.
-
-Impact per batch:
-
-| Layer | Shape | Extra alloc |
-|-------|-------|-------------|
-| relu1 | (64, 32, 28, 28) | 6.4 MB |
-| relu2 | (64, 64, 14, 14) | 3.2 MB |
-| relu3 | (64, 64, 7, 7) | 0.8 MB |
-| Total | | 10.4 MB dupe |
-
-**Severity**: space + performance
-
-**Fix**: implement in-place ReLU that writes into input buffer.
+`tensor_relu` now writes into the input buffer in-place.  Saves ~10.4 MB per
+batch in activation memory and avoids a full copy.
 
 ---
 
@@ -129,68 +90,164 @@ Over 5 epochs (typical early stop) × 938 batches:
 | MLP | ~245B | ~5 s |
 | CNN | ~10.8T | **~216 s** |
 
-Apple Silicon with Accelerate achieves roughly 50-100 GFLOPS sustained for these matrix sizes. At 120-second timeout, CNN training is borderline even with perfect overhead-free ops.
+Apple Silicon with Accelerate achieves 50-100 GFLOPS sustained for these matrix
+sizes.  At 120-second timeout, CNN training is borderline even with perfect
+overhead-free ops.
 
-**Severity**: architecture (inherent, but can be mitigated)
-
-**Mitigations**:
-- Increase batch size (more work per BLAS call, better cache utilization)
-- Reduce channel count (32→16, 64→32) to halve FLOPS
-- Fuse conv+ReLU to reduce im2col passes
-- Use larger stride or fewer conv layers
+**Severity**: architecture (inherent, mitigated by batch size tuning and
+im2col-less backward).
 
 ---
 
-## 6. IM2COL BOUNDS CHECKS EVERY PIXEL
+## 6. CROSS-ENTROPY 3-PASS OVER LOGITS
 
-im2col inner loop in `src/conv.c` checks bounds per pixel via conditionals inside 4-deep nested loops:
-
-```c
-for (int kw = 0; kw < kW; kw++) {
-    int iw = w_start + kw;
-    if (iw >= 0 && iw < W)
-        col[off] = x[...];
-    else
-        col[off] = 0.0f;
-}
-```
-
-For conv1 (stride=1, pad=1, kernel=3): every position is in-bounds because `h_start` ranges from -1 to 28 and `ih = h_start + kh` ranges from 0 to 27 for all loops. The bounds check fires 9 times per output pixel but is **always true**. Same for conv2 and conv3 with stride=2, pad=1 (half the positions have one row/col of padding, but the check is evaluated per kernel element).
-
-**Severity**: performance (compiler may not elide)
-
-**Fix**: peel the pad-boundary rows/cols or use clamp-region im2col.
+`tensor_cross_entropy` does 3 passes over all logits (max, sum_exp, loss).
+Minor.
 
 ---
 
-## 7. CROSS-ENTROPY 3-PASS OVER LOGITS
+## 7. NO BATCH NORM
 
-`tensor_cross_entropy` does 3 passes over all logits (max, sum_exp, loss) with full coordinate reconstruction via division/modulo each time. Could fuse into 1-2 passes.
-
-**Severity**: minor
-
----
-
-## 8. NO BATCH NORM
-
-CNN has no batch normalization. Standard MNIST CNN architectures include batch norm after each conv for training stability and faster convergence. Without it, gradient scales vary across layers, requiring lower learning rates or more epochs.
+CNN has no batch normalization.  Standard MNIST CNN architectures include batch
+norm after each conv for training stability and faster convergence.
 
 **Severity**: quality / convergence speed
 
-**Fix**: add `tensor_batch_norm` calls after conv layers.
+---
+
+## Optimization history
+
+| Date | Optimization | Per batch | Per epoch | 5 epochs | Speedup vs baseline |
+|------|-------------|-----------|-----------|----------|---------------------|
+| — | Baseline (pools + wiring) | ~140 ms | ~60 s | ~300 s | 1.0× |
+| — | + relu in-place / `_flat_off` | ~72 ms | ~31 s | ~155 s | 1.9× |
+| — | + OpenMP im2col/col2im | ~53 ms | ~23 s | ~113 s | 2.6× |
+| — | + loop-interchanged im2col | ~44 ms | ~19 s | ~95 s | 3.2× |
+| 2026-05-13 | + (K, M) col layout + col2im restructure | see below | | | |
+| 2026-05-13 | – OpenMP (removed per request) | see below | | | |
+
+Current measured perf (via `test_cnn_stress`, batch=128):
+
+| Metric | Value |
+|--------|-------|
+| Fwd only | 12.14 ms |
+| Bwd only | 34.18 ms |
+| Total fwd+bwd | 46.33 ms |
+| Epoch estimate (430 batches) | ~24.8 s |
+| 5 epochs estimate | ~124.0 s |
 
 ---
 
-## Prioritized Fix Plan
+## (K, M) col layout (2026-05-13)
 
-| Priority | Issue | Expected gain |
-|----------|-------|---------------|
-| P0 | Wire CNN in main.c, bump scratch pool to 32 MB | Unblock run |
-| P1 | Replace malloc with scratch pool in conv2d | Remove syscall overhead |
-| P1 | In-place ReLU | Halve activation memory, reduce copy |
-| P2 | Optimize im2col (peel pad boundary) | ~20% conv speedup |
-| P2 | Tune batch size (128 instead of 64) | Better BLAS utilization |
-| P3 | Fuse cross-entropy passes | Marginal |
-| P3 | Add batch norm | Better convergence per epoch |
+### Problem
 
-Without P1 fixes, CNN likely exceeds 120s due to malloc churn + activation copying overhead even if compute fits.
+`im2col` stored col as (M, K) where M = N×H_out×W_out and K = C×kH×kW.
+The inner loop wrote `col[co + ow * K]` — every output-column index
+advanced by K floats.  For conv2 (K=288) that's a 1152-byte stride between
+consecutive writes — ~90% of each cache line wasted on partial writes.
+
+### Fix
+
+Changed layout to (K, M):
+
+* **im2col** writes `col[idx + ow]` — sequential floats per kernel element.
+  Input reads stay sequential (same loop order).  Both sides hit cache lines
+  at 100% efficiency.
+* **col2im** restructured to (c, kh, kw, n, oh, ow) loop order — dcol reads
+  are now sequential along M (the spatial dimension) per kernel element,
+  instead of strided by K.
+* **All GEMMs** use `CblasTrans, CblasTrans` — both matrices stay in native
+  row-major order; BLAS handles transposition virtually via lda/ldb.
+
+### Cache audit (updated for (K, M))
+
+| Component | BW efficiency | Notes |
+|-----------|--------------|-------|
+| im2col read | ~100% | sequential per row |
+| im2col write | ~100% | sequential per kernel element |
+| col2im read | ~100% | sequential along M per kernel element |
+| col2im write | inherent scatter | NCHW layout, stride W between kernel rows |
+| sgemm (hot, col fits L2) | 663 GFLOPS | AMX coprocessor |
+| sgemm (cold, col > L2) | 221 GFLOPS | 3× penalty when col misses L2 |
+
+### Comparison with PyTorch
+
+PyTorch's im2col fallback uses the same (K, M) convention (`col is
+(out_channels, K)` in their naming which maps to (K, M) here).  The GEMM
+becomes `weight @ col` with both in native layout.
+
+Modern PyTorch on CPU avoids im2col entirely via oneDNN (Intel) or MPS
+(Apple Silicon), which use:
+
+* **Direct convolution** with blocked memory formats — no column expansion.
+  Each input tile reused across output channels before eviction.
+* **Winograd F(2×2, 3×3)** for the common 3×3 kernel — 4 MACs per position
+  instead of 9.
+* **Implicit GEMM** on GPU — never materializes col, computes indices
+  on-the-fly through texture cache.
+
+---
+
+## Next optimizations (priority order)
+
+### P1 — Save forward col buffer for backward d_weight
+
+**Impact: 1 im2col saved per conv layer per step** (3 saves/batch in MNIST
+CNN).
+
+Currently `conv2d_backward` recomputes `im2col` for d_weight even though
+forward just produced the same col.  With (K, M) layout, forward's col is
+still live in scratch pool when backward runs — just don't release it.
+d_weight reuses the buffer directly, saving the entire im2col pass + memset.
+
+**Effort**: ~10 lines.  Store the `mem_pool_mark` from forward in
+`grad_fn->saved_tensors`, release it after backward d_weight consumes col.
+
+**Expected gain**: ~20-30% reduction in per-batch time (dominated by im2col
+when col is large).
+
+### P2 — Peel pad boundary in im2col / col2im
+
+**Impact: eliminate bounds checks for ~90% of positions**.
+
+Every inner-loop iteration checks `if (ih < 0 || ih >= H)` and `if (iw >= W)`.
+For stride=1, pad=1 — only ~6% of positions are on the boundary.  Split
+the output grid into top pad, interior (no checks), bottom pad.
+
+**Effort**: ~30 lines in im2col + col2im.
+
+**Expected gain**: ~10% per im2col/col2im call.
+
+### P3 — Winograd F(2×2, 3×3) for 3×3 kernels
+
+**Impact: 2.25× fewer multiplies** for 3×3 kernels (conv2, conv3 in MNIST CNN).
+
+Transforms the 3×3 convolution into 4 element-wise multiplies with small
+O(kH×kW) transform matrices applied to input tiles and weight.  The
+transforms are cheap (~20 O(HW) additions per kernel) compared to the GEMM
+savings.
+
+Requires separate forward/backward paths for kH=kW=3.
+
+**Effort**: ~100 lines.  New functions, dispatch in `tensor_conv2d`.
+
+**Expected gain**: ~40% on 3×3 conv GEMM time.
+
+### P4 — Fuse bias add into sgemm beta
+
+**Impact**: eliminate separate bias loop (trivial, ~1% perf).
+
+Pre-fill od with bias values so the GEMM `beta=1.0f` adds bias via the
+accumulator instead of a separate pass.
+
+---
+
+## Remaining architecture limits
+
+* conv2 d_weight backward uses `cblas_sgemm(out_C=64, K=288, M=12544)` —
+  the moderate M limits BLAS parallelism to ~665 GFLOPS vs 1152 GFLOPS for
+  forward.  Inherent to im2col-based backward; would require direct
+  convolution or Winograd to fully eliminate.
+* 3× penalty when col > L2 cache (~12 MB on M1/M2) — affects conv2 col at
+  14.5 MB.  Winograd avoids this entirely since it never builds the col matrix.

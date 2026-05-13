@@ -317,7 +317,7 @@ static int test_cnn_timing(void) {
 
 int main(void) {
     mem_pool params  = mem_pool_create(12 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(128 * 1024 * 1024);
+    mem_pool scratch = mem_pool_create(192 * 1024 * 1024);
     mem_pool data    = mem_pool_create(1 * 1024 * 1024);
     mem_pool_set_defaults(&params, &scratch, &data);
 

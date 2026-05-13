@@ -16,35 +16,43 @@ static void add_backward(grad_fn *fn, tensor *grad_output) {
     tensor *a = fn->inputs[0];
     tensor *b = fn->inputs[1];
 
-    int out_ndim = grad_output->ndim;
-    int out_numel = _numel(grad_output->ndim, grad_output->shape);
-    float *g_data = (float*)grad_output->data;
+    int out_numel = tensor_numel(grad_output);
+    float *g_data = tensor_data_ptr(grad_output);  /* contiguous */
 
-    /* accumulate only — backward never zeros. user calls zero_grad() before backward */
-    for (int i = 0; i < out_numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = out_ndim - 1; d >= 0; d--) {
-            coord[d] = r % grad_output->shape[d];
-            r /= grad_output->shape[d];
-        }
-
-        float g = g_data[i];
-
-        /* accumulate into any tensor that needs gradient —
-           either to propagate (grad_fn) or to store on leaf (requires_grad) */
+    /* Fast path: both same shape as grad_output, no broadcasting */
+    if (_grad_contiguous(a, grad_output) && _grad_contiguous(b, grad_output)) {
         if (a->grad_fn || a->requires_grad) {
             float *ag = _grad_ensure(a);
-            ag[_bcast_off(a, out_ndim, coord)] += g;
+            #pragma omp simd
+            for (int i = 0; i < out_numel; i++) ag[i] += g_data[i];
         }
         if (b->grad_fn || b->requires_grad) {
             float *bg = _grad_ensure(b);
-            bg[_bcast_off(b, out_ndim, coord)] += g;
+            #pragma omp simd
+            for (int i = 0; i < out_numel; i++) bg[i] += g_data[i];
+        }
+        return;
+    }
+    for (int i = 0; i < out_numel; i++) {
+        int coord[DNN_MAX_DIMS];
+        int r = i;
+        for (int d = grad_output->ndim - 1; d >= 0; d--) {
+            coord[d] = r % grad_output->shape[d];
+            r /= grad_output->shape[d];
+        }
+        float g = g_data[i];
+        if (a->grad_fn || a->requires_grad) {
+            float *ag = _grad_ensure(a);
+            ag[_bcast_off(a, grad_output->ndim, coord)] += g;
+        }
+        if (b->grad_fn || b->requires_grad) {
+            float *bg = _grad_ensure(b);
+            bg[_bcast_off(b, grad_output->ndim, coord)] += g;
         }
     }
 }
 
-/* ── Arithmetic ── */
+/* ── tensor_add ── */
 
 tensor *tensor_add(const tensor *a, const tensor *b) {
     assert(a && b);
@@ -57,18 +65,28 @@ tensor *tensor_add(const tensor *a, const tensor *b) {
     tensor *out = _tensor_scratch_create(ndim_out, shape_out, 0);
     int numel = _numel(ndim_out, shape_out);
     float *od = (float*)out->data;
-    float *ad = (float*)a->data;
-    float *bd = (float*)b->data;
 
-    for (int i = 0; i < numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = ndim_out - 1; d >= 0; d--) {
-            coord[d] = r % shape_out[d];
-            r /= shape_out[d];
+    if (_same_contiguous(a, b)) {
+        /* Fast path: same contiguous shape, no broadcasting */
+        float *af = (float*)a->data + a->offset;
+        float *bf = (float*)b->data + b->offset;
+        #pragma omp simd
+        for (int i = 0; i < numel; i++)
+            od[i] = af[i] + bf[i];
+    } else {
+        /* General broadcast path */
+        float *ad = (float*)a->data;
+        float *bd = (float*)b->data;
+        for (int i = 0; i < numel; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = ndim_out - 1; d >= 0; d--) {
+                coord[d] = r % shape_out[d];
+                r /= shape_out[d];
+            }
+            od[out->offset + i] = ad[_bcast_off(a, ndim_out, coord)]
+                                + bd[_bcast_off(b, ndim_out, coord)];
         }
-        od[out->offset + i] = ad[_bcast_off(a, ndim_out, coord)]
-                            + bd[_bcast_off(b, ndim_out, coord)];
     }
 
     /* autograd tape */
@@ -101,30 +119,43 @@ static void sub_backward(grad_fn *fn, tensor *grad_output) {
         return;
     }
 
-    int out_ndim = grad_output->ndim;
-    int out_numel = _numel(grad_output->ndim, grad_output->shape);
-    float *g_data = (float*)grad_output->data;
+    int out_numel = tensor_numel(grad_output);
+    float *g_data = tensor_data_ptr(grad_output);
 
-    for (int i = 0; i < out_numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = out_ndim - 1; d >= 0; d--) {
-            coord[d] = r % grad_output->shape[d];
-            r /= grad_output->shape[d];
-        }
-
-        float g = g_data[i];
-
+    /* Fast path */
+    if (_grad_contiguous(a, grad_output) && _grad_contiguous(b, grad_output)) {
         if (a->grad_fn || a->requires_grad) {
             float *ag = _grad_ensure(a);
-            ag[_bcast_off(a, out_ndim, coord)] += g;
+            #pragma omp simd
+            for (int i = 0; i < out_numel; i++) ag[i] += g_data[i];
         }
         if (b->grad_fn || b->requires_grad) {
             float *bg = _grad_ensure(b);
-            bg[_bcast_off(b, out_ndim, coord)] -= g;
+            #pragma omp simd
+            for (int i = 0; i < out_numel; i++) bg[i] -= g_data[i];
+        }
+        return;
+    }
+    for (int i = 0; i < out_numel; i++) {
+        int coord[DNN_MAX_DIMS];
+        int r = i;
+        for (int d = grad_output->ndim - 1; d >= 0; d--) {
+            coord[d] = r % grad_output->shape[d];
+            r /= grad_output->shape[d];
+        }
+        float g = g_data[i];
+        if (a->grad_fn || a->requires_grad) {
+            float *ag = _grad_ensure(a);
+            ag[_bcast_off(a, grad_output->ndim, coord)] += g;
+        }
+        if (b->grad_fn || b->requires_grad) {
+            float *bg = _grad_ensure(b);
+            bg[_bcast_off(b, grad_output->ndim, coord)] -= g;
         }
     }
 }
+
+/* ── tensor_sub ── */
 
 tensor *tensor_sub(const tensor *a, const tensor *b) {
     assert(a && b);
@@ -137,21 +168,28 @@ tensor *tensor_sub(const tensor *a, const tensor *b) {
     tensor *out = _tensor_scratch_create(ndim_out, shape_out, 0);
     int numel = _numel(ndim_out, shape_out);
     float *od = (float*)out->data;
-    float *ad = (float*)a->data;
-    float *bd = (float*)b->data;
 
-    for (int i = 0; i < numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = ndim_out - 1; d >= 0; d--) {
-            coord[d] = r % shape_out[d];
-            r /= shape_out[d];
+    if (_same_contiguous(a, b)) {
+        float *af = (float*)a->data + a->offset;
+        float *bf = (float*)b->data + b->offset;
+        #pragma omp simd
+        for (int i = 0; i < numel; i++)
+            od[i] = af[i] - bf[i];
+    } else {
+        float *ad = (float*)a->data;
+        float *bd = (float*)b->data;
+        for (int i = 0; i < numel; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = ndim_out - 1; d >= 0; d--) {
+                coord[d] = r % shape_out[d];
+                r /= shape_out[d];
+            }
+            od[out->offset + i] = ad[_bcast_off(a, ndim_out, coord)]
+                                - bd[_bcast_off(b, ndim_out, coord)];
         }
-        od[out->offset + i] = ad[_bcast_off(a, ndim_out, coord)]
-                            - bd[_bcast_off(b, ndim_out, coord)];
     }
 
-    /* autograd tape */
     if (dnn_grad_enabled() &&
         (tensor_requires_grad(a) || tensor_requires_grad(b))) {
         grad_fn *fn = _grad_fn_create();
@@ -164,7 +202,6 @@ tensor *tensor_sub(const tensor *a, const tensor *b) {
         out->requires_grad = 1;
         out->grad_fn = fn;
     }
-
     return out;
 }
 
@@ -174,34 +211,51 @@ static void mul_backward(grad_fn *fn, tensor *grad_output) {
     tensor *a = fn->inputs[0];
     tensor *b = fn->inputs[1];
 
-    int out_ndim = grad_output->ndim;
-    int out_numel = _numel(grad_output->ndim, grad_output->shape);
-    float *g_data = (float*)grad_output->data;
-    float *ad = (float*)a->data;
-    float *bd = (float*)b->data;
+    int out_numel = tensor_numel(grad_output);
+    float *g_data = tensor_data_ptr(grad_output);
 
-    for (int i = 0; i < out_numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = out_ndim - 1; d >= 0; d--) {
-            coord[d] = r % grad_output->shape[d];
-            r /= grad_output->shape[d];
-        }
-
-        float g = g_data[i];
-        float bv = bd[_bcast_off(b, out_ndim, coord)];
-        float av = ad[_bcast_off(a, out_ndim, coord)];
-
+    /* Fast path */
+    if (_grad_contiguous(a, grad_output) && _grad_contiguous(b, grad_output)) {
+        float *af = (float*)a->data + a->offset;
+        float *bf = (float*)b->data + b->offset;
         if (a->grad_fn || a->requires_grad) {
             float *ag = _grad_ensure(a);
-            ag[_bcast_off(a, out_ndim, coord)] += bv * g;
+            #pragma omp simd
+            for (int i = 0; i < out_numel; i++)
+                ag[i] += bf[i] * g_data[i];
         }
         if (b->grad_fn || b->requires_grad) {
             float *bg = _grad_ensure(b);
-            bg[_bcast_off(b, out_ndim, coord)] += av * g;
+            #pragma omp simd
+            for (int i = 0; i < out_numel; i++)
+                bg[i] += af[i] * g_data[i];
+        }
+        return;
+    }
+    float *ad = (float*)a->data;
+    float *bd = (float*)b->data;
+    for (int i = 0; i < out_numel; i++) {
+        int coord[DNN_MAX_DIMS];
+        int r = i;
+        for (int d = grad_output->ndim - 1; d >= 0; d--) {
+            coord[d] = r % grad_output->shape[d];
+            r /= grad_output->shape[d];
+        }
+        float g = g_data[i];
+        float av = ad[_bcast_off(a, grad_output->ndim, coord)];
+        float bv = bd[_bcast_off(b, grad_output->ndim, coord)];
+        if (a->grad_fn || a->requires_grad) {
+            float *ag = _grad_ensure(a);
+            ag[_bcast_off(a, grad_output->ndim, coord)] += bv * g;
+        }
+        if (b->grad_fn || b->requires_grad) {
+            float *bg = _grad_ensure(b);
+            bg[_bcast_off(b, grad_output->ndim, coord)] += av * g;
         }
     }
 }
+
+/* ── tensor_mul ── */
 
 tensor *tensor_mul(const tensor *a, const tensor *b) {
     assert(a && b);
@@ -214,21 +268,28 @@ tensor *tensor_mul(const tensor *a, const tensor *b) {
     tensor *out = _tensor_scratch_create(ndim_out, shape_out, 0);
     int numel = _numel(ndim_out, shape_out);
     float *od = (float*)out->data;
-    float *ad = (float*)a->data;
-    float *bd = (float*)b->data;
 
-    for (int i = 0; i < numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = ndim_out - 1; d >= 0; d--) {
-            coord[d] = r % shape_out[d];
-            r /= shape_out[d];
+    if (_same_contiguous(a, b)) {
+        float *af = (float*)a->data + a->offset;
+        float *bf = (float*)b->data + b->offset;
+        #pragma omp simd
+        for (int i = 0; i < numel; i++)
+            od[i] = af[i] * bf[i];
+    } else {
+        float *ad = (float*)a->data;
+        float *bd = (float*)b->data;
+        for (int i = 0; i < numel; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = ndim_out - 1; d >= 0; d--) {
+                coord[d] = r % shape_out[d];
+                r /= shape_out[d];
+            }
+            od[out->offset + i] = ad[_bcast_off(a, ndim_out, coord)]
+                                * bd[_bcast_off(b, ndim_out, coord)];
         }
-        od[out->offset + i] = ad[_bcast_off(a, ndim_out, coord)]
-                            * bd[_bcast_off(b, ndim_out, coord)];
     }
 
-    /* autograd tape */
     if (dnn_grad_enabled() &&
         (tensor_requires_grad(a) || tensor_requires_grad(b))) {
         grad_fn *fn = _grad_fn_create();
@@ -241,7 +302,6 @@ tensor *tensor_mul(const tensor *a, const tensor *b) {
         out->requires_grad = 1;
         out->grad_fn = fn;
     }
-
     return out;
 }
 
@@ -251,41 +311,57 @@ static void div_backward(grad_fn *fn, tensor *grad_output) {
     tensor *a = fn->inputs[0];
     tensor *b = fn->inputs[1];
 
-    /* d(a/a)/da = 0 — constant 1, no gradient flows through */
     if (a == b) {
         if (a->requires_grad && !a->grad_fn)
             _grad_ensure(a);
         return;
     }
 
-    int out_ndim = grad_output->ndim;
-    int out_numel = _numel(grad_output->ndim, grad_output->shape);
-    float *g_data = (float*)grad_output->data;
-    float *ad = (float*)a->data;
-    float *bd = (float*)b->data;
+    int out_numel = tensor_numel(grad_output);
+    float *g_data = tensor_data_ptr(grad_output);
 
-    for (int i = 0; i < out_numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = out_ndim - 1; d >= 0; d--) {
-            coord[d] = r % grad_output->shape[d];
-            r /= grad_output->shape[d];
-        }
-
-        float g = g_data[i];
-        float av = ad[_bcast_off(a, out_ndim, coord)];
-        float bv = bd[_bcast_off(b, out_ndim, coord)];
-
+    /* Fast path */
+    if (_grad_contiguous(a, grad_output) && _grad_contiguous(b, grad_output)) {
+        float *af = (float*)a->data + a->offset;
+        float *bf = (float*)b->data + b->offset;
         if (a->grad_fn || a->requires_grad) {
             float *ag = _grad_ensure(a);
-            ag[_bcast_off(a, out_ndim, coord)] += (1.0f / bv) * g;
+            #pragma omp simd
+            for (int i = 0; i < out_numel; i++)
+                ag[i] += (1.0f / bf[i]) * g_data[i];
         }
         if (b->grad_fn || b->requires_grad) {
             float *bg = _grad_ensure(b);
-            bg[_bcast_off(b, out_ndim, coord)] += (-av / (bv * bv)) * g;
+            #pragma omp simd
+            for (int i = 0; i < out_numel; i++)
+                bg[i] += (-af[i] / (bf[i] * bf[i])) * g_data[i];
+        }
+        return;
+    }
+    float *ad = (float*)a->data;
+    float *bd = (float*)b->data;
+    for (int i = 0; i < out_numel; i++) {
+        int coord[DNN_MAX_DIMS];
+        int r = i;
+        for (int d = grad_output->ndim - 1; d >= 0; d--) {
+            coord[d] = r % grad_output->shape[d];
+            r /= grad_output->shape[d];
+        }
+        float g = g_data[i];
+        float av = ad[_bcast_off(a, grad_output->ndim, coord)];
+        float bv = bd[_bcast_off(b, grad_output->ndim, coord)];
+        if (a->grad_fn || a->requires_grad) {
+            float *ag = _grad_ensure(a);
+            ag[_bcast_off(a, grad_output->ndim, coord)] += (1.0f / bv) * g;
+        }
+        if (b->grad_fn || b->requires_grad) {
+            float *bg = _grad_ensure(b);
+            bg[_bcast_off(b, grad_output->ndim, coord)] += (-av / (bv * bv)) * g;
         }
     }
 }
+
+/* ── tensor_div ── */
 
 tensor *tensor_div(const tensor *a, const tensor *b) {
     assert(a && b);
@@ -298,21 +374,28 @@ tensor *tensor_div(const tensor *a, const tensor *b) {
     tensor *out = _tensor_scratch_create(ndim_out, shape_out, 0);
     int numel = _numel(ndim_out, shape_out);
     float *od = (float*)out->data;
-    float *ad = (float*)a->data;
-    float *bd = (float*)b->data;
 
-    for (int i = 0; i < numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = ndim_out - 1; d >= 0; d--) {
-            coord[d] = r % shape_out[d];
-            r /= shape_out[d];
+    if (_same_contiguous(a, b)) {
+        float *af = (float*)a->data + a->offset;
+        float *bf = (float*)b->data + b->offset;
+        #pragma omp simd
+        for (int i = 0; i < numel; i++)
+            od[i] = af[i] / bf[i];
+    } else {
+        float *ad = (float*)a->data;
+        float *bd = (float*)b->data;
+        for (int i = 0; i < numel; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = ndim_out - 1; d >= 0; d--) {
+                coord[d] = r % shape_out[d];
+                r /= shape_out[d];
+            }
+            od[out->offset + i] = ad[_bcast_off(a, ndim_out, coord)]
+                                / bd[_bcast_off(b, ndim_out, coord)];
         }
-        od[out->offset + i] = ad[_bcast_off(a, ndim_out, coord)]
-                            / bd[_bcast_off(b, ndim_out, coord)];
     }
 
-    /* autograd tape */
     if (dnn_grad_enabled() &&
         (tensor_requires_grad(a) || tensor_requires_grad(b))) {
         grad_fn *fn = _grad_fn_create();
@@ -325,7 +408,6 @@ tensor *tensor_div(const tensor *a, const tensor *b) {
         out->requires_grad = 1;
         out->grad_fn = fn;
     }
-
     return out;
 }
 
@@ -340,9 +422,16 @@ static void pow_backward(grad_fn *fn, tensor *grad_output) {
 
     if (a->grad_fn || a->requires_grad) {
         float *ag = _grad_ensure(a);
-        for (int i = 0; i < n; i++) {
-            int off = _flat_off(a, i);
-            ag[off] += exp * powf(ad[off], exp - 1.0f) * g_data[i];
+        if (tensor_is_contiguous(a) && tensor_is_contiguous(grad_output)) {
+            float *ap = ad + a->offset;
+            #pragma omp simd
+            for (int i = 0; i < n; i++)
+                ag[a->offset + i] += exp * powf(ap[i], exp - 1.0f) * g_data[i];
+        } else {
+            for (int i = 0; i < n; i++) {
+                int off = _flat_off(a, i);
+                ag[off] += exp * powf(ad[off], exp - 1.0f) * g_data[i];
+            }
         }
     }
 }
@@ -355,17 +444,23 @@ tensor *tensor_pow(const tensor *t, float exp) {
     float *od = (float*)out->data;
     float *td = (float*)t->data;
 
-    for (int i = 0; i < numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = t->ndim - 1; d >= 0; d--) {
-            coord[d] = r % t->shape[d];
-            r /= t->shape[d];
+    if (tensor_is_contiguous(t)) {
+        float *tp = td + t->offset;
+        #pragma omp simd
+        for (int i = 0; i < numel; i++)
+            od[out->offset + i] = powf(tp[i], exp);
+    } else {
+        for (int i = 0; i < numel; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = t->ndim - 1; d >= 0; d--) {
+                coord[d] = r % t->shape[d];
+                r /= t->shape[d];
+            }
+            od[out->offset + i] = powf(td[_bcast_off(t, t->ndim, coord)], exp);
         }
-        od[out->offset + i] = powf(td[_bcast_off(t, t->ndim, coord)], exp);
     }
 
-    /* autograd tape */
     if (dnn_grad_enabled() && tensor_requires_grad(t)) {
         grad_fn *fn = _grad_fn_create();
         fn->backward = pow_backward;
@@ -380,7 +475,6 @@ tensor *tensor_pow(const tensor *t, float exp) {
         out->requires_grad = 1;
         out->grad_fn = fn;
     }
-
     return out;
 }
 
@@ -393,8 +487,14 @@ static void neg_backward(grad_fn *fn, tensor *grad_output) {
 
     if (a->grad_fn || a->requires_grad) {
         float *ag = _grad_ensure(a);
-        for (int i = 0; i < n; i++)
-            ag[_flat_off(a, i)] -= g_data[i];
+        if (tensor_is_contiguous(a) && tensor_is_contiguous(grad_output)) {
+            #pragma omp simd
+            for (int i = 0; i < n; i++)
+                ag[a->offset + i] -= g_data[i];
+        } else {
+            for (int i = 0; i < n; i++)
+                ag[_flat_off(a, i)] -= g_data[i];
+        }
     }
 }
 
@@ -406,17 +506,23 @@ tensor *tensor_neg(const tensor *t) {
     float *od = (float*)out->data;
     float *td = (float*)t->data;
 
-    for (int i = 0; i < numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = t->ndim - 1; d >= 0; d--) {
-            coord[d] = r % t->shape[d];
-            r /= t->shape[d];
+    if (tensor_is_contiguous(t)) {
+        float *tp = td + t->offset;
+        #pragma omp simd
+        for (int i = 0; i < numel; i++)
+            od[out->offset + i] = -tp[i];
+    } else {
+        for (int i = 0; i < numel; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = t->ndim - 1; d >= 0; d--) {
+                coord[d] = r % t->shape[d];
+                r /= t->shape[d];
+            }
+            od[out->offset + i] = -td[_bcast_off(t, t->ndim, coord)];
         }
-        od[out->offset + i] = -td[_bcast_off(t, t->ndim, coord)];
     }
 
-    /* autograd tape */
     if (dnn_grad_enabled() && tensor_requires_grad(t)) {
         grad_fn *fn = _grad_fn_create();
         fn->backward = neg_backward;
@@ -427,6 +533,5 @@ tensor *tensor_neg(const tensor *t) {
         out->requires_grad = 1;
         out->grad_fn = fn;
     }
-
     return out;
 }

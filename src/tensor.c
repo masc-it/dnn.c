@@ -46,6 +46,16 @@ static tensor *tensor_copy_strided(const tensor *t) {
 
 /* ── Lifecycle ── */
 
+/* contiguous helper: check if strides match packed row-major layout */
+static int strides_contiguous(const int *shape, const int *strides, int ndim) {
+    int s = 1;
+    for (int d = ndim - 1; d >= 0; d--) {
+        if (strides[d] != s) return 0;
+        s *= shape[d];
+    }
+    return 1;
+}
+
 static tensor *tensor_create_pool(int ndim, const int *shape, mem_pool *pool, int requires_grad) {
     assert(pool && "tensor_create_pool: default pool not set");
     tensor *t = _mem_pool_alloc(pool, sizeof(tensor), NULL);
@@ -56,6 +66,7 @@ static tensor *tensor_create_pool(int ndim, const int *shape, mem_pool *pool, in
     t->data = _mem_pool_alloc(pool, n * sizeof(float), NULL);
     t->pool = pool;
     t->requires_grad = requires_grad ? 1 : 0;
+    t->contiguous = 1;  /* default_strides always produces packed layout */
     return t;
 }
 
@@ -70,6 +81,7 @@ tensor *_tensor_scratch_create(int ndim, const int *shape, int requires_grad) {
     t->data = _mem_pool_alloc_nz(pool, (size_t)n * sizeof(float));
     t->pool = pool;
     t->requires_grad = requires_grad ? 1 : 0;
+    t->contiguous = 1;
     return t;
 }
 
@@ -119,6 +131,7 @@ tensor *tensor_slice(tensor *t, int dim, int start, int len) {
     v->grad_fn = NULL;
     v->grad = NULL;
     v->pool = NULL;
+    v->contiguous = strides_contiguous(v->shape, v->strides, v->ndim);
     return v;
 }
 
@@ -131,6 +144,7 @@ tensor *tensor_transpose(tensor *t, int d1, int d2) {
     v->grad_fn = NULL;
     v->grad = NULL;
     v->pool = NULL;
+    v->contiguous = strides_contiguous(v->shape, v->strides, v->ndim);
     return v;
 }
 
@@ -168,6 +182,7 @@ tensor *tensor_reshape(tensor *t, int ndim, const int *shape) {
         default_strides(ndim, shape, v->strides);
         v->offset = t->offset;
         v->parent = t;
+        v->contiguous = 1;  /* default_strides always packed */
         v->grad_fn = NULL;
         v->grad = NULL;
         v->pool = NULL;
@@ -227,12 +242,7 @@ tensor *tensor_root(tensor *t) {
 }
 
 int tensor_is_contiguous(const tensor *t) {
-    int s = 1;
-    for (int i = t->ndim - 1; i >= 0; i--) {
-        if (t->strides[i] != s) return 0;
-        s *= t->shape[i];
-    }
-    return 1;
+    return t->contiguous;
 }
 
 int tensor_requires_grad(const tensor *t) {

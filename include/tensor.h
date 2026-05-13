@@ -13,6 +13,7 @@ typedef struct tensor {
     int      strides[DNN_MAX_DIMS];
     int      ndim;
     unsigned int requires_grad : 1;
+    unsigned int contiguous : 1;    /* all dims packed with stride=product(right) */
     int      offset;
     struct tensor *parent;
     grad_fn *grad_fn;

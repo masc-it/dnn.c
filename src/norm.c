@@ -32,6 +32,7 @@ static void ln_backward(grad_fn *fn, tensor *grad_output) {
         float *wg = _grad_ensure(weight);
         for (int s = 0; s < n; s++) {
             float m = mean[s], rs = rstd[s];
+            #pragma omp simd
             for (int j = 0; j < d; j++) {
                 float y = (xd[s * d + j] - m) * rs;
                 wg[j] += gd[s * d + j] * y;
@@ -43,6 +44,7 @@ static void ln_backward(grad_fn *fn, tensor *grad_output) {
     if (bias && tensor_requires_grad(bias)) {
         float *bg = _grad_ensure(bias);
         for (int s = 0; s < n; s++)
+            #pragma omp simd
             for (int j = 0; j < d; j++)
                 bg[j] += gd[s * d + j];
     }
@@ -54,6 +56,7 @@ static void ln_backward(grad_fn *fn, tensor *grad_output) {
             float m = mean[s], rs = rstd[s];
 
             float sum_dy = 0.0f, sum_dy_xmu = 0.0f;
+            #pragma omp simd reduction(+:sum_dy,sum_dy_xmu)
             for (int j = 0; j < d; j++) {
                 float dy = gd[s * d + j] * (wd ? wd[j] : 1.0f);
                 float xmu = xd[s * d + j] - m;
@@ -64,6 +67,7 @@ static void ln_backward(grad_fn *fn, tensor *grad_output) {
             float mean_dy     = sum_dy * inv_d;
             float mean_dy_xmu = sum_dy_xmu * inv_d;
 
+            #pragma omp simd
             for (int j = 0; j < d; j++) {
                 float dy  = gd[s * d + j] * (wd ? wd[j] : 1.0f);
                 float xmu = xd[s * d + j] - m;
@@ -94,6 +98,7 @@ tensor *tensor_layer_norm(const tensor *x, const tensor *weight,
     /* pass 1: compute mean */
     for (int s = 0; s < n; s++) {
         float sum = 0.0f;
+        #pragma omp simd reduction(+:sum)
         for (int j = 0; j < d; j++)
             sum += xd[s * d + j];
         mean[s] = sum / (float)d;
@@ -103,6 +108,7 @@ tensor *tensor_layer_norm(const tensor *x, const tensor *weight,
     for (int s = 0; s < n; s++) {
         float m = mean[s];
         float sum = 0.0f;
+        #pragma omp simd reduction(+:sum)
         for (int j = 0; j < d; j++) {
             float diff = xd[s * d + j] - m;
             sum += diff * diff;
@@ -118,6 +124,7 @@ tensor *tensor_layer_norm(const tensor *x, const tensor *weight,
 
     for (int s = 0; s < n; s++) {
         float m = mean[s], rs = rstd[s];
+        #pragma omp simd
         for (int j = 0; j < d; j++) {
             float y = (xd[s * d + j] - m) * rs;
             od[s * d + j] = y * (wd ? wd[j] : 1.0f) + (bd ? bd[j] : 0.0f);

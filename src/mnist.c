@@ -416,8 +416,10 @@ float mnist_eval_generic(void *model,
 
     dnn_grad_ctx ctx = dnn_no_grad_enter();
 
-    /* process in batches to avoid huge scratch allocation */
-    int batch_size = 1024;
+    /* process in batches to avoid huge scratch allocation.
+     * 1024 is fine for MLP but CNN activations at 1024 need ~330 MB.
+     * 128 keeps CNN peak ~42 MB (fits in 64 MB scratch). */
+    int batch_size = 128;
     int correct = 0;
 
     for (int start = 0; start < N; start += batch_size) {

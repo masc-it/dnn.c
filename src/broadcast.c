@@ -15,28 +15,6 @@ int _bcast_ndim(int ndim_a, const int *shape_a,
     return max;
 }
 
-/* strided element offset for tensor at logical flat index (row-major) */
-int _flat_off(const tensor *t, int flat) {
-    int off = t->offset;
-    for (int d = t->ndim - 1; d >= 0; d--) {
-        int c = flat % t->shape[d];
-        flat /= t->shape[d];
-        off += c * t->strides[d];
-    }
-    return off;
-}
-
-/* strided offset in input tensor given an output coord (broadcast-aware) */
-int _bcast_off(const tensor *t, int out_ndim, const int *coord) {
-    int off = t->offset;
-    int lead = out_ndim - t->ndim;
-    for (int d = 0; d < t->ndim; d++) {
-        int c = t->shape[d] == 1 ? 0 : coord[lead + d];
-        off += c * t->strides[d];
-    }
-    return off;
-}
-
 /* numel from raw shape (no tensor object) */
 int _numel(int ndim, const int *shape) {
     int n = 1;

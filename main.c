@@ -69,7 +69,7 @@ static void adamw_zg_wrap(void *p)   { adamw_zero_grad((adamw_opt*)p); }
 int main(void) {
     /* ── pools ── */
     mem_pool params  = mem_pool_create(10 * 1024 * 1024);     /* model (CNN: ~7MB) */
-    mem_pool scratch = mem_pool_create(128 * 1024 * 1024);    /* scratch (CNN batch=128: ~84MB) */
+    mem_pool scratch = mem_pool_create(192 * 1024 * 1024);    /* scratch (CNN batch=128: ~160MB peak with P1) */
     mem_pool data    = mem_pool_create(210 * 1024 * 1024);    /* MNIST data (~210MB) */
     mem_pool_set_defaults(&params, &scratch, &data);
 

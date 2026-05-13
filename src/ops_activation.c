@@ -5,6 +5,7 @@
 #include "autograd_int.h"
 #include "broadcast.h"
 #include "ops_activation_int.h"
+#include "simd.h"
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
@@ -22,10 +23,7 @@ static void relu_backward(grad_fn *fn, tensor *grad_output) {
         float *ag = _grad_ensure(a);
         if (tensor_is_contiguous(a) && tensor_is_contiguous(grad_output)) {
             float *ap = ad + a->offset;
-            for (int i = 0; i < n; i++) {
-                if (ap[i] > 0.0f)
-                    ag[a->offset + i] += g_data[i];
-            }
+            simd_relu_bwd(ag + a->offset, ap, g_data, n);
         } else {
             for (int i = 0; i < n; i++) {
                 int off = _flat_off(a, i);
@@ -46,10 +44,7 @@ tensor *tensor_relu(const tensor *t) {
 
     if (tensor_is_contiguous(t)) {
         float *tp = td + t->offset;
-        for (int i = 0; i < numel; i++) {
-            float v = tp[i];
-            od[i] = v > 0.0f ? v : 0.0f;
-        }
+        simd_relu_fwd(od, tp, numel);
     } else {
         for (int i = 0; i < numel; i++) {
             int off = _flat_off(t, i);
@@ -160,77 +155,112 @@ tensor *tensor_softmax(const tensor *t, int dim) {
     float *max_vals = mem_scratch_alloc(n_slices * sizeof(float), NULL);
     float *sum_vals = mem_scratch_alloc(n_slices * sizeof(float), NULL);
 
-    for (int s = 0; s < n_slices; s++) max_vals[s] = -INFINITY;
-
-    /* Pass 1: find max along dim for each slice */
-    for (int i = 0; i < numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = ndim - 1; d >= 0; d--) {
-            coord[d] = r % t->shape[d];
-            r /= t->shape[d];
+    /* fast path: 2D contiguous, dim=1 (most common — classification) */
+    if (ndim == 2 && dim == 1 && tensor_is_contiguous(t)) {
+        int N = t->shape[0], C = t->shape[1];
+        for (int n = 0; n < N; n++) {
+            float *row = (float*)t->data + n * C;
+            float mx = simd_reduce_max_f32(row, C);
+            float se = simd_exp_sum_shifted_f32(row, C, mx);
+            max_vals[n] = mx;
+            sum_vals[n] = se;
         }
+    } else {
+        for (int s = 0; s < n_slices; s++) max_vals[s] = -INFINITY;
 
-        int slice_idx = 0;
-        int stride = 1;
-        for (int d = ndim - 1; d >= 0; d--) {
-            if (d != dim) {
-                slice_idx += coord[d] * stride;
-                stride *= t->shape[d];
+        /* Pass 1: find max along dim for each slice */
+        for (int i = 0; i < numel; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = ndim - 1; d >= 0; d--) {
+                coord[d] = r % t->shape[d];
+                r /= t->shape[d];
             }
-        }
-
-        float val = td[_bcast_off(t, ndim, coord)];
-        if (val > max_vals[slice_idx]) max_vals[slice_idx] = val;
-    }
-
-    /* Pass 2: sum of exp(x - max) for each slice */
-    for (int s = 0; s < n_slices; s++) sum_vals[s] = 0.0f;
-
-    for (int i = 0; i < numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = ndim - 1; d >= 0; d--) {
-            coord[d] = r % t->shape[d];
-            r /= t->shape[d];
-        }
-
-        int slice_idx = 0;
-        int stride = 1;
-        for (int d = ndim - 1; d >= 0; d--) {
-            if (d != dim) {
-                slice_idx += coord[d] * stride;
-                stride *= t->shape[d];
+            int slice_idx = 0;
+            int stride = 1;
+            for (int d = ndim - 1; d >= 0; d--) {
+                if (d != dim) {
+                    slice_idx += coord[d] * stride;
+                    stride *= t->shape[d];
+                }
             }
+            float val = td[_bcast_off(t, ndim, coord)];
+            if (val > max_vals[slice_idx]) max_vals[slice_idx] = val;
         }
 
-        float val = td[_bcast_off(t, ndim, coord)];
-        sum_vals[slice_idx] += expf(val - max_vals[slice_idx]);
+        /* Pass 2: sum of exp(x - max) for each slice */
+        for (int s = 0; s < n_slices; s++) sum_vals[s] = 0.0f;
+        for (int i = 0; i < numel; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = ndim - 1; d >= 0; d--) {
+                coord[d] = r % t->shape[d];
+                r /= t->shape[d];
+            }
+            int slice_idx = 0;
+            int stride = 1;
+            for (int d = ndim - 1; d >= 0; d--) {
+                if (d != dim) {
+                    slice_idx += coord[d] * stride;
+                    stride *= t->shape[d];
+                }
+            }
+            float val = td[_bcast_off(t, ndim, coord)];
+            sum_vals[slice_idx] += expf(val - max_vals[slice_idx]);
+        }
     }
 
     /* create output and compute softmax */
     tensor *out = _tensor_scratch_create(ndim, t->shape, 0);
     float *od = (float*)out->data;
 
-    for (int i = 0; i < numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = ndim - 1; d >= 0; d--) {
-            coord[d] = r % t->shape[d];
-            r /= t->shape[d];
-        }
-
-        int slice_idx = 0;
-        int stride = 1;
-        for (int d = ndim - 1; d >= 0; d--) {
-            if (d != dim) {
-                slice_idx += coord[d] * stride;
-                stride *= t->shape[d];
+    /* fast path: 2D contiguous output write */
+    if (ndim == 2 && dim == 1 && tensor_is_contiguous(t)) {
+        int N = t->shape[0], C = t->shape[1];
+#if DNN_HAVE_NEON
+        for (int n = 0; n < N; n++) {
+            float *row = (float*)t->data + n * C;
+            float *out_row = od + n * C;
+            float mx = max_vals[n];
+            float32x4_t vmax = vdupq_n_f32(mx);
+            float32x4_t vse  = vdupq_n_f32(sum_vals[n]);
+            int c = 0;
+            for (; c + 4 <= C; c += 4) {
+                float32x4_t shifted = vsubq_f32(vld1q_f32(row + c), vmax);
+                vst1q_f32(out_row + c, vdivq_f32(simd_expf_f32(shifted), vse));
             }
+            for (; c < C; c++)
+                out_row[c] = expf(row[c] - mx) / sum_vals[n];
         }
-
-        float val = td[_bcast_off(t, ndim, coord)];
-        od[out->offset + i] = expf(val - max_vals[slice_idx]) / sum_vals[slice_idx];
+#else
+        for (int n = 0; n < N; n++) {
+            float *row = (float*)t->data + n * C;
+            float *out_row = od + n * C;
+            float mx = max_vals[n];
+            float se = sum_vals[n];
+            for (int c = 0; c < C; c++)
+                out_row[c] = expf(row[c] - mx) / se;
+        }
+#endif
+    } else {
+        for (int i = 0; i < numel; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = ndim - 1; d >= 0; d--) {
+                coord[d] = r % t->shape[d];
+                r /= t->shape[d];
+            }
+            int slice_idx = 0;
+            int stride = 1;
+            for (int d = ndim - 1; d >= 0; d--) {
+                if (d != dim) {
+                    slice_idx += coord[d] * stride;
+                    stride *= t->shape[d];
+                }
+            }
+            float val = td[_bcast_off(t, ndim, coord)];
+            od[out->offset + i] = expf(val - max_vals[slice_idx]) / sum_vals[slice_idx];
+        }
     }
 
     /* autograd tape */
@@ -276,16 +306,22 @@ static void cross_entropy_backward(grad_fn *fn, tensor *grad_output) {
         /* fast path: 2D contiguous logits, dim=1 (most common — classification) */
         if (ndim == 2 && dim == 1 && tensor_is_contiguous(logits)) {
             int N = logits->shape[0], C = logits->shape[1];
+            float scale = gout * inv_N;
             for (int n = 0; n < N; n++) {
                 float *row = ld + n * C;
                 float *ag_row = ag + n * C;
+#if DNN_HAVE_NEON
+                simd_ce_bwd_row_kernel(ag_row, row, max_vals[n], sum_exp[n],
+                                       td[n], scale, C);
+#else
                 float mx = max_vals[n];
                 float se = sum_exp[n];
                 int tgt = td[n];
                 for (int c = 0; c < C; c++) {
                     float sm = expf(row[c] - mx) / se;
-                    ag_row[c] += (sm - (c == tgt ? 1.0f : 0.0f)) * gout * inv_N;
+                    ag_row[c] += (sm - (c == tgt ? 1.0f : 0.0f)) * scale;
                 }
+#endif
             }
         } else {
             for (int i = 0; i < numel; i++) {
@@ -343,11 +379,10 @@ tensor *tensor_cross_entropy(const tensor *logits, const tensor *target, int dim
         int N = logits->shape[0], C = logits->shape[1];
         for (int n = 0; n < N; n++) {
             float *row = ld + n * C;
-            /* Pass 1 & 2: max + sum_exp in a single pass over the row */
-            float mx = row[0];
-            for (int c = 1; c < C; c++) if (row[c] > mx) mx = row[c];
-            float se = 0.0f;
-            for (int c = 0; c < C; c++) se += expf(row[c] - mx);
+            /* Pass 1: max along row (SIMD horizontal max) */
+            float mx = simd_reduce_max_f32(row, C);
+            /* Pass 2: sum(exp(row - max))  (SIMD vector expf + reduction) */
+            float se = simd_exp_sum_shifted_f32(row, C, mx);
             max_vals[n] = mx;
             sum_exp[n]  = se;
             /* Pass 3: loss = logsumexp - logit[target] */

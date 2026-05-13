@@ -118,6 +118,7 @@ void dnn_backward(tensor *loss) {
             stride *= t->shape[d];
         }
         gv.offset = 0;
+        gv.contiguous = 1;
 
         fn->backward(fn, &gv);
     }
