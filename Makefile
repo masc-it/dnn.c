@@ -1,7 +1,10 @@
-CC      ?= gcc
-CFLAGS  ?= -Wall -Wextra -pedantic -std=c11 -O2 -g
-INCDIRS  = -Iinclude
-LDFLAGS  =
+CC       ?= gcc
+CFLAGS   ?= -Wall -Wextra -pedantic -std=c11 -O2 -g
+INCDIRS   = -Iinclude -Isrc
+OMP_FLAGS = -Xclang -fopenmp
+OMP_DIRS  = -I/opt/homebrew/include -L/opt/homebrew/lib
+LDFLAGS   = -lz
+OMP_LIBS  = -lomp
 
 SRCDIR   = src
 OBJDIR   = obj
@@ -26,7 +29,7 @@ $(OBJDIR) $(TEST_OBJDIR):
 
 # compile .c -> .o with dep generation
 $(OBJDIR)/%.o: $(SRCDIR)/%.c | $(OBJDIR)
-	$(CC) $(CFLAGS) $(INCDIRS) -MMD -MP -c $< -o $@
+	$(CC) $(CFLAGS) $(OMP_FLAGS) $(INCDIRS) $(OMP_DIRS) -MMD -MP -c $< -o $@
 
 # static library
 $(LIB): $(OBJS)
@@ -38,13 +41,13 @@ test: $(TEST_BINS)
 	@for t in $(TEST_BINS); do echo "  $$t:"; $$t && echo "    PASS" || echo "    FAIL"; done
 
 $(TEST_OBJDIR)/%: $(TESTDIR)/%.c $(LIB) | $(TEST_OBJDIR)
-	$(CC) $(CFLAGS) $(INCDIRS) $< -L. -ldnn -framework Accelerate -o $@
+	$(CC) $(CFLAGS) $(OMP_FLAGS) $(INCDIRS) $(OMP_DIRS) $< -L. -ldnn -framework Accelerate $(LDFLAGS) $(OMP_LIBS) -o $@
 
 run: main $(LIB)
 	./main
 
 main: main.c $(LIB)
-	$(CC) $(CFLAGS) $(INCDIRS) $< -L. -ldnn -framework Accelerate -o $@
+	$(CC) $(CFLAGS) $(OMP_FLAGS) $(INCDIRS) $(OMP_DIRS) $< -L. -ldnn -framework Accelerate $(LDFLAGS) $(OMP_LIBS) -o $@
 
 BENCH_FLAGS = -Wall -Wextra -pedantic -std=c11 -O3 -ffast-math -g -DACCELERATE_NEW_LAPACK
 BENCH_LIBS  = -L. -ldnn -framework Accelerate

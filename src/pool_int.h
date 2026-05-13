@@ -3,8 +3,9 @@
 
 #include "pool.h"
 
-/* ── Low-level allocator (exposed for tensor.c) ── */
+/* ── Low-level allocators (exposed for tensor.c) ── */
 void    *_mem_pool_alloc(mem_pool *pool, size_t bytes, const void *src);
+void    *_mem_pool_alloc_nz(mem_pool *pool, size_t bytes);
 
 /* ── Default pool accessors (exposed for tensor.c) ── */
 mem_pool *_mem_pool_params(void);

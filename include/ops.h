@@ -18,6 +18,9 @@ tensor *tensor_sigmoid(const tensor *t);
 tensor *tensor_tanh(const tensor *t);
 tensor *tensor_softmax(const tensor *t, int dim);
 
+/* ── Regularization ── */
+tensor *tensor_dropout(const tensor *t, float p);
+
 /* ── Reduction ── */
 tensor *tensor_sum(const tensor *t, int dim);
 tensor *tensor_mean(const tensor *t, int dim);

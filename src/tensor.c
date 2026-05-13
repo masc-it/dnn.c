@@ -60,11 +60,25 @@ static tensor *tensor_create_pool(int ndim, const int *shape, mem_pool *pool, in
 }
 
 tensor *_tensor_scratch_create(int ndim, const int *shape, int requires_grad) {
-    return tensor_create_pool(ndim, shape, _mem_pool_scratch(), requires_grad);
+    mem_pool *pool = _mem_pool_scratch();
+    assert(pool && "_tensor_scratch_create: scratch pool not set");
+    tensor *t = _mem_pool_alloc(pool, sizeof(tensor), NULL);
+    t->ndim = ndim;
+    memcpy(t->shape, shape, ndim * sizeof(int));
+    default_strides(ndim, shape, t->strides);
+    int n = tensor_numel_(shape, ndim);
+    t->data = _mem_pool_alloc_nz(pool, (size_t)n * sizeof(float));
+    t->pool = pool;
+    t->requires_grad = requires_grad ? 1 : 0;
+    return t;
 }
 
 tensor *tensor_zeros(int ndim, const int *shape, int requires_grad) {
     return tensor_create_pool(ndim, shape, _mem_pool_params(), requires_grad);
+}
+
+tensor *tensor_zeros_data(int ndim, const int *shape) {
+    return tensor_create_pool(ndim, shape, _mem_pool_data(), 0);
 }
 
 tensor *tensor_randn(int ndim, const int *shape, int requires_grad) {

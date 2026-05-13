@@ -60,6 +60,18 @@ static void _build_topo(tensor *t, tensor ***topo, int *n, int *cap) {
         _build_topo(t->grad_fn->inputs[i], topo, n, cap);
     }
 
+    /* walk parent chains of each input — views have no grad_fn but their
+       parent tensors may, and those need to be in the topo order for
+       gradient to continue flowing backward. */
+    for (int i = 0; i < t->grad_fn->n_inputs; i++) {
+        tensor *p = t->grad_fn->inputs[i];
+        while (p->parent) {
+            p = p->parent;
+            if (p->grad_fn && !_in_list(p, *topo, *n))
+                _build_topo(p, topo, n, cap);
+        }
+    }
+
     if (*n >= *cap) {
         *cap = *cap ? *cap * 2 : 64;
         *topo = realloc(*topo, *cap * sizeof(tensor*));

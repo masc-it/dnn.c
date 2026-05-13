@@ -33,6 +33,14 @@ void mem_pool_reset(mem_pool *pool) {
     pool->offset = 0;
 }
 
+size_t mem_pool_mark(mem_pool *pool) {
+    return pool->offset;
+}
+
+void mem_pool_release(mem_pool *pool, size_t mark) {
+    pool->offset = mark;
+}
+
 void *_mem_pool_alloc(mem_pool *pool, size_t bytes, const void *src) {
     assert(pool->offset + bytes <= pool->capacity
            && "_mem_pool_alloc: out of memory");
@@ -42,6 +50,14 @@ void *_mem_pool_alloc(mem_pool *pool, size_t bytes, const void *src) {
     } else {
         memset(ptr, 0, bytes);
     }
+    pool->offset += bytes;
+    return ptr;
+}
+
+void *_mem_pool_alloc_nz(mem_pool *pool, size_t bytes) {
+    assert(pool->offset + bytes <= pool->capacity
+           && "_mem_pool_alloc_nz: out of memory");
+    void *ptr = pool->buffer + pool->offset;
     pool->offset += bytes;
     return ptr;
 }

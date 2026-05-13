@@ -56,7 +56,8 @@ static void matmul_backward(grad_fn *fn, tensor *grad_output) {
 #else
         if (a_contig && b_contig && g_contig) {
             cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                        M, K, N, 1.0f, gd, N, bd, N, 1.0f, ag, K);
+                        M, K, N, 1.0f, gd, g_s0, bd + b_off, b_s0,
+                        1.0f, ag + a_off, a_s0);
         } else {
             for (int i = 0; i < M; i++)
                 for (int k = 0; k < K; k++) {
@@ -83,7 +84,8 @@ static void matmul_backward(grad_fn *fn, tensor *grad_output) {
 #else
         if (a_contig && b_contig && g_contig) {
             cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                        K, N, M, 1.0f, ad, K, gd, N, 1.0f, bg, N);
+                        K, N, M, 1.0f, ad + a_off, a_s0, gd, g_s0,
+                        1.0f, bg + b_off, b_s0);
         } else {
             for (int k = 0; k < K; k++)
                 for (int j = 0; j < N; j++) {
@@ -110,7 +112,8 @@ static void matmul_backward(grad_fn *fn, tensor *grad_output) {
 #else
         if (a_contig && g_contig) {
             cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                        K, N, M, 1.0f, ad, K, gd, N, 1.0f, ag, K);
+                        K, N, M, 1.0f, ad + a_off, a_s0, gd, g_s0,
+                        1.0f, ag + a_off, a_s0);
         } else {
             for (int k = 0; k < K; k++)
                 for (int j = 0; j < N; j++) {
@@ -155,7 +158,8 @@ tensor *tensor_matmul(const tensor *a, const tensor *b) {
 #else
     if (tensor_is_contiguous(a) && tensor_is_contiguous(b)) {
         cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                    M, N, K, 1.0f, ad, K, bd, N, 0.0f, od, N);
+                    M, N, K, 1.0f, ad + a_off, a_s0, bd + b_off, b_s0,
+                    0.0f, od, N);
     } else {
         for (int i = 0; i < M; i++)
             for (int j = 0; j < N; j++) {

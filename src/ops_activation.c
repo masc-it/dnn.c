@@ -20,10 +20,18 @@ static void relu_backward(grad_fn *fn, tensor *grad_output) {
 
     if (a->grad_fn || a->requires_grad) {
         float *ag = _grad_ensure(a);
-        for (int i = 0; i < n; i++) {
-            int off = _flat_off(a, i);
-            if (ad[off] > 0.0f)
-                ag[off] += g_data[i];
+        if (tensor_is_contiguous(a) && tensor_is_contiguous(grad_output)) {
+            float *ap = ad + a->offset;
+            for (int i = 0; i < n; i++) {
+                if (ap[i] > 0.0f)
+                    ag[a->offset + i] += g_data[i];
+            }
+        } else {
+            for (int i = 0; i < n; i++) {
+                int off = _flat_off(a, i);
+                if (ad[off] > 0.0f)
+                    ag[off] += g_data[i];
+            }
         }
     }
 }
@@ -36,10 +44,18 @@ tensor *tensor_relu(const tensor *t) {
     float *od = (float*)out->data;
     float *td = (float*)t->data;
 
-    for (int i = 0; i < numel; i++) {
-        int off = _flat_off(t, i);
-        float v = td[off];
-        od[out->offset + i] = v > 0.0f ? v : 0.0f;
+    if (tensor_is_contiguous(t)) {
+        float *tp = td + t->offset;
+        for (int i = 0; i < numel; i++) {
+            float v = tp[i];
+            od[i] = v > 0.0f ? v : 0.0f;
+        }
+    } else {
+        for (int i = 0; i < numel; i++) {
+            int off = _flat_off(t, i);
+            float v = td[off];
+            od[out->offset + i] = v > 0.0f ? v : 0.0f;
+        }
     }
 
     /* autograd tape */
@@ -257,29 +273,45 @@ static void cross_entropy_backward(grad_fn *fn, tensor *grad_output) {
     if (logits->grad_fn || logits->requires_grad) {
         float *ag = _grad_ensure(logits);
 
-        for (int i = 0; i < numel; i++) {
-            int coord[DNN_MAX_DIMS];
-            int r = i;
-            for (int d = ndim - 1; d >= 0; d--) {
-                coord[d] = r % logits->shape[d];
-                r /= logits->shape[d];
-            }
-
-            int slice_idx = 0;
-            int stride = 1;
-            for (int d = ndim - 1; d >= 0; d--) {
-                if (d != dim) {
-                    slice_idx += coord[d] * stride;
-                    stride *= logits->shape[d];
+        /* fast path: 2D contiguous logits, dim=1 (most common — classification) */
+        if (ndim == 2 && dim == 1 && tensor_is_contiguous(logits)) {
+            int N = logits->shape[0], C = logits->shape[1];
+            for (int n = 0; n < N; n++) {
+                float *row = ld + n * C;
+                float *ag_row = ag + n * C;
+                float mx = max_vals[n];
+                float se = sum_exp[n];
+                int tgt = td[n];
+                for (int c = 0; c < C; c++) {
+                    float sm = expf(row[c] - mx) / se;
+                    ag_row[c] += (sm - (c == tgt ? 1.0f : 0.0f)) * gout * inv_N;
                 }
             }
+        } else {
+            for (int i = 0; i < numel; i++) {
+                int coord[DNN_MAX_DIMS];
+                int r = i;
+                for (int d = ndim - 1; d >= 0; d--) {
+                    coord[d] = r % logits->shape[d];
+                    r /= logits->shape[d];
+                }
 
-            float val   = ld[_bcast_off(logits, ndim, coord)];
-            float sm    = expf(val - max_vals[slice_idx]) / sum_exp[slice_idx];
-            int is_tgt  = (coord[dim] == td[slice_idx]) ? 1 : 0;
+                int slice_idx = 0;
+                int stride = 1;
+                for (int d = ndim - 1; d >= 0; d--) {
+                    if (d != dim) {
+                        slice_idx += coord[d] * stride;
+                        stride *= logits->shape[d];
+                    }
+                }
 
-            int off = _flat_off(logits, i);
-            ag[off] += (sm - (float)is_tgt) * gout * inv_N;
+                float val   = ld[_bcast_off(logits, ndim, coord)];
+                float sm    = expf(val - max_vals[slice_idx]) / sum_exp[slice_idx];
+                int is_tgt  = (coord[dim] == td[slice_idx]) ? 1 : 0;
+
+                int off = _flat_off(logits, i);
+                ag[off] += (sm - (float)is_tgt) * gout * inv_N;
+            }
         }
     }
 }
@@ -304,75 +336,94 @@ tensor *tensor_cross_entropy(const tensor *logits, const tensor *target, int dim
 
     for (int s = 0; s < n_slices; s++) max_vals[s] = -INFINITY;
 
-    /* Pass 1: find max along dim for each slice */
-    for (int i = 0; i < numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = ndim - 1; d >= 0; d--) {
-            coord[d] = r % logits->shape[d];
-            r /= logits->shape[d];
-        }
-
-        int slice_idx = 0;
-        int stride = 1;
-        for (int d = ndim - 1; d >= 0; d--) {
-            if (d != dim) {
-                slice_idx += coord[d] * stride;
-                stride *= logits->shape[d];
-            }
-        }
-
-        float val = ld[_bcast_off(logits, ndim, coord)];
-        if (val > max_vals[slice_idx]) max_vals[slice_idx] = val;
-    }
-
-    /* Pass 2: sum of exp(x - max) for each slice */
-    for (int s = 0; s < n_slices; s++) sum_exp[s] = 0.0f;
-
-    for (int i = 0; i < numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = ndim - 1; d >= 0; d--) {
-            coord[d] = r % logits->shape[d];
-            r /= logits->shape[d];
-        }
-
-        int slice_idx = 0;
-        int stride = 1;
-        for (int d = ndim - 1; d >= 0; d--) {
-            if (d != dim) {
-                slice_idx += coord[d] * stride;
-                stride *= logits->shape[d];
-            }
-        }
-
-        float val = ld[_bcast_off(logits, ndim, coord)];
-        sum_exp[slice_idx] += expf(val - max_vals[slice_idx]);
-    }
-
-    /* Pass 3: compute loss = mean(logsumexp - logits[target]) */
     float total_loss = 0.0f;
-    for (int i = 0; i < numel; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = ndim - 1; d >= 0; d--) {
-            coord[d] = r % logits->shape[d];
-            r /= logits->shape[d];
-        }
 
-        int slice_idx = 0;
-        int stride = 1;
-        for (int d = ndim - 1; d >= 0; d--) {
-            if (d != dim) {
-                slice_idx += coord[d] * stride;
-                stride *= logits->shape[d];
+    /* fast path: 2D contiguous logits, dim=1 (most common — classification) */
+    if (ndim == 2 && dim == 1 && tensor_is_contiguous(logits)) {
+        int N = logits->shape[0], C = logits->shape[1];
+        for (int n = 0; n < N; n++) {
+            float *row = ld + n * C;
+            /* Pass 1 & 2: max + sum_exp in a single pass over the row */
+            float mx = row[0];
+            for (int c = 1; c < C; c++) if (row[c] > mx) mx = row[c];
+            float se = 0.0f;
+            for (int c = 0; c < C; c++) se += expf(row[c] - mx);
+            max_vals[n] = mx;
+            sum_exp[n]  = se;
+            /* Pass 3: loss = logsumexp - logit[target] */
+            total_loss += logf(se) + mx - row[td[n]];
+        }
+    } else {
+        /* general nD fallback */
+        for (int s = 0; s < n_slices; s++) sum_exp[s] = 0.0f;
+
+        /* Pass 1: find max along dim for each slice */
+        for (int i = 0; i < numel; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = ndim - 1; d >= 0; d--) {
+                coord[d] = r % logits->shape[d];
+                r /= logits->shape[d];
             }
+
+            int slice_idx = 0;
+            int stride = 1;
+            for (int d = ndim - 1; d >= 0; d--) {
+                if (d != dim) {
+                    slice_idx += coord[d] * stride;
+                    stride *= logits->shape[d];
+                }
+            }
+
+            float val = ld[_bcast_off(logits, ndim, coord)];
+            if (val > max_vals[slice_idx]) max_vals[slice_idx] = val;
         }
 
-        if (coord[dim] == td[slice_idx]) {
+        /* Pass 2: sum of exp(x - max) for each slice */
+        for (int i = 0; i < numel; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = ndim - 1; d >= 0; d--) {
+                coord[d] = r % logits->shape[d];
+                r /= logits->shape[d];
+            }
+
+            int slice_idx = 0;
+            int stride = 1;
+            for (int d = ndim - 1; d >= 0; d--) {
+                if (d != dim) {
+                    slice_idx += coord[d] * stride;
+                    stride *= logits->shape[d];
+                }
+            }
+
             float val = ld[_bcast_off(logits, ndim, coord)];
-            float lse = max_vals[slice_idx] + logf(sum_exp[slice_idx]);
-            total_loss += lse - val;
+            sum_exp[slice_idx] += expf(val - max_vals[slice_idx]);
+        }
+
+        /* Pass 3: compute loss = mean(logsumexp - logits[target]) */
+        for (int i = 0; i < numel; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = ndim - 1; d >= 0; d--) {
+                coord[d] = r % logits->shape[d];
+                r /= logits->shape[d];
+            }
+
+            int slice_idx = 0;
+            int stride = 1;
+            for (int d = ndim - 1; d >= 0; d--) {
+                if (d != dim) {
+                    slice_idx += coord[d] * stride;
+                    stride *= logits->shape[d];
+                }
+            }
+
+            if (coord[dim] == td[slice_idx]) {
+                float val = ld[_bcast_off(logits, ndim, coord)];
+                float lse = max_vals[slice_idx] + logf(sum_exp[slice_idx]);
+                total_loss += lse - val;
+            }
         }
     }
 
@@ -400,6 +451,89 @@ tensor *tensor_cross_entropy(const tensor *logits, const tensor *target, int dim
         float *inv_n_saved = mem_scratch_alloc(sizeof(float), NULL);
         *inv_n_saved = inv_N;
         fn->saved_tensors[4] = (tensor*)inv_n_saved;
+        out->requires_grad = 1;
+        out->grad_fn = fn;
+    }
+
+    return out;
+}
+
+/* ── dropout_backward ── */
+
+static void dropout_backward(grad_fn *fn, tensor *grad_output) {
+    float  *mask = (float*)fn->saved_tensors[0];
+    float   p    = *(float*)fn->saved_tensors[1];
+    int     n    = *(int*)fn->saved_tensors[2];
+    tensor *input = fn->inputs[0];
+
+    float scale = 1.0f / (1.0f - p);
+    float *gd   = (float*)grad_output->data;
+    int    ndim = input->ndim;
+
+    if (tensor_requires_grad(input)) {
+        float *ig = _grad_ensure(input);
+        for (int i = 0; i < n; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = ndim - 1; d >= 0; d--) {
+                coord[d] = r % input->shape[d];
+                r /= input->shape[d];
+            }
+            ig[_bcast_off(input, ndim, coord)] += gd[i] * mask[i] * scale;
+        }
+    }
+}
+
+/* ── dropout forward ── */
+
+tensor *tensor_dropout(const tensor *t, float p) {
+    assert(t);
+    assert(p >= 0.0f && p < 1.0f);
+
+    /* eval mode: identity */
+    if (!dnn_grad_enabled()) return (tensor*)t;
+
+    int ndim = t->ndim;
+    int n    = tensor_numel(t);
+    float scale = 1.0f / (1.0f - p);
+
+    tensor *out = _tensor_scratch_create(ndim, t->shape, 0);
+    float  *od  = (float*)out->data;
+    float  *td  = (float*)t->data;
+
+    /* generate mask and apply: out = mask * t / (1-p) */
+    float *mask = mem_scratch_alloc((size_t)n * sizeof(float), NULL);
+    for (int i = 0; i < n; i++) {
+        int coord[DNN_MAX_DIMS];
+        int r = i;
+        for (int d = ndim - 1; d >= 0; d--) {
+            coord[d] = r % t->shape[d];
+            r /= t->shape[d];
+        }
+        mask[i] = ((float)rand() / (float)RAND_MAX) >= p ? 1.0f : 0.0f;
+        od[i]   = mask[i] * td[_bcast_off(t, ndim, coord)] * scale;
+    }
+
+    /* autograd tape */
+    if (tensor_requires_grad(t)) {
+        grad_fn *fn = _grad_fn_create();
+        fn->backward  = dropout_backward;
+        fn->n_inputs  = 1;
+        fn->inputs    = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs[0] = (tensor*)t;
+
+        fn->n_saved = 3;
+        fn->saved_tensors = mem_scratch_alloc(3 * sizeof(tensor*), NULL);
+        fn->saved_tensors[0] = (tensor*)mask;
+
+        float *p_saved = mem_scratch_alloc(sizeof(float), NULL);
+        *p_saved = p;
+        fn->saved_tensors[1] = (tensor*)p_saved;
+
+        int *n_saved = mem_scratch_alloc(sizeof(int), NULL);
+        *n_saved = n;
+        fn->saved_tensors[2] = (tensor*)n_saved;
+
         out->requires_grad = 1;
         out->grad_fn = fn;
     }

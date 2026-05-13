@@ -2,12 +2,14 @@
 #include "autograd.h"
 #include "autograd_int.h"
 #include "pool.h"
+#include "pool_int.h"
 #include "tensor_int.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <omp.h>
 
 /* ══════════════════════════════════════════════════════════════════
  *  BLAS header — use Accelerate on macOS, generic cblas elsewhere
@@ -38,31 +40,45 @@ static void im2col(const float *x, float *col,
     int W_out = (W + 2 * pad - kW) / stride + 1;
     int K     = C * kH * kW;
 
+    /* each batch element writes to disjoint col region */
+    #pragma omp parallel for if(N > 1)
     for (int n = 0; n < N; n++) {
         for (int oh = 0; oh < H_out; oh++) {
+            int h_start = oh * stride - pad;
+            int interior_h = (h_start >= 0 && h_start + kH <= H);
+
             for (int ow = 0; ow < W_out; ow++) {
-                int row_start = (n * H_out * W_out + oh * W_out + ow) * K;
-                int h_start   = oh * stride - pad;
-                int w_start   = ow * stride - pad;
+                int w_start = ow * stride - pad;
+                int row_start = ((n * H_out + oh) * W_out + ow) * K;
+                int fast = interior_h && (w_start >= 0 && w_start + kW <= W);
 
                 for (int c = 0; c < C; c++) {
-                    for (int kh = 0; kh < kH; kh++) {
-                        int ih = h_start + kh;
-
-                        /* entire kh-row is out of bounds → fill with zeros */
-                        if (ih < 0 || ih >= H) {
-                            memset(&col[row_start + c * kH * kW + kh * kW],
-                                   0, kW * sizeof(float));
-                            continue;
+                    if (fast) {
+                        /* interior: all kernel taps in-bounds, skip checks */
+                        int x_base = ((n * C + c) * H + h_start) * W + w_start;
+                        int co = row_start + c * kH * kW;
+                        for (int kh = 0; kh < kH; kh++) {
+                            for (int kw = 0; kw < kW; kw++) {
+                                col[co + kh * kW + kw] = x[x_base + kh * W + kw];
+                            }
                         }
-
-                        for (int kw = 0; kw < kW; kw++) {
-                            int iw = w_start + kw;
-                            int off = row_start + c * kH * kW + kh * kW + kw;
-                            if (iw >= 0 && iw < W)
-                                col[off] = x[(n * C + c) * H * W + ih * W + iw];
-                            else
-                                col[off] = 0.0f;
+                    } else {
+                        /* boundary: some taps may be out-of-bounds */
+                        for (int kh = 0; kh < kH; kh++) {
+                            int ih = h_start + kh;
+                            if (ih < 0 || ih >= H) {
+                                memset(&col[row_start + c * kH * kW + kh * kW],
+                                       0, kW * sizeof(float));
+                                continue;
+                            }
+                            for (int kw = 0; kw < kW; kw++) {
+                                int iw = w_start + kw;
+                                int off = row_start + c * kH * kW + kh * kW + kw;
+                                if (iw >= 0 && iw < W)
+                                    col[off] = x[((n * C + c) * H + ih) * W + iw];
+                                else
+                                    col[off] = 0.0f;
+                            }
                         }
                     }
                 }
@@ -78,24 +94,39 @@ static void col2im(const float *dcol, float *dx,
     int W_out = (W + 2 * pad - kW) / stride + 1;
     int K     = C * kH * kW;
 
+    /* each batch element accumulates into disjoint dx region */
+    #pragma omp parallel for if(N > 1)
     for (int n = 0; n < N; n++) {
         for (int oh = 0; oh < H_out; oh++) {
+            int h_start = oh * stride - pad;
+            int interior_h = (h_start >= 0 && h_start + kH <= H);
+
             for (int ow = 0; ow < W_out; ow++) {
-                int row_start = (n * H_out * W_out + oh * W_out + ow) * K;
-                int h_start   = oh * stride - pad;
-                int w_start   = ow * stride - pad;
+                int w_start = ow * stride - pad;
+                int row_start = ((n * H_out + oh) * W_out + ow) * K;
+                int fast = interior_h && (w_start >= 0 && w_start + kW <= W);
 
                 for (int c = 0; c < C; c++) {
-                    for (int kh = 0; kh < kH; kh++) {
-                        int ih = h_start + kh;
-                        if (ih < 0 || ih >= H) continue;
-
-                        for (int kw = 0; kw < kW; kw++) {
-                            int iw = w_start + kw;
-                            if (iw < 0 || iw >= W) continue;
-
-                            int col_off = row_start + c * kH * kW + kh * kW + kw;
-                            dx[(n * C + c) * H * W + ih * W + iw] += dcol[col_off];
+                    if (fast) {
+                        /* interior: all kernel taps in-bounds, skip checks */
+                        int dx_base = ((n * C + c) * H + h_start) * W + w_start;
+                        int co = row_start + c * kH * kW;
+                        for (int kh = 0; kh < kH; kh++) {
+                            for (int kw = 0; kw < kW; kw++) {
+                                dx[dx_base + kh * W + kw] += dcol[co + kh * kW + kw];
+                            }
+                        }
+                    } else {
+                        /* boundary: some taps may be out-of-bounds */
+                        for (int kh = 0; kh < kH; kh++) {
+                            int ih = h_start + kh;
+                            if (ih < 0 || ih >= H) continue;
+                            for (int kw = 0; kw < kW; kw++) {
+                                int iw = w_start + kw;
+                                if (iw < 0 || iw >= W) continue;
+                                int col_off = row_start + c * kH * kW + kh * kW + kw;
+                                dx[((n * C + c) * H + ih) * W + iw] += dcol[col_off];
+                            }
                         }
                     }
                 }
@@ -152,8 +183,8 @@ static void conv2d_backward(grad_fn *fn, tensor *grad_output) {
      *   produces (out_C, K) — matches wg storage without transposition.
      */
     if (tensor_requires_grad(weight)) {
-        float *col = malloc((size_t)M * K * sizeof(float));
-        if (!col) { fprintf(stderr, "conv2d_backward: malloc(col) failed\n"); abort(); }
+        size_t _wcm = mem_pool_mark(_mem_pool_scratch());
+        float *col = mem_scratch_alloc((size_t)M * K * sizeof(float), NULL);
         im2col(xd, col, N, C, H, W, kH, kW, pad, stride);
 
         float *wg = _grad_ensure(weight);
@@ -173,13 +204,17 @@ static void conv2d_backward(grad_fn *fn, tensor *grad_output) {
                     col, K,
                     1.0f, wg, K);
 #endif
-        free(col);
+        mem_pool_release(_mem_pool_scratch(), _wcm);
     }
 
     /* ── d_input: col2im( gd(M,out_C) @ weight(out_C,K) ) ── */
     if (tensor_requires_grad(input)) {
-        float *dcol = malloc((size_t)M * K * sizeof(float));
-        if (!dcol) { fprintf(stderr, "conv2d_backward: malloc(dcol) failed\n"); abort(); }
+        /* ensure input gradient buffer before allocating temp; it must
+           outlive the mark/release below */
+        float *xg = _grad_ensure(input);
+
+        size_t _dcm = mem_pool_mark(_mem_pool_scratch());
+        float *dcol = mem_scratch_alloc((size_t)M * K * sizeof(float), NULL);
 
 #if NO_CBLAS
         for (int m = 0; m < M; m++)
@@ -198,10 +233,9 @@ static void conv2d_backward(grad_fn *fn, tensor *grad_output) {
                     0.0f, dcol, K);
 #endif
 
-        float *xg = _grad_ensure(input);
         col2im(dcol, xg, N, C, H, W, kH, kW, pad, stride);
 
-        free(dcol);
+        mem_pool_release(_mem_pool_scratch(), _dcm);
     }
 }
 
@@ -243,26 +277,40 @@ tensor *tensor_conv2d(tensor *input, tensor *weight, tensor *bias,
     float *od = tensor_data_ptr(out);
 
     /* ── im2col → matmul ── */
-    float *col = malloc((size_t)M * K * sizeof(float));
-    if (!col) { fprintf(stderr, "conv2d_forward: malloc(col) failed\n"); abort(); }
+    size_t _fcm = mem_pool_mark(_mem_pool_scratch());
+    float *col = mem_scratch_alloc((size_t)M * K * sizeof(float), NULL);
 
     im2col(xd, col, N, C, H, W, kH, kW, pad, stride);
 
-    /* matmul: col(M,K) @ weight(K,out_C) = out(M,out_C)
+    /* matmul: col(M,K) @ weight^T(K,out_C) = out(M,out_C)
      *
-     * weight stored as (out_C, K).  We read wd[oc * K + k].
+     * weight stored as (out_C, K).  wd[oc * K + k].
      * out stored as (N, out_C, H_out, W_out) — index as 2D for speed.
+     *
+     * BLAS: C = A @ B^T   →   od = col @ wd^T
      */
+#if NO_CBLAS
     for (int m = 0; m < M; m++) {
         for (int oc = 0; oc < out_C; oc++) {
-            float sum = bd ? bd[oc] : 0.0f;
+            float sum = 0.0f;
             for (int k = 0; k < K; k++)
                 sum += col[(size_t)m * K + k] * wd[(size_t)oc * K + k];
             od[(size_t)m * out_C + oc] = sum;
         }
     }
+#else
+    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                M, out_C, K, 1.0f, col, K, wd, K, 0.0f, od, out_C);
+#endif
 
-    free(col);
+    /* add bias */
+    if (bd) {
+        for (int m = 0; m < M; m++)
+            for (int oc = 0; oc < out_C; oc++)
+                od[(size_t)m * out_C + oc] += bd[oc];
+    }
+
+    mem_pool_release(_mem_pool_scratch(), _fcm);
 
     /* ── autograd tape ── */
     if (dnn_grad_enabled() &&
