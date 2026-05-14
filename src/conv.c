@@ -73,21 +73,14 @@ static void im2col(const float *x, float *col,
         for (int c = 0; c < C; c++) {
             int k_c = c * kH * kW;  /* kernel-offset component for channel c */
             for (int kh = 0; kh < kH; kh++) {
-                /* precompute oh range that yields valid ih \in [0, H) */
-                int _req = pad - kh;
-                int oh_min = _req > 0 ? (_req + stride - 1) / stride : 0;
-                int oh_max = (H + pad - kh - 1) / stride;
-                if (oh_max > H_out - 1) oh_max = H_out - 1;
-                if (oh_min > oh_max) continue;
-
                 int k_kh = k_c + kh * kW;
-                for (int oh = oh_min; oh <= oh_max; oh++) {
+                for (int oh = 0; oh < H_out; oh++) {
                     int ih = oh * stride - pad + kh;
-                    /* ih \in [0, H) guaranteed by oh bounds above */
+                    if (ih < 0 || ih >= H) continue;
 
                     const float *x_row = x + ((size_t)n * C + c) * H * W
                                           + (size_t)ih * W;
-                    int m_base = n_off + oh * W_out;
+                    int m_base = n_off + oh * W_out;  /* M-index base for this output row */
 
                     for (int kw = 0; kw < kW; kw++) {
                         int k = k_kh + kw;            /* row in (K, M) */
@@ -253,7 +246,7 @@ static void conv2d_backward(grad_fn *fn, tensor *grad_output) {
         float *xg = _grad_ensure(input);
 
         size_t _dcm = mem_pool_mark(_mem_pool_scratch());
-        float *dcol = _mem_pool_alloc_nz(_mem_pool_scratch(), (size_t)K * M * sizeof(float));
+        float *dcol = mem_scratch_alloc((size_t)K * M * sizeof(float), NULL);
 
         /* dcol(K,M) = wd^T(K,out_C) @ gd^T(out_C,M)
          *   Each row k of dcol is independent: sum_oc wd[oc][k] * gd[:,oc].
