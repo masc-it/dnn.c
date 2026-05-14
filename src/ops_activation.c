@@ -574,6 +574,173 @@ tensor *tensor_softmax(const tensor *t, int dim) {
     return out;
 }
 
+/* ── causal_softmax_backward ──
+ *
+ * Backward gradient for fused causal softmax.
+ * Same formula as softmax backward:
+ *   dL/dx[i][j] = sm[i][j] * (g[i][j] - dot_i)  for j <= i
+ *   dL/dx[i][j] = 0                               for j > i
+ *
+ * The sm[i][j] = 0 for j > i naturally zeros masked positions.
+ * dot_i = sum_{j <= i} sm[i][j] * g[i][j]  (only visible positions).
+ */
+
+static void causal_softmax_backward(grad_fn *fn, tensor *grad_output) {
+    tensor *a = fn->inputs[0];
+    tensor *saved_out = fn->saved_tensors[0];
+    int ndim = a->ndim;
+    int N = a->shape[ndim - 1];  /* last dim size, also = second-to-last */
+    float *g_data = (float*)grad_output->data;
+    float *sm_data = (float*)saved_out->data;
+
+    if (!(a->grad_fn || a->requires_grad)) return;
+    float *ag = _grad_ensure(a);
+
+    /* ── 2D fast path (N, N), contiguous ── */
+    if (ndim == 2 && tensor_is_contiguous(a) && tensor_is_contiguous(grad_output)) {
+        for (int i = 0; i < N; i++) {
+            float *sm_row = sm_data + i * N;
+            float *g_row  = g_data + i * N;
+            float *ag_row = ag + i * N;
+
+            /* dot_i = sum_{j <= i} sm[i][j] * g[i][j] */
+            float dot = 0.0f;
+            for (int j = 0; j <= i; j++)
+                dot += sm_row[j] * g_row[j];
+
+            /* dL/dx[i][j] = sm[i][j] * (g[i][j] - dot_i) for j <= i */
+            for (int j = 0; j <= i; j++)
+                ag_row[j] += sm_row[j] * (g_row[j] - dot);
+            /* j > i: sm=0 → gradient 0, no-op */
+        }
+        return;
+    }
+
+    /* ── General nD (batch dims before last 2) ── */
+    int n_matrices = 1;
+    for (int d = 0; d < ndim - 2; d++)
+        n_matrices *= a->shape[d];
+
+    for (int m = 0; m < n_matrices; m++) {
+        float *sm_mat = sm_data + m * N * N;
+        float *g_mat  = g_data  + m * N * N;
+        float *ag_mat = ag      + m * N * N;
+
+        for (int i = 0; i < N; i++) {
+            float *sm_row = sm_mat + i * N;
+            float *g_row  = g_mat  + i * N;
+            float *ag_row = ag_mat + i * N;
+
+            float dot = 0.0f;
+            for (int j = 0; j <= i; j++)
+                dot += sm_row[j] * g_row[j];
+
+            for (int j = 0; j <= i; j++)
+                ag_row[j] += sm_row[j] * (g_row[j] - dot);
+        }
+    }
+}
+
+/* ── tensor_causal_softmax ──
+ *
+ * Fused causal softmax over the last dimension.
+ * Input shape: (..., N, N) where last two dims are equal.
+ * For query position i (dim ndim-2), key positions j > i (dim ndim-1)
+ * are masked with -inf before softmax.
+ *
+ * No mask materialized — the triangular mask is applied implicitly
+ * by only computing softmax over visible positions j=0..i per row.
+ */
+
+tensor *tensor_causal_softmax(const tensor *t) {
+    assert(t);
+    int ndim = t->ndim;
+    assert(ndim >= 2 && "causal_softmax: need at least 2 dims");
+    assert(t->shape[ndim - 2] == t->shape[ndim - 1]
+           && "causal_softmax: last two dims must be equal (square)");
+
+    int N = t->shape[ndim - 1];
+    int n_matrices = 1;
+    for (int d = 0; d < ndim - 2; d++)
+        n_matrices *= t->shape[d];
+
+    float *td = (float*)t->data;
+
+    tensor *out = _tensor_scratch_create(ndim, t->shape, 0);
+    float *od = (float*)out->data;
+
+    /* ── 2D fast path (N, N), contiguous ── */
+    if (ndim == 2 && tensor_is_contiguous(t)) {
+        for (int i = 0; i < N; i++) {
+            float *row_in = td + i * N;
+            float *row_out = od + i * N;
+
+            /* max over j=0..i (visible positions) */
+            float mx = -INFINITY;
+            for (int j = 0; j <= i; j++) {
+                float v = row_in[j];
+                if (v > mx) mx = v;
+            }
+
+            /* sum of exp over j=0..i */
+            float se = 0.0f;
+            for (int j = 0; j <= i; j++)
+                se += expf(row_in[j] - mx);
+
+            /* write softmax for visible, 0 for masked */
+            float inv_se = 1.0f / se;
+            for (int j = 0; j <= i; j++)
+                row_out[j] = expf(row_in[j] - mx) * inv_se;
+            for (int j = i + 1; j < N; j++)
+                row_out[j] = 0.0f;
+        }
+    } else {
+        /* ── General nD ── */
+        for (int m = 0; m < n_matrices; m++) {
+            float *mat_in  = td + m * N * N;
+            float *mat_out = od + m * N * N;
+
+            for (int i = 0; i < N; i++) {
+                float *row_in  = mat_in  + i * N;
+                float *row_out = mat_out + i * N;
+
+                float mx = -INFINITY;
+                for (int j = 0; j <= i; j++) {
+                    float v = row_in[j];
+                    if (v > mx) mx = v;
+                }
+
+                float se = 0.0f;
+                for (int j = 0; j <= i; j++)
+                    se += expf(row_in[j] - mx);
+
+                float inv_se = 1.0f / se;
+                for (int j = 0; j <= i; j++)
+                    row_out[j] = expf(row_in[j] - mx) * inv_se;
+                for (int j = i + 1; j < N; j++)
+                    row_out[j] = 0.0f;
+            }
+        }
+    }
+
+    /* autograd tape */
+    if (dnn_grad_enabled() && tensor_requires_grad(t)) {
+        grad_fn *fn = _grad_fn_create();
+        fn->backward = causal_softmax_backward;
+        fn->n_inputs = 1;
+        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs[0] = (tensor*)t;
+        fn->n_saved = 1;
+        fn->saved_tensors = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->saved_tensors[0] = out;
+        out->requires_grad = 1;
+        out->grad_fn = fn;
+    }
+
+    return out;
+}
+
+
 /* ── cross_entropy_backward ── */
 
 static void cross_entropy_backward(grad_fn *fn, tensor *grad_output) {

@@ -1254,8 +1254,183 @@ static float ce_ref_2d(const float *logits, int target, int n_classes) {
     return (maxv + logf(sum)) - logits[target];
 }
 
+/* ── Causal softmax tests ── */
+
+/* Reference: 2D causal softmax (N, N). For each row i, softmax over cols 0..i */
+static void causal_softmax_ref_2d(const float *x, float *y, int N) {
+    for (int i = 0; i < N; i++) {
+        int vis = i + 1;  /* visible columns: 0..i */
+        /* max over visible */
+        float mx = x[i * N];
+        for (int j = 1; j < vis; j++) {
+            float v = x[i * N + j];
+            if (v > mx) mx = v;
+        }
+        /* sum of exp over visible */
+        float se = 0.0f;
+        for (int j = 0; j < vis; j++)
+            se += expf(x[i * N + j] - mx);
+        /* write output */
+        float inv_se = 1.0f / se;
+        for (int j = 0; j < vis; j++)
+            y[i * N + j] = expf(x[i * N + j] - mx) * inv_se;
+        for (int j = vis; j < N; j++)
+            y[i * N + j] = 0.0f;
+    }
+}
+
+/* Reference: grad of causal softmax w.r.t scores for 2D with given upstream grad */
+static void causal_softmax_grad_ref_2d(const float *x, const float *upstream,
+                                         float *grad_out, int N) {
+    /* compute forward first */
+    float *sm = malloc(N * N * sizeof(float));
+    assert(sm);
+    causal_softmax_ref_2d(x, sm, N);
+
+    for (int i = 0; i < N; i++) {
+        float dot = 0.0f;
+        for (int j = 0; j <= i; j++)
+            dot += sm[i * N + j] * upstream[i * N + j];
+        for (int j = 0; j <= i; j++)
+            grad_out[i * N + j] = sm[i * N + j] * (upstream[i * N + j] - dot);
+        for (int j = i + 1; j < N; j++)
+            grad_out[i * N + j] = 0.0f;
+    }
+    free(sm);
+}
+
+static void test_causal_softmax_2d_forward(void) {
+    printf("  test_causal_softmax_2d_forward... ");
+    int N = 4;
+    float scores[] = {-0.1440903296f, -0.1729036003f, -0.1113158616f, 0.7019837251f,
+                      -0.1275882838f, -1.4973534143f,  0.3323183441f, -0.2673374785f,
+                      -0.2169586841f,  0.1158847867f,  0.2322977369f,  1.1635586866f,
+                       0.6566365068f,  0.1105071774f, -0.7383216023f, -1.0146623675f};
+    float expected[] = {1.0000000000f, 0.0000000000f, 0.0000000000f, 0.0000000000f,
+                        0.7973422042f, 0.2026577958f, 0.0000000000f, 0.0000000000f,
+                        0.2523929763f, 0.3520702655f, 0.3955367581f, 0.0000000000f,
+                        0.4962696763f, 0.2874331041f, 0.1229971731f, 0.0933000466f};
+
+    tensor *t = tensor_zeros(2, (int[]){N, N}, 0);
+    float *tp = tensor_data_ptr(t);
+    for (int i = 0; i < N * N; i++) tp[i] = scores[i];
+
+    tensor *out = tensor_causal_softmax(t);
+    float *op = tensor_data_ptr(out);
+
+    for (int i = 0; i < N * N; i++) {
+        if (fabsf(op[i] - expected[i]) > 1e-5f) {
+            printf("FAIL: out[%d] = %.6f, expected %.6f\n", i, op[i], expected[i]);
+            assert(0);
+        }
+    }
+
+    /* also verify row sums */
+    for (int i = 0; i < N; i++) {
+        float sum = 0.0f;
+        for (int j = 0; j <= i; j++) sum += op[i * N + j];
+        assert(fabsf(sum - 1.0f) < 1e-5f && "causal softmax row sum != 1");
+    }
+    printf("OK\n");
+}
+
+static void test_causal_softmax_4d_forward(void) {
+    printf("  test_causal_softmax_4d_forward... ");
+    /* Test (B=2, H=3, N=4) with the same data repeated for simplicity */
+    int B = 2, H = 3, N = 4;
+    float scores[] = {-0.1440903296f, -0.1729036003f, -0.1113158616f, 0.7019837251f,
+                      -0.1275882838f, -1.4973534143f,  0.3323183441f, -0.2673374785f,
+                      -0.2169586841f,  0.1158847867f,  0.2322977369f,  1.1635586866f,
+                       0.6566365068f,  0.1105071774f, -0.7383216023f, -1.0146623675f};
+    float expected[] = {1.0000000000f, 0.0000000000f, 0.0000000000f, 0.0000000000f,
+                        0.7973422042f, 0.2026577958f, 0.0000000000f, 0.0000000000f,
+                        0.2523929763f, 0.3520702655f, 0.3955367581f, 0.0000000000f,
+                        0.4962696763f, 0.2874331041f, 0.1229971731f, 0.0933000466f};
+
+    tensor *t = tensor_zeros(4, (int[]){B, H, N, N}, 0);
+    float *tp = tensor_data_ptr(t);
+    for (int i = 0; i < B * H * N * N; i++)
+        tp[i] = scores[i % (N * N)];
+
+    tensor *out = tensor_causal_softmax(t);
+    float *op = tensor_data_ptr(out);
+
+    for (int b = 0; b < B; b++) {
+        for (int h = 0; h < H; h++) {
+            for (int i = 0; i < N * N; i++) {
+                int idx = (b * H + h) * N * N + i;
+                if (fabsf(op[idx] - expected[i]) > 1e-5f) {
+                    printf("FAIL: [%d,%d,%d] = %.6f, expected %.6f\n",
+                           b, h, i, op[idx], expected[i]);
+                    assert(0);
+                }
+            }
+        }
+    }
+
+    printf("OK\n");
+}
+
+static void test_causal_softmax_2d_backward(void) {
+    printf("  test_causal_softmax_2d_backward... ");
+    int N = 4;
+    float scores[] = {-0.1440903296f, -0.1729036003f, -0.1113158616f, 0.7019837251f,
+                      -0.1275882838f, -1.4973534143f,  0.3323183441f, -0.2673374785f,
+                      -0.2169586841f,  0.1158847867f,  0.2322977369f,  1.1635586866f,
+                       0.6566365068f,  0.1105071774f, -0.7383216023f, -1.0146623675f};
+    float grad_in[] = {1.0f, 2.0f, 3.0f, 4.0f,
+                       1.0f, 2.0f, 3.0f, 4.0f,
+                       1.0f, 2.0f, 3.0f, 4.0f,
+                       1.0f, 2.0f, 3.0f, 4.0f};
+    float expected_grad[16];
+    causal_softmax_grad_ref_2d(scores, grad_in, expected_grad, N);
+
+    tensor *t = tensor_zeros(2, (int[]){N, N}, 1);
+    float *tp = tensor_data_ptr(t);
+    for (int i = 0; i < N * N; i++) tp[i] = scores[i];
+
+    /* Forward + backward */
+    tensor *out = tensor_causal_softmax(t);
+
+    /* Attach a gradient by summing with weights: loss = sum(out[i][j] * grad_in[i][j]) */
+    /* We can do this by making a weighted sum using tensor_mul + tensor_sum */
+    /* Simpler: just call dnn_backward on out, but we need non-unit grad */
+    /* Create a weight tensor of grad_in values, multiply out by weights, sum */
+    tensor *weights = tensor_zeros(2, (int[]){N, N}, 0);
+    float *wp = tensor_data_ptr(weights);
+    for (int i = 0; i < N * N; i++) wp[i] = grad_in[i];
+
+    dnn_grad_ctx ctx = dnn_no_grad_enter();
+    tensor *loss = tensor_sum(tensor_mul(out, weights), -1);  /* scalar */
+    dnn_no_grad_exit(ctx);
+
+    /* Use mul+sum to inject non-unit upstream gradient into causal_softmax backward.
+     * loss = sum(out * weights) where out = causal_softmax(t).
+     * d(loss)/d(out) = weights, so causal_softmax_backward receives weights as grad_output.
+     *
+     * out has requires_grad=1 (from causal_softmax autograd tape).
+     * tensor_mul creates grad_fn because out requires_grad.
+     * tensor_sum creates grad_fn because mul output requires_grad.
+     * dnn_backward(loss_scalar) propagates: loss_scalar → sum1 → sum0 → mul → causal_softmax → t
+     */
+    tensor *weighted = tensor_mul(out, weights);
+    tensor *sum0 = tensor_sum(weighted, 1);   /* (N,N) → (N,) */
+    tensor *loss_s = tensor_sum(sum0, 0);     /* (N,) → (1,) */
+
+    dnn_backward(loss_s);
+
+    float *ag = tensor_grad(t);
+    assert(ag && "causal softmax grad not null");
+    for (int i = 0; i < N * N; i++) {
+        if (fabsf(ag[i] - expected_grad[i]) > 1e-5f) {
+            printf("FAIL: grad[%d] = %.6f, expected %.6f\n", i, ag[i], expected_grad[i]);
+            assert(0);
+        }
+    }
+    printf("OK\n");
+}
+
 static void test_cross_entropy_simple(void) {
-    printf("  test_cross_entropy_simple... ");
     /* 2 classes, logits [1.0, 2.0], target=1 */
     tensor *logits = tensor_zeros(1, (int[]){2}, 1);
     float *lp = tensor_data_ptr(logits);
@@ -1915,6 +2090,18 @@ int main(void) {
     mem_pool_reset(&scratch);
 
     test_softmax_sum_to_one();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_causal_softmax_2d_forward();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_causal_softmax_4d_forward();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_causal_softmax_2d_backward();
     mem_pool_reset(&params);
     mem_pool_reset(&scratch);
 

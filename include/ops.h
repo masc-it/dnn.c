@@ -19,6 +19,7 @@ tensor *tensor_tanh(const tensor *t);
 tensor *tensor_silu(const tensor *t);
 tensor *tensor_swiglu(const tensor *gate, const tensor *up);
 tensor *tensor_softmax(const tensor *t, int dim);
+tensor *tensor_causal_softmax(const tensor *t);
 
 /* ── Regularization ── */
 tensor *tensor_dropout(const tensor *t, float p);
