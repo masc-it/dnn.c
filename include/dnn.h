@@ -12,5 +12,6 @@
 #include "attention.h"
 #include "multihead.h"
 #include "rope.h"
+#include "tokenizer.h"
 
 #endif /* DNN_H */
