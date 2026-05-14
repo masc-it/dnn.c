@@ -26,8 +26,8 @@ int main(void) {
     int N = 64;
     double t0, t1;
 
-    /* dummy labels */
-    tensor *y = _tensor_scratch_create(1, (int[]){N}, 0);
+    /* dummy labels — use data pool so y survives scratch resets */
+    tensor *y = tensor_zeros_data(1, (int[]){N});
     for (int i = 0; i < N; i++) ((int*)y->data)[i] = i % 10;
 
     /* warmup */
