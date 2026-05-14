@@ -238,7 +238,7 @@ tokenizer ──> embedding ─┤
 | 10 | RoPE frequency table init | — | ~40 | DONE |
 | 11 | `tensor_rope` — dedicated in-place Q/K rotation | (10) | ~100 | DONE |
 | 12 | Fused `tensor_causal_softmax(scores)` — no mask materialization | — | ~120 | DONE |
-| 13 | Fused `tensor_attention(Q,K,V, mask)` — end-to-end | (12) | ~80 |
+| 13 | Fused `tensor_attention(Q,K,V, mask)` — end-to-end | (12) | ~80 | DONE |
 
 ### Phase 3 — Tokenizer
 

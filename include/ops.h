@@ -21,6 +21,9 @@ tensor *tensor_swiglu(const tensor *gate, const tensor *up);
 tensor *tensor_softmax(const tensor *t, int dim);
 tensor *tensor_causal_softmax(const tensor *t);
 
+/* ── Attention ── */
+tensor *tensor_attention(tensor *q, tensor *k, tensor *v, tensor *mask);
+
 /* ── Regularization ── */
 tensor *tensor_dropout(const tensor *t, float p);
 

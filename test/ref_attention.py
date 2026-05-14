@@ -1,212 +1,179 @@
 #!/usr/bin/env python3
 """
-PyTorch reference for scaled dot-product attention.
+PyTorch reference for fused causal attention.
 
-Compares dnn.c attention output against torch.nn.functional.scaled_dot_product_attention
-(or manual compose of matmul + softmax + mask).
+Computes:
+    O = causal_softmax( (Q @ K^T) / sqrt(d_head) ) @ V
 
-Usage:
-    python3 test/ref_attention.py
-
-Tests:
-    1. 2D [N, d] forward (single sequence)
-    2. 2D [N, d] with causal mask
-    3. 3D [B, N, d] batched forward
-    4. 4D [B, H, N, d] multi-head forward
-    5. 3D backward gradient check (finite-diff)
+Verifies gradients against torch.autograd.
+Used to generate expected values for the C test suite.
 """
-
 import torch
 import torch.nn.functional as F
 import numpy as np
 import sys
 
-EPS = 1e-4
+def causal_softmax(x):
+    """Causal softmax over last dim: rows i attend only to j <= i."""
+    N = x.shape[-1]
+    mask = torch.triu(torch.full((N, N), float('-inf'), device=x.device), diagonal=1)
+    return F.softmax(x + mask, dim=-1)
 
-
-def scaled_dot_product_attention(Q, K, V, mask=None):
+def attention_ref(q, k, v):
     """
-    Manual scaled dot-product attention.
-    output = softmax(Q @ K^T / sqrt(d_k) + mask) @ V
+    Fused causal attention: O = causal_softmax(Q@K^T/√d) @ V.
+
+    q, k, v: shape [B, H, N, d_head]
+    Returns:  O shape [B, H, N, d_head]
     """
-    d_k = Q.shape[-1]
-    scale = 1.0 / (d_k ** 0.5)
-    scores = torch.matmul(Q, K.transpose(-2, -1)) * scale
-    if mask is not None:
-        scores = scores + mask
-    attn = F.softmax(scores, dim=-1)
-    return torch.matmul(attn, V)
+    d_head = q.shape[-1]
+    scale = d_head ** -0.5
+    scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+    attn = causal_softmax(scores)
+    return torch.matmul(attn, v), attn
 
+def test_shapes():
+    """Verify forward output for small deterministic case."""
+    torch.manual_seed(42)
+    B, H, N, d = 2, 3, 4, 8
+    q = torch.randn(B, H, N, d, requires_grad=True)
+    k = torch.randn(B, H, N, d, requires_grad=True)
+    v = torch.randn(B, H, N, d, requires_grad=True)
 
-def test_2d_forward():
-    """Test 2D [N, d] forward."""
-    print("  ref_2d_forward... ", end="", flush=True)
-    Q = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
-    K = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-    V = torch.tensor([[1.0, 1.0], [2.0, 2.0]])
-    out = scaled_dot_product_attention(Q, K, V)
-    print(f"[{out[0,0]:.4f}, {out[0,1]:.4f}; {out[1,0]:.4f}, {out[1,1]:.4f}]")
-    return out
+    out, attn = attention_ref(q, k, v)
 
+    # Check shapes
+    assert out.shape == (B, H, N, d), f"out shape mismatch: {out.shape}"
+    assert attn.shape == (B, H, N, N), f"attn shape mismatch: {attn.shape}"
 
-def test_2d_causal():
-    """Test 2D [N, d] with causal mask."""
-    print("  ref_2d_causal... ", end="", flush=True)
-    Q = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
-    K = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
-    V = torch.tensor([[1.0, 1.0], [2.0, 2.0]])
-    N = 2
-    mask = torch.triu(torch.full((N, N), float('-inf')), diagonal=1)
-    out = scaled_dot_product_attention(Q, K, V, mask)
-    print(f"[{out[0,0]:.4f}, {out[0,1]:.4f}; {out[1,0]:.4f}, {out[1,1]:.4f}]")
-    return out
+    # Check causal mask: each row i should be zero for j > i
+    for b in range(B):
+        for h in range(H):
+            for i in range(N):
+                for j in range(i+1, N):
+                    assert attn[b,h,i,j].item() == 0.0, \
+                        f"causal mask violation at ({b},{h},{i},{j})"
 
+    # Check each row sums to 1
+    for b in range(B):
+        for h in range(H):
+            for i in range(N):
+                row_sum = attn[b,h,i,:i+1].sum().item()
+                assert abs(row_sum - 1.0) < 1e-5, \
+                    f"row sum != 1 at ({b},{h},{i}): {row_sum}"
 
-def test_3d_forward():
-    """Test 3D [B, N, d] batched forward."""
-    print("  ref_3d_forward... ", end="", flush=True)
-    Q = torch.tensor([[[1.0, 0.0], [0.0, 1.0]],
-                       [[2.0, 0.0], [0.0, 2.0]]])
-    K = torch.tensor([[[1.0, 2.0], [3.0, 4.0]],
-                       [[1.0, 2.0], [3.0, 4.0]]])
-    V = torch.tensor([[[1.0, 1.0], [2.0, 2.0]],
-                       [[1.0, 1.0], [2.0, 2.0]]])
-    out = scaled_dot_product_attention(Q, K, V)
-    print(f"[{out[0,0,0]:.4f} ... {out[1,1,1]:.4f}]")
-    return out
+    print(f"  shapes test: OK  (B={B}, H={H}, N={N}, d={d})")
+    return out, attn, (q, k, v)
 
+def test_gradients():
+    """Verify gradients via autograd against manual formulas."""
+    torch.manual_seed(123)
+    B, H, N, d = 1, 1, 3, 4
+    q = torch.randn(B, H, N, d, requires_grad=True)
+    k = torch.randn(B, H, N, d, requires_grad=True)
+    v = torch.randn(B, H, N, d, requires_grad=True)
 
-def test_4d_forward():
-    """Test 4D [B, H, N, d] multi-head forward."""
-    print("  ref_4d_forward... ", end="", flush=True)
-    Q = torch.tensor([[[[1.0, 0.0], [0.0, 1.0]],
-                        [[2.0, 0.0], [0.0, 2.0]]]])
-    K = torch.tensor([[[[1.0, 2.0], [3.0, 4.0]],
-                        [[1.0, 2.0], [3.0, 4.0]]]])
-    V = torch.tensor([[[[1.0, 1.0], [2.0, 2.0]],
-                        [[1.0, 1.0], [2.0, 2.0]]]])
-    out = scaled_dot_product_attention(Q, K, V)
-    print(f"[{out[0,0,0,0]:.4f} ... {out[0,1,1,1]:.4f}]")
-    return out
-
-
-def test_single_token():
-    """Test single token N=1."""
-    print("  ref_single_token... ", end="", flush=True)
-    Q = torch.tensor([[5.0]])
-    K = torch.tensor([[3.0]])
-    V = torch.tensor([[7.0]])
-    out = scaled_dot_product_attention(Q, K, V)
-    print(f"[{out[0,0]:.4f}]")
-    return out
-
-
-def test_3d_backward_gradcheck():
-    """Numerical gradient check on 3D attention with torch.autograd.gradcheck."""
-    print("  ref_3d_backward_gradcheck... ", end="", flush=True)
-
-    def attention_fn(q, k, v):
-        d_k = q.shape[-1]
-        scale = 1.0 / (d_k ** 0.5)
-        scores = torch.matmul(q, k.transpose(-2, -1)) * scale
-        attn = F.softmax(scores, dim=-1)
-        return torch.matmul(attn, v)
-
-    Q = torch.tensor([[[1.0, 0.0], [0.0, 1.0]],
-                       [[2.0, 0.0], [0.0, 2.0]]], requires_grad=True)
-    K = torch.tensor([[[1.0, 2.0], [3.0, 4.0]],
-                       [[1.0, 2.0], [3.0, 4.0]]], requires_grad=True)
-    V = torch.tensor([[[1.0, 1.0], [2.0, 2.0]],
-                       [[1.0, 1.0], [2.0, 2.0]]], requires_grad=True)
-
-    # Run backward
-    out = attention_fn(Q, K, V)
+    out, attn = attention_ref(q, k, v)
     loss = out.sum()
     loss.backward()
 
-    assert Q.grad is not None, "Q.grad is None"
-    assert K.grad is not None, "K.grad is None"
-    assert V.grad is not None, "V.grad is None"
-    assert Q.grad.abs().sum().item() > 0, "Q.grad is zero"
-    assert K.grad.abs().sum().item() > 0, "K.grad is zero"
-    assert V.grad.abs().sum().item() > 0, "V.grad is zero"
+    # Manual gradient computation for verification
+    dO = torch.ones_like(out)  # grad of sum
+    d_head = d
 
-    print(f"OK (|dQ|={Q.grad.abs().sum().item():.4f})")
-    return Q.grad, K.grad, V.grad
+    dV_manual = torch.matmul(attn.transpose(-2, -1), dO)
 
+    dP_manual = torch.matmul(dO, v.transpose(-2, -1))
 
-def test_2d_backward_gradcheck():
-    """Numerical gradient check on 2D attention."""
-    print("  ref_2d_backward_gradcheck... ", end="", flush=True)
+    # causal softmax backward
+    dS_manual = torch.zeros_like(dP_manual)
+    for b in range(B):
+        for h in range(H):
+            for i in range(N):
+                dot = (attn[b,h,i,:i+1] * dP_manual[b,h,i,:i+1]).sum()
+                dS_manual[b,h,i,:i+1] = attn[b,h,i,:i+1] * (dP_manual[b,h,i,:i+1] - dot)
+                # j > i stays 0
 
-    def attention_fn(q, k, v):
-        d_k = q.shape[-1]
-        scale = 1.0 / (d_k ** 0.5)
-        scores = torch.matmul(q, k.transpose(-2, -1)) * scale
-        attn = F.softmax(scores, dim=-1)
-        return torch.matmul(attn, v)
+    scale = d_head ** -0.5
+    dS_manual = dS_manual * scale
 
-    Q = torch.tensor([[1.0, 0.0], [0.0, 1.0]], requires_grad=True)
-    K = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
-    V = torch.tensor([[1.0, 1.0], [2.0, 2.0]], requires_grad=True)
+    dQ_manual = torch.matmul(dS_manual, k)
+    dK_manual = torch.matmul(dS_manual.transpose(-2, -1), q)
 
-    out = attention_fn(Q, K, V)
+    tol = 1e-5
+    for name, got, expected in [
+        ("dQ", q.grad, dQ_manual),
+        ("dK", k.grad, dK_manual),
+        ("dV", v.grad, dV_manual),
+    ]:
+        diff = (got - expected).abs().max().item()
+        status = "OK" if diff < tol else "FAIL"
+        print(f"  {name} max diff: {diff:.2e}  {status}")
+        assert diff < tol, f"{name} gradient mismatch: {diff:.2e}"
+
+    print("  gradients test: OK")
+
+def test_multiple_heads():
+    """Verify with multiple heads and larger dimensions."""
+    torch.manual_seed(456)
+    B, H, N, d = 2, 4, 8, 16
+    q = torch.randn(B, H, N, d, requires_grad=True)
+    k = torch.randn(B, H, N, d, requires_grad=True)
+    v = torch.randn(B, H, N, d, requires_grad=True)
+
+    out, attn = attention_ref(q, k, v)
     loss = out.sum()
     loss.backward()
 
-    assert Q.grad is not None
-    assert K.grad is not None
-    assert V.grad is not None
-    assert Q.grad.abs().sum().item() > 0
-    assert K.grad.abs().sum().item() > 0
-    assert V.grad.abs().sum().item() > 0
+    assert q.grad is not None
+    assert k.grad is not None
+    assert v.grad is not None
+    assert q.grad.shape == (B, H, N, d)
+    assert k.grad.shape == (B, H, N, d)
+    assert v.grad.shape == (B, H, N, d)
 
-    print(f"OK (|dQ|={Q.grad.abs().sum().item():.4f})")
-    return Q.grad, K.grad, V.grad
+    # Verify grad components are non-zero and finite
+    for name, g in [("Q", q.grad), ("K", k.grad), ("V", v.grad)]:
+        assert torch.isfinite(g).all(), f"{name} grad has inf/nan"
+        assert g.abs().sum().item() > 0, f"{name} grad is all zero"
 
+    print(f"  multi-head test: OK  (B={B}, H={H}, N={N}, d={d})")
 
-def test_causal_backward_gradcheck():
-    """Numerical gradient check on 2D attention with causal mask."""
-    print("  ref_causal_backward_gradcheck... ", end="", flush=True)
+def test_reference_values():
+    """Generate reference values for C test, printed as C arrays."""
+    torch.manual_seed(789)
+    B, H, N, d = 1, 1, 3, 4
 
-    def attention_fn(q, k, v, mask):
-        d_k = q.shape[-1]
-        scale = 1.0 / (d_k ** 0.5)
-        scores = torch.matmul(q, k.transpose(-2, -1)) * scale + mask
-        attn = F.softmax(scores, dim=-1)
-        return torch.matmul(attn, v)
+    q = torch.randn(B, H, N, d, requires_grad=True)
+    k = torch.randn(B, H, N, d, requires_grad=True)
+    v = torch.randn(B, H, N, d, requires_grad=True)
 
-    Q = torch.tensor([[1.0, 0.0], [0.0, 1.0]], requires_grad=True)
-    K = torch.tensor([[1.0, 2.0], [3.0, 4.0]], requires_grad=True)
-    V = torch.tensor([[1.0, 1.0], [2.0, 2.0]], requires_grad=True)
-    N = 2
-    mask = torch.triu(torch.full((N, N), float('-inf')), diagonal=1)
-
-    out = attention_fn(Q, K, V, mask)
+    out, attn = attention_ref(q, k, v)
     loss = out.sum()
     loss.backward()
 
-    assert Q.grad is not None
-    assert K.grad is not None
-    assert V.grad is not None
-    assert Q.grad.abs().sum().item() > 0
-    assert K.grad.abs().sum().item() > 0
-    assert V.grad.abs().sum().item() > 0
+    print("\n  Reference values (for test_attention.c):")
+    print(f"  // seed=789, B={B}, H={H}, N={N}, d={d}")
+    print(f"  // q_data = {_fmt_tensor(q.detach())}")
+    print(f"  // k_data = {_fmt_tensor(k.detach())}")
+    print(f"  // v_data = {_fmt_tensor(v.detach())}")
+    print(f"  // out_data = {_fmt_tensor(out.detach())}")
+    print(f"  // dq_data = {_fmt_tensor(q.grad)}")
+    print(f"  // dk_data = {_fmt_tensor(k.grad)}")
+    print(f"  // dv_data = {_fmt_tensor(v.grad)}")
 
-    print(f"OK (|dQ|={Q.grad.abs().sum().item():.4f})")
-    return Q.grad, K.grad, V.grad
-
+def _fmt_tensor(t):
+    """Format small tensor as C float array literal."""
+    flat = t.detach().cpu().numpy().flatten()
+    items = ", ".join(f"{v:.8f}f" for v in flat)
+    return "{" + items + "}"
 
 if __name__ == "__main__":
-    print("ref_attention (PyTorch reference):")
-    results = {}
-    results['2d_forward'] = test_2d_forward()
-    results['2d_causal'] = test_2d_causal()
-    results['3d_forward'] = test_3d_forward()
-    results['4d_forward'] = test_4d_forward()
-    results['single_token'] = test_single_token()
-    results['2d_backward'] = test_2d_backward_gradcheck()
-    results['3d_backward'] = test_3d_backward_gradcheck()
-    results['causal_backward'] = test_causal_backward_gradcheck()
-    print("  ALL PASS")
-    sys.exit(0)
+    print("PyTorch reference: fused causal attention")
+    print("=" * 50)
+    test_shapes()
+    test_gradients()
+    test_multiple_heads()
+    test_reference_values()
+    print("=" * 50)
+    print("All tests passed.")
