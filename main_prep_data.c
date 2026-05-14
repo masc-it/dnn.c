@@ -83,12 +83,13 @@ static void print_usage(void) {
         "Usage: main_prep_data --in-file <path> --chunk-size <N> --out-file <name>\n"
         "\n"
         "  --in-file    path to input .txt file\n"
-        "  --chunk-size number of content tokens per sequence (excl. BOS/EOS)\n"
+        "  --chunk-size number of tokens per sequence (incl. BOS/EOS, min 3)\n"
         "  --out-file   output filename (saved as data/<name>.bin)\n"
         "\n"
         "Reads a .txt file, tokenizes with byte-level tokenizer (+ chat template),\n"
-        "chunks token IDs into sequences of chunk_size, wraps each in BOS/EOS,\n"
-        "drops the last partial sequence, and saves as a binary .bin file.\n");
+        "chunks token IDs into sequences of (chunk_size - 2) content tokens,\n"
+        "wraps each in BOS/EOS, drops the last partial sequence, and saves\n"
+        "as a binary .bin file.\n");
 }
 
 int main(int argc, char **argv) {
@@ -168,8 +169,16 @@ int main(int argc, char **argv) {
     int *content_start = all_ids + 1;
 
     /* ── Chunk ── */
-    int seq_len = chunk_size + 2;   /* BOS + chunk_size content tokens + EOS */
-    int num_chunks = content_len / chunk_size;
+    int content_per_chunk = chunk_size - 2;  /* reserve 1 BOS + 1 EOS */
+    int seq_len          = chunk_size;        /* total including BOS/EOS */
+    if (chunk_size < 3) {
+        fprintf(stderr, "error: --chunk-size must be >= 3 (need room for BOS + 1 token + EOS)\n");
+        mem_pool_destroy(&params);
+        mem_pool_destroy(&scratch);
+        mem_pool_destroy(&data);
+        return 1;
+    }
+    int num_chunks = content_len / content_per_chunk;
     int num_sequences = num_chunks;
 
     if (num_chunks == 0) {
@@ -181,8 +190,9 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    int total_dropped = content_len - num_chunks * chunk_size;
-    printf("Chunks: %d sequences of %d tokens", num_chunks, chunk_size);
+    int total_dropped = content_len - num_chunks * content_per_chunk;
+    printf("Chunks: %d sequences of %d tokens (%d content + BOS/EOS)",
+           num_chunks, seq_len, content_per_chunk);
     if (total_dropped > 0)
         printf(" (dropped %d trailing tokens)", total_dropped);
     printf("\n");
@@ -242,13 +252,13 @@ int main(int argc, char **argv) {
     int32_t eos = (int32_t)TOKENIZER_EOS_ID;
 
     for (int s = 0; s < num_chunks; s++) {
-        const int *chunk_start = content_start + s * chunk_size;
+        const int *chunk_start = content_start + s * content_per_chunk;
 
         /* write BOS */
         if (fwrite(&bos, sizeof(int32_t), 1, fout) != 1) goto write_err;
 
-        /* write chunk_size content tokens */
-        if (fwrite(chunk_start, sizeof(int32_t), (size_t)chunk_size, fout) != (size_t)chunk_size)
+        /* write content_per_chunk content tokens */
+        if (fwrite(chunk_start, sizeof(int32_t), (size_t)content_per_chunk, fout) != (size_t)content_per_chunk)
             goto write_err;
 
         /* write EOS */

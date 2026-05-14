@@ -7,6 +7,7 @@
 #include "pool.h"
 #include "tensor_int.h"
 #include "autograd.h"
+#include "optim.h"
 #include <assert.h>
 #include <string.h>
 #include <math.h>
@@ -240,4 +241,45 @@ tensor *decoder_lm_forward(decoder_lm *lm, const tensor *input_ids) {
     tensor *logits = linear_forward(lm->lm_head, h);
 
     return logits;
+}
+
+/* ── Training step ── */
+
+tensor *decoder_lm_train_step(decoder_lm *lm, const tensor *input_ids,
+                               adamw_opt *opt) {
+    assert(lm && input_ids && opt);
+    assert(input_ids->ndim == 2 && "train_step: input_ids must be 2D [B, N]");
+    assert(input_ids->contiguous && "train_step: input_ids must be contiguous");
+    assert(input_ids->shape[1] >= 2 && "train_step: need N >= 2 for at least 1 target");
+
+    int B = input_ids->shape[0];
+    int N = input_ids->shape[1];
+
+    /* ── Forward ── */
+    tensor *logits = decoder_lm_forward(lm, input_ids);  /* [B, N, vocab] */
+
+    /* ── Shift: logits[:, :-1, :] predict input_ids[:, 1:] ── */
+    tensor *logits_shifted = tensor_slice(logits, 1, 0, N - 1);  /* [B, N-1, vocab] */
+
+    /* Build target = input_ids[:, 1:], same int-into-float trick */
+    tensor *target = tensor_zeros_data(2, (int[]){B, N - 1});
+    int *td = (int *)target->data;
+    int *id = (int *)input_ids->data;
+    for (int b = 0; b < B; b++) {
+        for (int n = 1; n < N; n++) {
+            td[b * (N - 1) + (n - 1)] = id[b * N + n];
+        }
+    }
+
+    /* ── Loss: cross-entropy over vocab dim ── */
+    tensor *loss = tensor_cross_entropy(logits_shifted, target, 2);
+
+    /* ── Backward ── */
+    dnn_backward(loss);
+
+    /* ── Update ── */
+    adamw_step(opt);
+    adamw_zero_grad(opt);
+
+    return loss;
 }

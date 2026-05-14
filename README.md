@@ -104,3 +104,4 @@ Requires: Apple Accelerate (or cblas), libz, libomp.
 - Test behavior, not implementation
 - Interfaces are deep — few powerful operations, not many trivial ones
 - All pooled, no raw `malloc` during training
+- executables go under build/

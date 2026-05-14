@@ -3,6 +3,7 @@
 
 #include "tensor.h"
 #include "nn.h"
+#include "optim.h"
 
 /* ── KV Cache ──
  *
@@ -129,5 +130,24 @@ decoder_lm *decoder_lm_create(int vocab_size, int d_model,
  *   Autograd wired: backward flows gradients to all LM parameters.
  */
 tensor *decoder_lm_forward(decoder_lm *lm, const tensor *input_ids);
+
+/* ── Training step (next-token prediction, teacher forcing) ──
+ *
+ * Performs one training step:
+ *
+ *   1. Forward: logits = decoder_lm_forward(lm, input_ids)  [B, N, vocab]
+ *   2. Shift: logits[:, :-1, :] predict input_ids[:, 1:]
+ *   3. Loss: cross-entropy over vocab dimension
+ *   4. Backward: dnn_backward(loss)
+ *   5. Update: adamw_step(opt) + adamw_zero_grad(opt)
+ *
+ *   input_ids — [B, N] int tensor (token IDs).  Must be contiguous.
+ *               N >= 2 (need at least 1 target token).
+ *
+ *   Returns the scalar loss tensor from scratch pool.
+ *   Caller must reset scratch/data pools before next call.
+ */
+tensor *decoder_lm_train_step(decoder_lm *lm, const tensor *input_ids,
+                               adamw_opt *opt);
 
 #endif /* DNN_TRANSFORMER_H */

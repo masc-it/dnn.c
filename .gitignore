@@ -10,3 +10,4 @@ obj/
 *ubyte
 .venv
 data/
+build/

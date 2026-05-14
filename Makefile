@@ -16,6 +16,8 @@ TEST_SRCS = $(wildcard $(TESTDIR)/*.c)
 TEST_OBJDIR = $(OBJDIR)/test
 TEST_BINS = $(patsubst $(TESTDIR)/%.c, $(TEST_OBJDIR)/%, $(TEST_SRCS))
 
+BUILDDIR = build
+
 LIB      = libdnn.a
 
 .PHONY: all clean test run bench
@@ -41,13 +43,22 @@ test: $(TEST_BINS)
 $(TEST_OBJDIR)/%: $(TESTDIR)/%.c $(LIB) | $(TEST_OBJDIR)
 	$(CC) $(CFLAGS) $(OMPFLAGS) $(INCDIRS) $< -L. -ldnn -framework Accelerate $(LDFLAGS) -o $@
 
-run: main $(LIB)
-	./main
+$(BUILDDIR):
+	mkdir -p $@
 
-main: main.c $(LIB)
+run: $(BUILDDIR)/main $(LIB)
+	./$(BUILDDIR)/main
+
+run_lm: $(BUILDDIR)/main_lm $(LIB)
+	./$(BUILDDIR)/main_lm
+
+$(BUILDDIR)/main: main.c $(LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(OMPFLAGS) $(INCDIRS) $< -L. -ldnn -framework Accelerate $(LDFLAGS) -o $@
 
-main_prep_data: main_prep_data.c $(LIB)
+$(BUILDDIR)/main_prep_data: main_prep_data.c $(LIB) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(OMPFLAGS) $(INCDIRS) $< -L. -ldnn -framework Accelerate $(LDFLAGS) -o $@
+
+$(BUILDDIR)/main_lm: main_lm.c $(LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(OMPFLAGS) $(INCDIRS) $< -L. -ldnn -framework Accelerate $(LDFLAGS) -o $@
 
 BENCH_CFLAGS = -Wall -Wextra -pedantic -std=c11 -O3 -ffast-math -g -DACCELERATE_NEW_LAPACK $(OMPFLAGS)
@@ -59,33 +70,33 @@ bench_all: clean
 	  $(CC) $(BENCH_CFLAGS) $(INCDIRS) -MMD -MP -c $$s -o $(OBJDIR)/$$(basename $$s .c).o || exit 1; \
 	done
 	ar rcs $(LIB) $(OBJS)
-	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_conv2d.c $(BENCH_LIBS) -o bench_conv2d
-	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_matmul.c $(BENCH_LIBS) -o bench_matmul
-	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_ops.c $(BENCH_LIBS) -o bench_ops
-	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_multihead.c $(BENCH_LIBS) -o bench_multihead
-	echo "=== Conv2D ===" && ./bench_conv2d
-	echo "=== MatMul ===" && ./bench_matmul
-	echo "=== Ops ===" && ./bench_ops
-	echo "=== Multihead ===" && ./bench_multihead
+	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_conv2d.c $(BENCH_LIBS) -o $(OBJDIR)/bench_conv2d
+	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_matmul.c $(BENCH_LIBS) -o $(OBJDIR)/bench_matmul
+	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_ops.c $(BENCH_LIBS) -o $(OBJDIR)/bench_ops
+	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_multihead.c $(BENCH_LIBS) -o $(OBJDIR)/bench_multihead
+	echo "=== Conv2D ===" && $(OBJDIR)/bench_conv2d
+	echo "=== MatMul ===" && $(OBJDIR)/bench_matmul
+	echo "=== Ops ===" && $(OBJDIR)/bench_ops
+	echo "=== Multihead ===" && $(OBJDIR)/bench_multihead
 
 bench_conv2d: $(LIB)
-	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_conv2d.c $(BENCH_LIBS) -o bench_conv2d
-	./bench_conv2d
+	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_conv2d.c $(BENCH_LIBS) -o $(OBJDIR)/bench_conv2d
+	$(OBJDIR)/bench_conv2d
 
 bench_matmul: $(LIB)
-	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_matmul.c $(BENCH_LIBS) -o bench_matmul
-	./bench_matmul
+	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_matmul.c $(BENCH_LIBS) -o $(OBJDIR)/bench_matmul
+	$(OBJDIR)/bench_matmul
 
 bench_ops: $(LIB)
-	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_ops.c $(BENCH_LIBS) -o bench_ops
-	./bench_ops
+	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_ops.c $(BENCH_LIBS) -o $(OBJDIR)/bench_ops
+	$(OBJDIR)/bench_ops
 
 bench_multihead: $(LIB)
-	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_multihead.c $(BENCH_LIBS) -o bench_multihead
-	./bench_multihead
+	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_multihead.c $(BENCH_LIBS) -o $(OBJDIR)/bench_multihead
+	$(OBJDIR)/bench_multihead
 
 clean:
-	rm -rf $(OBJDIR) $(LIB) main main_prep_data bench_conv2d bench_matmul bench_ops bench_multihead bench_{baseline,after}
+	rm -rf $(OBJDIR) $(BUILDDIR) $(LIB)
 
 # include auto-generated deps
 -include $(DEPS)

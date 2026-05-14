@@ -213,6 +213,12 @@ matmul_2d ──> [15a] batched_matmul ✅ ──────┤  │
                                             │  │
                                        transformer_block ✅
                                        (attn + swiglu ffn + pre-norm + residual)
+                                            │
+                                       decoder_lm ✅
+                                       (embed + n×block + norm + lm_head)
+                                            │
+                                       train_step ✅
+                                       (teacher forcing + cross-entropy + optimizer)
 ```
 
 ### Phase 1 — Foundation (no new ops, just compose)
@@ -384,6 +390,46 @@ mem_pool scratch = mem_pool_create(512 * 1024 * 1024);
 
 ---
 
+#### 18 — Training loop ✅ **DONE**
+
+**What was implemented:**
+
+- **`decoder_lm_train_step(lm, input_ids, opt)`** in `src/transformer.c` — one
+  training step with teacher forcing:
+
+      1. `decoder_lm_forward` → logits [B, N, vocab]
+      2. Slice logits[:, :-1, :] → [B, N-1, vocab]
+      3. Build target tensor from input_ids[:, 1:] (int IDs, same int-in-float trick)
+      4. `tensor_cross_entropy` over vocab dim (3D logits, 2D targets)
+      5. `dnn_backward(loss)` — flows through slice view back to all params
+      6. `adamw_step` + `adamw_zero_grad` — parameter update
+
+  The slice view is autograd-wired: `tensor_slice` registers a `slice_backward`
+  that scatters gradients from the view back to the parent. `cross_entropy_backward`
+  writes through `_grad_ensure` (which walks to the root) directly into the
+  original logits grad, and the autograd traversal continues through the
+  decoder LM graph back to all leaf params.
+
+**Tests added:**
+- `test/ref_decoder_lm_training.py` — PyTorch reference: 3 steps training with
+  `--small` config, outputs loss values and grad reference arrays
+- `test/test_decoder_lm_training.c` — C tests:
+  - Train step runs with finite loss
+  - All parameter groups get grad buffers allocated
+  - Parameters change after update (embedding max diff > 0)
+  - Loss decreases over 3 steps (monotonic decrease)
+  - Reference loss values match PyTorch within tolerance (random init differs)
+  - Various batch/sequence shapes work (B=1/2/4, N=2/3/4/5)
+
+**Files changed:**
+- `include/transformer.h` — added `decoder_lm_train_step` declaration
+- `src/transformer.c` — added `decoder_lm_train_step` implementation
+- `test/ref_decoder_lm_training.py` — new PyTorch reference
+- `test/test_decoder_lm_training.c` — new C test suite
+- `docs/transformer_todo.md` — marked 18 done
+
+---
+
 #### 16 — `transformer_block` ✅ **DONE**
 
 **What was implemented:**
@@ -470,7 +516,7 @@ mem_pool scratch = mem_pool_create(512 * 1024 * 1024);
 |---|------|------------|-------|
 | 16 | `transformer_block` (pre-norm attn + pre-norm swiglu-ffn + residual) transformer.c | (3,6,7,9,11,15a) | ~60 | ✅ **DONE** |
 | 17 | Decoder-only LM (embed → N×block → norm → lm_head) | (4,16) | ~60 | ✅ **DONE** |
-| 18 | Training loop (next-token prediction, teacher forcing, cross-entropy) | (17) | ~100 |
+| 18 | Training loop (next-token prediction, teacher forcing, cross-entropy) | (17) | ~100 | ✅ **DONE** |
 | 19 | Generation loop (autoregressive, kv-cache optional) | (17,15b,15c) | ~80 |
 
 ### Total estimated new code
