@@ -104,12 +104,35 @@ static void softmax_backward(grad_fn *fn, tensor *grad_output) {
 
             /* dot = sum(sm * g) over this row */
             float dot = 0.0f;
-            for (int c = 0; c < C; c++)
-                dot += sm_row[c] * g_row[c];
+#if DNN_HAVE_NEON
+            float32x4_t vdot = vdupq_n_f32(0.0f);
+            int c = 0;
+            for (; c + 4 <= C; c += 4)
+                vdot = vfmaq_f32(vdot, vld1q_f32(sm_row + c),
+                                          vld1q_f32(g_row + c));
+            dot = vaddvq_f32(vdot);
+            for (; c < C; c++) dot += sm_row[c] * g_row[c];
+#else
+            for (int c = 0; c < C; c++) dot += sm_row[c] * g_row[c];
+#endif
 
             /* dL/dx_i = sm_i * (g_i - dot) */
+#if DNN_HAVE_NEON
+            float32x4_t vdot_vec = vdupq_n_f32(dot);
+            c = 0;
+            for (; c + 4 <= C; c += 4) {
+                float32x4_t vsm = vld1q_f32(sm_row + c);
+                float32x4_t vg  = vld1q_f32(g_row + c);
+                float32x4_t vag = vld1q_f32(ag_row + c);
+                vst1q_f32(ag_row + c,
+                    vfmaq_f32(vag, vsm, vsubq_f32(vg, vdot_vec)));
+            }
+            for (; c < C; c++)
+                ag_row[c] += sm_row[c] * (g_row[c] - dot);
+#else
             for (int c = 0; c < C; c++)
                 ag_row[c] += sm_row[c] * (g_row[c] - dot);
+#endif
         }
         return;
     }

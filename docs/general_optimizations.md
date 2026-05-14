@@ -98,4 +98,11 @@ Additionally, `_grad_ensure` calls are hoisted before the SIMD loop, so the hot 
 
 ## 12. Softmax 2D+dim-1 fast path missing in backward
 
-`softmax_backward` has **no** 2D contiguous fast path — only the general nD coord-decompose path. The forward does have one (and uses NEON). So softmax backward for a classifier (the most common use) is ~10× slower than it could be.
+`softmax_backward` had **no** 2D contiguous fast path — only the general nD coord-decompose path. The forward did have one (and used NEON). So softmax backward for a classifier (the most common use) was ~10× slower than it could be.
+
+**implemented: true** — Item 3 already added the 2D contiguous fast path (scalar loops, avoid coord decompose entirely). This item adds **NEON SIMD vectorization** to both loops in that 2D path:
+- Dot product: `vfmaq_f32` FMA accumulation over 4-wide vectors, `vaddvq_f32` horizontal sum
+- Gradient apply: `vld1q_f32` / `vfmaq_f32` / `vst1q_f32` — 4 elements at a time, `vsubq_f32` for (g - dot) term
+- Scalar tail for remaining <4 columns
+
+**Measured impact:** ~28.8 batch/s baseline vs ~28.9 after. Within noise (~1%). MNIST CNN benchmark uses `tensor_cross_entropy` backward (fused, never calls `softmax_backward`), so this path isn't exercised. Benefit appears in models using standalone softmax + separate loss (e.g., softmax + NLL loss, or attention softmax in transformers).
