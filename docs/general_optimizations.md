@@ -63,7 +63,13 @@ Four nested loops (`oc, n, oh, ow`) summing `gd[...]` per output channel (`conv.
 
 ## 9. Layer norm backward: `dy*weight` computed twice per element
 
-In `ln_backward()`, the expression `gd[s*d+j] * (wd ? wd[j] : 1.0f)` is computed once in the reduction loop (sum_dy, sum_dy_xmu) and again in the final dx loop (`norm.c:62` vs line 73). Could compute once and keep in a register / local array. With `#pragma omp simd` already there, the compiler may optimize this, but not guaranteed.
+In `ln_backward()`, the expression `gd[s*d+j] * (wd ? wd[j] : 1.0f)` was computed once in the reduction loop (sum_dy, sum_dy_xmu) and again in the final dx loop. The second pass re-read gd + re-multiplied by weight + re-evaluated the branch.
+
+**implemented: true** — Precompute `dy_buf[d]` VLA on each thread's stack during the reduction pass, then reuse in the second pass. Saves ~1 load + 1 multiply + 1 conditional branch per element in the second loop.
+
+**Measured impact:** ~29.3 batch/s before and after (unchanged, within noise). Layer norm is not in the MNIST CNN training path (`main.c` uses no layer norm layers), so this benchmark cannot measure the optimization. Actual benefit scales with layer norm usage frequency and hidden dimension size.
+
+**Correctness:** All `test_ln_precision` tests pass (|dx-expected|_max = 1.12e-07, |dw-expected|_max = 1.19e-07, well under 1e-5 tolerance). All `test_autograd` layer norm sections pass.
 
 ## 10. `dnn_backward` uses `realloc` — violates pool-only rule
 

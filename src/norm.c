@@ -51,20 +51,29 @@ static void ln_backward(grad_fn *fn, tensor *grad_output) {
                 bg[j] += gd[s * d + j];
     }
 
-    /* dx = rstd * (dy - mean(dy) - xmu * mean(dy * xmu) * rstd²) */
+    /* dx = rstd * (dy - mean(dy) - xmu * mean(dy * xmu) * rstd²)
+     *
+     * Precompute dy = gd * weight (or 1.0f if no weight) into a local VLA
+     * so the second loop avoids re-reading gd + re-multiplying.  Saves ~1
+     * load + 1 multiply + 1 branch per element in the second pass.
+     *
+     * The VLA lives on each thread's stack (OpenMP parallel region → private).
+     * d is typically hidden-dim size (128-4096 in most models, ~12KB for 3136). */
     if (tensor_requires_grad(x)) {
         float *xg = _grad_ensure(x);
 #pragma omp parallel for
         for (int s = 0; s < n; s++) {
             float m = mean[s], rs = rstd[s];
 
+            float dy_buf[d];  /* VLA, per-thread stack — stores dy = gd * weight */
             float sum_dy = 0.0f, sum_dy_xmu = 0.0f;
             #pragma omp simd reduction(+:sum_dy,sum_dy_xmu)
             for (int j = 0; j < d; j++) {
-                float dy = gd[s * d + j] * (wd ? wd[j] : 1.0f);
+                float w = wd ? wd[j] : 1.0f;
+                dy_buf[j] = gd[s * d + j] * w;
                 float xmu = xd[s * d + j] - m;
-                sum_dy     += dy;
-                sum_dy_xmu += dy * xmu;
+                sum_dy     += dy_buf[j];
+                sum_dy_xmu += dy_buf[j] * xmu;
             }
 
             float mean_dy     = sum_dy * inv_d;
@@ -72,9 +81,8 @@ static void ln_backward(grad_fn *fn, tensor *grad_output) {
 
             #pragma omp simd
             for (int j = 0; j < d; j++) {
-                float dy  = gd[s * d + j] * (wd ? wd[j] : 1.0f);
                 float xmu = xd[s * d + j] - m;
-                float dx  = rs * (dy - mean_dy - xmu * mean_dy_xmu * rs * rs);
+                float dx  = rs * (dy_buf[j] - mean_dy - xmu * mean_dy_xmu * rs * rs);
                 xg[s * d + j] += dx;
             }
         }
