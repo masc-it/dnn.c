@@ -1,6 +1,7 @@
 #include "tensor.h"
 #include "pool_int.h"
 #include "tensor_int.h"
+#include "autograd_int.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -120,7 +121,108 @@ tensor *tensor_uniform(int ndim, const int *shape, int requires_grad, float boun
     return t;
 }
 
-/* ── Views ── */
+/* ── slice_backward ──
+ *
+ * Gradient for slice operation: scatter-add grad_output values back
+ * into the parent tensor's gradient buffer at the correct positions.
+ *
+ * For each element at coordinate (d0, ..., d_{ndim-1}) in the slice,
+ * the parent coordinate is (d0, ..., start+d_dim, ..., d_{ndim-1}).
+ * We walk every element and scatter.
+ */
+
+static void slice_backward(grad_fn *fn, tensor *grad_output) {
+    tensor *parent = fn->inputs[0];
+    if (!(parent->grad_fn || parent->requires_grad)) return;
+
+    float *pg = _grad_ensure(parent);
+    if (!pg) return;
+
+    int dim   = *(int*)fn->saved_tensors[0];
+    int start = *(int*)fn->saved_tensors[1];
+    float *gd = (float*)grad_output->data;
+    int total = tensor_numel(grad_output);
+
+    int coord[DNN_MAX_DIMS];
+    for (int flat = 0; flat < total; flat++) {
+        /* Decompose flat index into coordinates in slice space */
+        int rem = flat;
+        for (int d = grad_output->ndim - 1; d >= 0; d--) {
+            coord[d] = rem % grad_output->shape[d];
+            rem /= grad_output->shape[d];
+        }
+
+        /* Map to parent offset */
+        int p_off = parent->offset;
+        for (int d = 0; d < parent->ndim; d++) {
+            int c = coord[d];
+            if (d == dim) c += start;
+            p_off += c * parent->strides[d];
+        }
+
+        /* Compute grad_output offset */
+        int g_off = grad_output->offset;
+        for (int d = 0; d < grad_output->ndim; d++)
+            g_off += coord[d] * grad_output->strides[d];
+
+        pg[p_off] += gd[g_off];
+    }
+}
+
+/* ── reshape_backward ──
+ *
+ * Reshape is a view-only operation (same data buffer, new shape/strides).
+ * The gradient flows directly: since the view shares the parent's data,
+ * we accumulate grad_output into the parent's grad buffer at the
+ * corresponding flat positions.
+ *
+ * For contiguous parent + contiguous output, they share the same
+ * buffer layout, so we just add element-by-element.
+ * For non-contiguous, we walk coordinates.
+ */
+
+static void reshape_backward(grad_fn *fn, tensor *grad_output) {
+    tensor *parent = fn->inputs[0];
+    if (!(parent->grad_fn || parent->requires_grad)) return;
+
+    float *pg = _grad_ensure(parent);
+    if (!pg) return;
+
+    float *gd = (float*)grad_output->data;
+    int total = tensor_numel(grad_output);
+
+    if (grad_output->contiguous && parent->contiguous) {
+        /* Both contiguous: same flat layout, direct element-wise add */
+        int poff = parent->offset;
+        int goff = grad_output->offset;
+        for (int i = 0; i < total; i++)
+            pg[poff + i] += gd[goff + i];
+    } else {
+        /* Strided fallback: walk grad_output coordinates, map to parent */
+        int p_coord[DNN_MAX_DIMS];
+        for (int flat = 0; flat < total; flat++) {
+            int rem = flat;
+            for (int d = grad_output->ndim - 1; d >= 0; d--) {
+                p_coord[d] = rem % grad_output->shape[d];
+                rem /= grad_output->shape[d];
+            }
+            int g_off = grad_output->offset;
+            int p_off = parent->offset;
+            for (int d = 0; d < parent->ndim; d++) {
+                /* For reshape, the logical coordinate in the output
+                 * maps to the same flat index in the parent.
+                 * But with different shapes, we need to compute the
+                 * parent flat index from the output's logical coord
+                 * using the parent's strides.
+                 * Since reshape doesn't change the data layout (when
+                 * contiguous), the flat index is the same. */
+                g_off += p_coord[d] * grad_output->strides[d];
+                p_off += p_coord[d] * parent->strides[d];
+            }
+            pg[p_off] += gd[g_off];
+        }
+    }
+}
 
 tensor *tensor_slice(tensor *t, int dim, int start, int len) {
     assert(dim < t->ndim && start >= 0 && start + len <= t->shape[dim]);
@@ -132,6 +234,26 @@ tensor *tensor_slice(tensor *t, int dim, int start, int len) {
     v->grad = NULL;
     v->pool = NULL;
     v->contiguous = strides_contiguous(v->shape, v->strides, v->ndim);
+
+    /* ── Autograd ── */
+    if (dnn_grad_enabled() && tensor_requires_grad(t)) {
+        grad_fn *fn = _grad_fn_create();
+        fn->backward = slice_backward;
+        fn->n_inputs = 1;
+        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs[0] = t;
+        fn->n_saved = 2;
+        fn->saved_tensors = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
+        int *saved_dim   = mem_scratch_alloc(sizeof(int), NULL);
+        int *saved_start = mem_scratch_alloc(sizeof(int), NULL);
+        *saved_dim   = dim;
+        *saved_start = start;
+        fn->saved_tensors[0] = (tensor*)saved_dim;
+        fn->saved_tensors[1] = (tensor*)saved_start;
+        v->requires_grad = 1;
+        v->grad_fn = fn;
+    }
+
     return v;
 }
 
@@ -186,6 +308,19 @@ tensor *tensor_reshape(tensor *t, int ndim, const int *shape) {
         v->grad_fn = NULL;
         v->grad = NULL;
         v->pool = NULL;
+
+        /* ── Autograd ── */
+        if (dnn_grad_enabled() && tensor_requires_grad(t)) {
+            grad_fn *fn = _grad_fn_create();
+            fn->backward = reshape_backward;
+            fn->n_inputs = 1;
+            fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+            fn->inputs[0] = t;
+            fn->n_saved = 0;
+            v->requires_grad = 1;
+            v->grad_fn = fn;
+        }
+
         return v;
     }
     /* non-contiguous: copy to new contiguous tensor with new shape */

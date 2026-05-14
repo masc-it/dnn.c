@@ -79,17 +79,19 @@ static void split_heads_backward(grad_fn *fn, tensor *grad_output) {
 
     /* gradient for input: merge heads (inverse of split)
      * grad_input[b,n,h,d] = grad_output[b,h,n,d]
-     * Write to input's grad buffer (which is same shape as input). */
-    /* For contiguous gradient: walk output in [B, H, N, d_k] order and scatter */
+     * Write to input's grad buffer (which is same shape as input).
+     * NOTE: input may be a view (e.g., slice of fused QKV).
+     * _grad_ensure returns root->grad; use input->offset to target
+     * the correct region of the root's grad buffer. */
     int numel = tensor_numel(input);
-    memset(ig, 0, numel * sizeof(float));
+    memset(ig + input->offset, 0, numel * sizeof(float));
 
     int d_k = D / saved_H;
     /* Collapse over (b, h): each thread handles one (batch, head) pair */
     #pragma omp parallel for collapse(2) if (B * saved_H >= OMP_MIN_ITERS)
     for (int b = 0; b < B; b++)
         for (int h = 0; h < saved_H; h++) {
-            float *ig_off = ig + b * N * D + h * d_k;
+            float *ig_off = ig + input->offset + b * N * D + h * d_k;
             float *gd_off = gd + ((b * saved_H + h) * N) * d_k;
             for (int n = 0; n < N; n++) {
                 float *ig_row = ig_off + n * D;
@@ -163,15 +165,16 @@ static void merge_heads_backward(grad_fn *fn, tensor *grad_output) {
 
     /* gradient for input: split heads (inverse of merge)
      * grad_input[b,h,n,d] = grad_output[b,n,h,d]
-     * Write to input's grad buffer. */
+     * Write to input's grad buffer.
+     * NOTE: input may be a view — use input->offset for root grad. */
     int numel = tensor_numel(input);
-    memset(ig, 0, numel * sizeof(float));
+    memset(ig + input->offset, 0, numel * sizeof(float));
 
     /* Collapse over (b, h): each thread handles one (batch, head) pair */
     #pragma omp parallel for collapse(2) if (B * H >= OMP_MIN_ITERS)
     for (int b = 0; b < B; b++)
         for (int h = 0; h < H; h++) {
-            float *ig_off = ig + ((b * H + h) * N) * d_k;
+            float *ig_off = ig + input->offset + ((b * H + h) * N) * d_k;
             float *gd_off = gd + b * N * H * d_k + h * d_k;
             for (int n = 0; n < N; n++) {
                 float *ig_row = ig_off + n * d_k;

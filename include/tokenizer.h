@@ -25,6 +25,23 @@
 #define TOKENIZER_PAD_ID      259
 #define TOKENIZER_UNK_ID      260
 
+/* ── Binary dataset format ──
+ *
+ * Header (64 bytes), then flat int32 token IDs:
+ *
+ *   [0x00] magic        = TOKENIZER_DATA_MAGIC
+ *   [0x04] version      = TOKENIZER_DATA_VERSION
+ *   [0x08] vocab_size
+ *   [0x0C] num_sequences
+ *   [0x10] seq_len       (includes BOS + EOS)
+ *   [0x14] reserved[44]  (zero-filled, for forward compat)
+ *   [0x40] data          num_sequences × seq_len × int32_t
+ */
+
+#define TOKENIZER_DATA_MAGIC       0x444E4E44  /* "DNND" */
+#define TOKENIZER_DATA_VERSION     1
+#define TOKENIZER_DATA_HEADER_SIZE 64  /* total header bytes */
+
 typedef struct {
     int  bos_id;
     int  eos_id;

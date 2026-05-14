@@ -47,6 +47,9 @@ run: main $(LIB)
 main: main.c $(LIB)
 	$(CC) $(CFLAGS) $(OMPFLAGS) $(INCDIRS) $< -L. -ldnn -framework Accelerate $(LDFLAGS) -o $@
 
+main_prep_data: main_prep_data.c $(LIB)
+	$(CC) $(CFLAGS) $(OMPFLAGS) $(INCDIRS) $< -L. -ldnn -framework Accelerate $(LDFLAGS) -o $@
+
 BENCH_CFLAGS = -Wall -Wextra -pedantic -std=c11 -O3 -ffast-math -g -DACCELERATE_NEW_LAPACK $(OMPFLAGS)
 BENCH_LIBS  = -L. -ldnn -framework Accelerate $(LDFLAGS)
 
@@ -82,7 +85,7 @@ bench_multihead: $(LIB)
 	./bench_multihead
 
 clean:
-	rm -rf $(OBJDIR) $(LIB) main bench_conv2d bench_matmul bench_ops bench_multihead bench_{baseline,after}
+	rm -rf $(OBJDIR) $(LIB) main main_prep_data bench_conv2d bench_matmul bench_ops bench_multihead bench_{baseline,after}
 
 # include auto-generated deps
 -include $(DEPS)

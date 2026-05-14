@@ -13,5 +13,6 @@
 #include "multihead.h"
 #include "rope.h"
 #include "tokenizer.h"
+#include "transformer.h"
 
 #endif /* DNN_H */

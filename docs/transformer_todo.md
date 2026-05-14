@@ -241,14 +241,13 @@ tokenizer ──> embedding ─┤
 
 | # | Item | Depends on | Lines |
 |---|------|------------|-------|
-| 14 | Tokenizer: byte-level encode + decode + special tokens | — | ~60 |
-| 15 | Tokenizer → tensor pipeline (text → IDs → embedding) | (4, 14) | ~20 |
+| 14 | Tokenizer: byte-level encode + decode + special tokens | — | ~60 | DONE |
 
 ### Phase 4 — Full Model
 
 | # | Item | Depends on | Lines |
 |---|------|------------|-------|
-| 16 | `transformer_block` (pre-norm attn + pre-norm swiglu-ffn + residual) | (3,6,7,9,11) | ~60 |
+| 16 | `transformer_block` (pre-norm attn + pre-norm swiglu-ffn + residual) transformer.c | (3,6,7,9,11) | ~60 |
 | 17 | Decoder-only LM (embed → N×block → norm → lm_head) | (4,16) | ~60 |
 | 18 | Training loop (next-token prediction, teacher forcing, cross-entropy) | (17) | ~100 |
 | 19 | Generation loop (autoregressive, kv-cache optional) | (17) | ~80 |
