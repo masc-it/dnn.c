@@ -85,7 +85,7 @@ Straightforward op: `tensor_embedding` reads int IDs from the input tensor's dat
 
 | Component | Status | Effort |
 |-----------|--------|--------|
-| RoPE frequency table init | `theta_k = base^{-2k/d}` for k=0..d/2-1. Can compute via `tensor_pow` loop or dedicated init. | Low |
+| RoPE frequency table init | `theta_k = base^{-2k/d}` for k=0..d/2-1. Implemented via `tensor_rope_freqs(d, base)` in `src/rope.c`. Tests in `test/test_rope.c` and `ref_rope.py` (PyTorch ref). | Low | DONE |
 | RoPE forward: apply rotation to Q and K | Rotate pairs `(x_{2k}, x_{2k+1})` by `(cos mθ_k, sin mθ_k)`. Needs `cos`/`sin` on each position m. Two approaches: (a) compose via `tensor_mul` + `tensor_add` — works but slow (many passes over data). (b) dedicated `tensor_rope(q, k, freqs)` kernel — single pass, vectorizable. | **Medium-High** |
 | RoPE backward | Gradients for rotated Q/K require rotating grad_output by the same angles. Could reuse forward's sin/cos table. | Medium |
 
@@ -234,8 +234,8 @@ tokenizer ──> embedding ─┤
 | # | Item | Depends on | Lines |
 |---|------|------------|-------|
 | 8  | Fused `tensor_silu(x)` — single-pass Swish (no intermediate sigmoid tensor) | (1) | ~40 | DONE |
-| 9  | Fused `tensor_swiglu(gate, up)` — single-pass gated activation | (8) | ~40 |
-| 10 | RoPE frequency table init | — | ~40 |
+| 9  | Fused `tensor_swiglu(gate, up)` — single-pass gated activation | (8) | ~40 | DONE |
+| 10 | RoPE frequency table init | — | ~40 | DONE |
 | 11 | `tensor_rope` — dedicated in-place Q/K rotation | (10) | ~100 |
 | 12 | Fused `tensor_causal_softmax(scores)` — no mask materialization | — | ~120 |
 | 13 | Fused `tensor_attention(Q,K,V, mask)` — end-to-end | (12) | ~80 |

@@ -198,6 +198,140 @@ tensor *tensor_silu(const tensor *t) {
     return out;
 }
 
+/* ── swiglu_backward ──
+ *
+ *   out = SiLU(gate) * up
+ *   d_gate = d_out * SiLU'(gate) * up
+ *   d_up   = d_out * SiLU(gate)
+ *
+ * Gate and up shapes match the output shape (broadcast resolved in forward).
+ * Recomputes sigmoid(gate) from saved gate — no intermediate saved tensors
+ * aside from gate pointer (used in both d_gate and d_up paths).
+ */
+
+static void swiglu_backward(grad_fn *fn, tensor *grad_output) {
+    tensor *gate = fn->inputs[0];
+    tensor *up   = fn->inputs[1];
+
+    int out_numel = tensor_numel(grad_output);
+    float *g_data = tensor_data_ptr(grad_output);
+    float *gd = (float*)gate->data;
+    float *ud = (float*)up->data;
+
+    int need_gate = (gate->grad_fn || gate->requires_grad);
+    int need_up   = (up->grad_fn   || up->requires_grad);
+
+    float *ag = need_gate ? _grad_ensure(gate) : NULL;
+    float *bg = need_up   ? _grad_ensure(up)   : NULL;
+
+    /* Fast path: both same contiguous shape as grad_output */
+    if (_grad_contiguous(gate, grad_output) && _grad_contiguous(up, grad_output)) {
+        simd_swiglu_bwd(
+            ag ? ag + gate->offset : NULL,
+            bg ? bg + up->offset   : NULL,
+            gd + gate->offset,
+            ud + up->offset,
+            g_data, out_numel);
+        return;
+    }
+
+    /* General: precompute offsets then scatter */
+    int *gate_offs = need_gate ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
+    int *up_offs   = need_up   ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
+    int out_ndim = grad_output->ndim;
+    for (int i = 0; i < out_numel; i++) {
+        int coord[DNN_MAX_DIMS];
+        int r = i;
+        for (int d = out_ndim - 1; d >= 0; d--) {
+            coord[d] = r % grad_output->shape[d];
+            r /= grad_output->shape[d];
+        }
+        if (gate_offs) gate_offs[i] = _bcast_off(gate, out_ndim, coord);
+        if (up_offs)   up_offs[i]   = _bcast_off(up,   out_ndim, coord);
+    }
+
+    if (ag && gate_offs) {
+        for (int i = 0; i < out_numel; i++) {
+            float g_val = gd[gate_offs[i]];
+            float sig = 1.0f / (1.0f + expf(-g_val));
+            float silu_deriv = sig * (1.0f + g_val - g_val * sig);
+            ag[gate_offs[i]] += g_data[i] * silu_deriv * ud[up_offs[i]];
+        }
+    }
+    if (bg && up_offs) {
+        for (int i = 0; i < out_numel; i++) {
+            float g_val = gd[gate_offs[i]];
+            float sig = 1.0f / (1.0f + expf(-g_val));
+            float silu = g_val * sig;
+            bg[up_offs[i]] += g_data[i] * silu;
+        }
+    }
+}
+
+/* ── tensor_swiglu ──
+ *
+ *   out = SiLU(gate) ⊗ up
+ *
+ * Fused single-pass gated activation: computes silu(gate) * up in one
+ * loop over the broadcast output.  No intermediate SiLU tensor allocated.
+ * Both inputs must have compatible shapes (NumPy-style broadcast).
+ *
+ * Autograd: saves neither — gate and up are the inputs, recompute
+ * sigmoid(gate) in backward from the saved input pointers.
+ */
+
+tensor *tensor_swiglu(const tensor *gate, const tensor *up) {
+    assert(gate && up);
+
+    int ndim_out;
+    int shape_out[DNN_MAX_DIMS];
+    ndim_out = _bcast_ndim(gate->ndim, gate->shape, up->ndim, up->shape, shape_out);
+    assert(ndim_out > 0 && "tensor_swiglu: incompatible shapes");
+
+    tensor *out = _tensor_scratch_create(ndim_out, shape_out, 0);
+    int numel = _numel(ndim_out, shape_out);
+    float *od = (float*)out->data;
+    float *gd = (float*)gate->data;
+    float *ud = (float*)up->data;
+
+    if (_same_contiguous(gate, up)) {
+        /* Fast path: same contiguous shapes, no broadcasting */
+        float *gp = gd + gate->offset;
+        float *up_p = ud + up->offset;
+        simd_swiglu_fwd(od, gp, up_p, numel);
+    } else {
+        /* General broadcast path */
+        for (int i = 0; i < numel; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = ndim_out - 1; d >= 0; d--) {
+                coord[d] = r % shape_out[d];
+                r /= shape_out[d];
+            }
+            int g_off = _bcast_off(gate, ndim_out, coord);
+            int u_off = _bcast_off(up,   ndim_out, coord);
+            float g_val = gd[g_off];
+            od[out->offset + i] = (g_val / (1.0f + expf(-g_val))) * ud[u_off];
+        }
+    }
+
+    /* autograd tape */
+    if (dnn_grad_enabled() &&
+        (tensor_requires_grad(gate) || tensor_requires_grad(up))) {
+        grad_fn *fn = _grad_fn_create();
+        fn->backward = swiglu_backward;
+        fn->n_inputs = 2;
+        fn->inputs = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
+        fn->inputs[0] = (tensor*)gate;
+        fn->inputs[1] = (tensor*)up;
+        fn->n_saved = 0;
+        out->requires_grad = 1;
+        out->grad_fn = fn;
+    }
+
+    return out;
+}
+
 /* ── softmax_backward ── */
 
 static void softmax_backward(grad_fn *fn, tensor *grad_output) {

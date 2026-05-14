@@ -761,6 +761,168 @@ static void test_silu_no_grad(void) {
     printf("OK\n");
 }
 
+/* ── SwiGLU tests ── */
+
+static void test_swiglu_simple(void) {
+    printf("  test_swiglu_simple... ");
+    /* out = SiLU(gate) * up, both scalars */
+    tensor *gate = scalar(2.0f, 1);
+    tensor *up   = scalar(3.0f, 1);
+    tensor *out  = tensor_swiglu(gate, up);
+    /* SiLU(2) = 2/(1+exp(-2)) ≈ 2/1.135335 = 1.761594, * 3 ≈ 5.284782 */
+    float ref_silu = 2.0f / (1.0f + expf(-2.0f));
+    float ref_out = ref_silu * 3.0f;
+    float *op = tensor_data_ptr(out);
+    assert(fabsf(op[0] - ref_out) < EPS && "swiglu scalar forward");
+
+    dnn_backward(out);
+    /* SiLU'(2) = sig*(1 + x - x*sig) where sig=sigmoid(2) */
+    float sig = 1.0f / (1.0f + expf(-2.0f));
+    float silu_deriv = sig * (1.0f + 2.0f - 2.0f * sig);
+    float exp_dgate = 1.0f * silu_deriv * 3.0f;  /* d_gate = d_out * SiLU'(gate) * up */
+    float exp_dup   = 1.0f * ref_silu;            /* d_up = d_out * SiLU(gate) */
+    check_grad(gate, exp_dgate, "d_gate");
+    check_grad(up, exp_dup, "d_up");
+    printf("OK\n");
+}
+
+static void test_swiglu_array(void) {
+    printf("  test_swiglu_array... ");
+    /* both [3], no broadcast */
+    tensor *gate = tensor_zeros(1, (int[]){3}, 1);
+    tensor *up   = tensor_zeros(1, (int[]){3}, 1);
+    float *gp = tensor_data_ptr(gate);
+    float *up_p = tensor_data_ptr(up);
+    gp[0] = 0.0f; gp[1] = 1.0f; gp[2] = -2.0f;
+    up_p[0] = 2.0f; up_p[1] = 3.0f; up_p[2] = 4.0f;
+
+    tensor *out = tensor_swiglu(gate, up);
+    float *od = tensor_data_ptr(out);
+
+    /* reference values computed via python */
+    float expected[] = {
+        0.0f,
+        3.0f / (1.0f + expf(-1.0f)),       /* SiLU(1)*3 */
+        (-2.0f / (1.0f + expf(2.0f))) * 4.0f  /* SiLU(-2)*4 */
+    };
+    expected[1] = (1.0f / (1.0f + expf(-1.0f))) * 3.0f;
+    expected[2] = (-2.0f / (1.0f + expf(2.0f))) * 4.0f;
+    for (int i = 0; i < 3; i++)
+        assert(fabsf(od[i] - expected[i]) < EPS && "swiglu array forward");
+
+    dnn_backward(out);
+
+    float *ag = tensor_grad(gate);
+    float *bg = tensor_grad(up);
+    assert(ag && bg && "swiglu array grads not NULL");
+
+    for (int i = 0; i < 3; i++) {
+        float g = gp[i];
+        float s = 1.0f / (1.0f + expf(-g));
+        float silu = g * s;
+        float silu_deriv = s * (1.0f + g - g * s);
+        float exp_dg = 1.0f * silu_deriv * up_p[i];
+        float exp_du = 1.0f * silu;
+        assert(fabsf(ag[i] - exp_dg) < EPS && "swiglu array d_gate");
+        assert(fabsf(bg[i] - exp_du) < EPS && "swiglu array d_up");
+    }
+    printf("OK\n");
+}
+
+static void test_swiglu_broadcast_gate(void) {
+    printf("  test_swiglu_broadcast_gate... ");
+    /* gate [1], up [3] → broadcast to [3] */
+    tensor *gate = tensor_zeros(1, (int[]){1}, 1);
+    tensor *up   = tensor_zeros(1, (int[]){3}, 1);
+    float *gp = tensor_data_ptr(gate);
+    float *up_p = tensor_data_ptr(up);
+    gp[0] = 2.0f;
+    up_p[0] = 1.0f; up_p[1] = 2.0f; up_p[2] = 3.0f;
+
+    tensor *out = tensor_swiglu(gate, up);
+    dnn_backward(out);
+
+    float sig = 1.0f / (1.0f + expf(-2.0f));
+    float silu = 2.0f * sig;
+    float silu_deriv = sig * (1.0f + 2.0f - 2.0f * sig);
+    /* d_gate = sum over up dim: go_i * silu'(gate) * up_i */
+    float exp_dgate = silu_deriv * (1.0f + 2.0f + 3.0f);
+    check_grad(gate, exp_dgate, "d_gate broadcast");
+    /* d_up = go * silu(gate) = [silu, silu, silu] */
+    float exp_dup[] = {silu, silu, silu};
+    check_grad_ary(up, exp_dup, 3, "d_up broadcast");
+    printf("OK\n");
+}
+
+static void test_swiglu_broadcast_up(void) {
+    printf("  test_swiglu_broadcast_up... ");
+    /* gate [3], up [1] → broadcast to [3] */
+    tensor *gate = tensor_zeros(1, (int[]){3}, 1);
+    tensor *up   = tensor_zeros(1, (int[]){1}, 1);
+    float *gp = tensor_data_ptr(gate);
+    float *up_p = tensor_data_ptr(up);
+    gp[0] = 0.0f; gp[1] = 1.0f; gp[2] = -1.0f;
+    up_p[0] = 5.0f;
+
+    tensor *out = tensor_swiglu(gate, up);
+    dnn_backward(out);
+
+    float *ag = tensor_grad(gate);
+    float *bg = tensor_grad(up);
+    assert(ag && bg && "swiglu broadcast grads");
+
+    for (int i = 0; i < 3; i++) {
+        float g = gp[i];
+        float s = 1.0f / (1.0f + expf(-g));
+        float silu_deriv = s * (1.0f + g - g * s);
+        float exp_dg = 1.0f * silu_deriv * up_p[0];
+        assert(fabsf(ag[i] - exp_dg) < EPS && "swiglu broadcast d_gate");
+    }
+    /* d_up = sum_i go_i * SiLU(gate_i) */
+    float sum_silu = 0.0f;
+    for (int i = 0; i < 3; i++) {
+        float g = gp[i];
+        float s = 1.0f / (1.0f + expf(-g));
+        sum_silu += g * s;
+    }
+    check_grad(up, sum_silu, "d_up broadcast");
+    printf("OK\n");
+}
+
+static void test_swiglu_no_grad(void) {
+    printf("  test_swiglu_no_grad... ");
+    tensor *gate = scalar(2.0f, 0);
+    tensor *up   = scalar(3.0f, 0);
+    dnn_grad_ctx ctx = dnn_no_grad_enter();
+    tensor *out = tensor_swiglu(gate, up);
+    dnn_no_grad_exit(ctx);
+    float ref = (2.0f / (1.0f + expf(-2.0f))) * 3.0f;
+    float *op = tensor_data_ptr(out);
+    assert(fabsf(op[0] - ref) < EPS && "swiglu no-grad forward");
+    assert(out->grad_fn == NULL && "swiglu no-grad: no grad_fn");
+    printf("OK\n");
+}
+
+static void test_swiglu_chain(void) {
+    printf("  test_swiglu_chain... ");
+    /* out = swiglu(gate, up) + gate, verify gradient flows */
+    tensor *gate = scalar(1.5f, 1);
+    tensor *up   = scalar(2.0f, 1);
+    tensor *s = tensor_swiglu(gate, up);
+    tensor *out = tensor_add(s, gate);
+    dnn_backward(out);
+    /* d_out/d_gate = SiLU'(gate)*up + 1 */
+    float sig = 1.0f / (1.0f + expf(-1.5f));
+    float silu_deriv = sig * (1.0f + 1.5f - 1.5f * sig);
+    float exp_dgate = 1.0f * silu_deriv * 2.0f + 1.0f;
+    /* d_out/d_up = SiLU(gate) */
+    float silu = 1.5f * sig;
+    float exp_dup = 1.0f * silu;
+    check_grad(gate, exp_dgate, "d_gate chain");
+    check_grad(up, exp_dup, "d_up chain");
+    printf("OK\n");
+}
+
 static void test_matmul_simple(void) {
     printf("  test_matmul_simple... ");
     /* A (2,3) @ B (3,2) = C (2,2) */
@@ -1673,6 +1835,30 @@ int main(void) {
     mem_pool_reset(&scratch);
 
     test_silu_no_grad();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_swiglu_simple();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_swiglu_array();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_swiglu_broadcast_gate();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_swiglu_broadcast_up();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_swiglu_no_grad();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_swiglu_chain();
     mem_pool_reset(&params);
     mem_pool_reset(&scratch);
 

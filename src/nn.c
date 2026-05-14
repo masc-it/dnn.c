@@ -50,14 +50,14 @@ tensor *swiglu_ffn_forward(swiglu_ffn *ffn, const tensor *x) {
     assert(x->ndim >= 2);
     assert(x->shape[x->ndim - 1] == ffn->d_model);
 
-    /* gate = SiLU(x @ W_g + b_g) */
-    tensor *gate = tensor_silu(linear_forward(ffn->gate_proj, x));
+    /* gate = x @ W_g + b_g  (raw, before activation) */
+    tensor *gate = linear_forward(ffn->gate_proj, x);
 
     /* up = x @ W_u + b_u */
     tensor *up = linear_forward(ffn->up_proj, x);
 
-    /* hidden = gate ⊗ up */
-    tensor *hidden = tensor_mul(gate, up);
+    /* hidden = SiLU(gate) ⊗ up  (fused single-pass) */
+    tensor *hidden = tensor_swiglu(gate, up);
 
     /* out = hidden @ W_d + b_d */
     return linear_forward(ffn->down_proj, hidden);

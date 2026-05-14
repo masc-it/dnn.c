@@ -369,4 +369,97 @@ static inline void simd_silu_bwd(float *grad_acc, const float *in,
 #endif
 }
 
+/* ══════════════════════════════════════════════════════════════════
+ *  SwiGLU forward:  y = SiLU(gate) * up = gate/(1+exp(-gate)) * up
+ *
+ *  Single-pass fused — reads gate and up, writes out, no intermediate.
+ *  Both inputs must be contiguous and same-length (broadcast handled at
+ *  C level before calling this).
+ * ══════════════════════════════════════════════════════════════════ */
+
+static inline void simd_swiglu_fwd(float *out, const float *gate, const float *up, int n) {
+#if DNN_HAVE_NEON
+    const float32x4_t one = vdupq_n_f32(1.0f);
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t g = vld1q_f32(gate + i);
+        float32x4_t u = vld1q_f32(up + i);
+        float32x4_t exp_neg_g = simd_expf_f32(vnegq_f32(g));
+        float32x4_t sig = vdivq_f32(one, vaddq_f32(one, exp_neg_g));
+        float32x4_t silu = vmulq_f32(g, sig);
+        vst1q_f32(out + i, vmulq_f32(silu, u));
+    }
+    for (; i < n; i++)
+        out[i] = (gate[i] / (1.0f + expf(-gate[i]))) * up[i];
+#else
+    for (int i = 0; i < n; i++)
+        out[i] = (gate[i] / (1.0f + expf(-gate[i]))) * up[i];
+#endif
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  SwiGLU backward:  accumulate grads for gate and up
+ *
+ *  out = SiLU(gate) * up
+ *  d_gate += d_out * SiLU'(gate) * up
+ *  d_up   += d_out * SiLU(gate)
+ *
+ *  where SiLU(x)   = x * sigmoid(x)
+ *        SiLU'(x)  = sig(x) * (1 + x - x*sig(x))
+ * ══════════════════════════════════════════════════════════════════ */
+
+static inline void simd_swiglu_bwd(float *grad_gate, float *grad_up,
+                                    const float *gate, const float *up,
+                                    const float *grad_out, int n) {
+#if DNN_HAVE_NEON
+    const float32x4_t one = vdupq_n_f32(1.0f);
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t g  = vld1q_f32(gate + i);
+        float32x4_t u  = vld1q_f32(up + i);
+        float32x4_t go = vld1q_f32(grad_out + i);
+
+        /* sig = sigmoid(g) */
+        float32x4_t exp_neg_g = simd_expf_f32(vnegq_f32(g));
+        float32x4_t sig = vdivq_f32(one, vaddq_f32(one, exp_neg_g));
+
+        /* silu = g * sig */
+        float32x4_t silu = vmulq_f32(g, sig);
+
+        /* silu'(g) = sig * (1 + g - g*sig) */
+        float32x4_t silu_deriv = vmulq_f32(sig,
+            vsubq_f32(vaddq_f32(one, g), vmulq_f32(g, sig)));
+
+        /* d_gate += go * silu'(g) * up */
+        if (grad_gate) {
+            float32x4_t acc_g = vld1q_f32(grad_gate + i);
+            vst1q_f32(grad_gate + i, vfmaq_f32(acc_g, go, vmulq_f32(silu_deriv, u)));
+        }
+
+        /* d_up += go * silu(g) */
+        if (grad_up) {
+            float32x4_t acc_u = vld1q_f32(grad_up + i);
+            vst1q_f32(grad_up + i, vfmaq_f32(acc_u, go, silu));
+        }
+    }
+    for (; i < n; i++) {
+        float g_val = gate[i];
+        float sig = 1.0f / (1.0f + expf(-g_val));
+        float silu = g_val * sig;
+        float silu_deriv = sig * (1.0f + g_val - g_val * sig);
+        if (grad_gate) grad_gate[i] += grad_out[i] * silu_deriv * up[i];
+        if (grad_up)   grad_up[i]   += grad_out[i] * silu;
+    }
+#else
+    for (int i = 0; i < n; i++) {
+        float g_val = gate[i];
+        float sig = 1.0f / (1.0f + expf(-g_val));
+        float silu = g_val * sig;
+        float silu_deriv = sig * (1.0f + g_val - g_val * sig);
+        if (grad_gate) grad_gate[i] += grad_out[i] * silu_deriv * up[i];
+        if (grad_up)   grad_up[i]   += grad_out[i] * silu;
+    }
+#endif
+}
+
 #endif /* DNN_SIMD_H */
