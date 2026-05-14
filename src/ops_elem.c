@@ -597,3 +597,217 @@ tensor *tensor_triu(int N, int diagonal) {
     }
     return out;
 }
+
+
+/* ── cat_backward ──
+ *
+ * Gradient for concatenation: split grad_output along dim.
+ * Elements with coord[dim] < a->shape[dim] flow to a, rest to b.
+ * If a == b (self-concatenation), both halves accumulate into the same buffer.
+ */
+
+static void cat_backward(grad_fn *fn, tensor *grad_output) {
+    tensor *a = fn->inputs[0];
+    tensor *b = fn->inputs[1];
+    int dim       = *(int*)fn->saved_tensors[0];
+    int ndim      = a->ndim;
+    int a_sz      = a->shape[dim];
+    float *gd     = (float*)grad_output->data;
+    int total     = tensor_numel(grad_output);
+    int need_a    = (a->grad_fn || a->requires_grad);
+    int need_b    = (b->grad_fn || b->requires_grad);
+    int a_self    = (a == b);
+    float *ag     = need_a ? _grad_ensure(a) : NULL;
+    float *bg     = need_b ? _grad_ensure(b) : NULL;
+
+    /* ── Contiguous fast paths (avoid coord-decompose in common case) ── */
+
+    /* Slice a portion: copy [0:a_sz) along dim from grad_output to a */
+    if (need_a && a->contiguous && grad_output->contiguous) {
+        int inner = 1;
+        for (int d = dim + 1; d < ndim; d++) inner *= grad_output->shape[d];
+        int outer = 1;
+        for (int d = 0; d < dim; d++) outer *= grad_output->shape[d];
+        int gs = inner;
+        int as = 1;
+        for (int d = dim + 1; d < ndim; d++) as *= a->shape[d];
+
+        for (int o = 0; o < outer; o++) {
+            float *g_row = gd + o * (long)grad_output->shape[dim] * gs;
+            float *a_row = ag + o * (long)a_sz * as;
+            for (int k = 0; k < a_sz; k++)
+                for (int i = 0; i < inner; i++)
+                    a_row[k * as + i] += g_row[k * gs + i];
+        }
+        need_a = 0;
+    }
+
+    /* Slice b portion: copy [a_sz:a_sz+b_sz) along dim from grad_output to b */
+    if (need_b && b->contiguous && grad_output->contiguous && !a_self) {
+        int b_sz = b->shape[dim];
+        int inner = 1;
+        for (int d = dim + 1; d < ndim; d++) inner *= grad_output->shape[d];
+        int outer = 1;
+        for (int d = 0; d < dim; d++) outer *= grad_output->shape[d];
+        int gs = inner;
+        int bs = 1;
+        for (int d = dim + 1; d < ndim; d++) bs *= b->shape[d];
+
+        for (int o = 0; o < outer; o++) {
+            float *g_row = gd + o * (long)grad_output->shape[dim] * gs;
+            float *b_row = bg + o * (long)b_sz * bs;
+            for (int k = 0; k < b_sz; k++)
+                for (int i = 0; i < inner; i++)
+                    b_row[k * bs + i] += g_row[(a_sz + k) * gs + i];
+        }
+        need_b = 0;
+    }
+
+    /* Self-concatenation: after handling first half of the contiguous path
+     * above (which went into ag), the second half must also go into ag. */
+    if (a_self && need_a) {
+        need_b = 1;
+        bg = ag;
+    }
+
+    /* ── General coord-decompose fallback ── */
+    {
+        int coord[DNN_MAX_DIMS];
+        for (int flat = 0; flat < total && (need_a || need_b); flat++) {
+            int rem = flat;
+            for (int d = ndim - 1; d >= 0; d--) {
+                coord[d] = rem % grad_output->shape[d];
+                rem /= grad_output->shape[d];
+            }
+
+            int c = coord[dim];
+            float gv = gd[_flat_off(grad_output, flat)];
+
+            if (c < a_sz) {
+                if (need_a) {
+                    int a_flat = 0;
+                    for (int d = 0; d < ndim; d++)
+                        a_flat = a_flat * a->shape[d] + coord[d];
+                    ag[_flat_off(a, a_flat)] += gv;
+                }
+            } else {
+                if (need_b) {
+                    int bc = c - a_sz;
+                    int b_flat = 0;
+                    for (int d = 0; d < ndim; d++)
+                        b_flat = b_flat * b->shape[d] + (d == dim ? bc : coord[d]);
+                    bg[_flat_off(b, b_flat)] += gv;
+                }
+            }
+        }
+    }
+}
+
+
+/* ── Internal copy helper for tensor_cat ──
+ *
+ * Copies tensor t into contiguous output buffer od at offset out_dim_offset
+ * along dim.  Handles contiguous (fast row-by-row memcpy) and strided
+ * (coord-decompose) inputs.
+ */
+
+static void _cat_copy(float *od, const tensor *t, int dim,
+                       int out_dim_offset, const int *out_shape) {
+    int ndim    = t->ndim;
+    float *td   = (float*)t->data;
+    int d_sz    = t->shape[dim];
+    int inner   = 1;
+    int outer   = 1;
+    for (int d = dim + 1; d < ndim; d++) inner *= out_shape[d];
+    for (int d = 0; d < dim; d++)        outer *= out_shape[d];
+    int osd = inner;  /* output stride along dim */
+
+    if (tensor_is_contiguous(t)) {
+        int tsd = 1;
+        for (int d = dim + 1; d < ndim; d++) tsd *= t->shape[d];
+
+        for (int o = 0; o < outer; o++) {
+            float *dst = od + o * (long)out_shape[dim] * osd
+                              + (long)out_dim_offset * osd;
+            float *src = td + t->offset + o * (long)d_sz * tsd;
+            memcpy(dst, src, (size_t)d_sz * tsd * sizeof(float));
+        }
+    } else {
+        int total = tensor_numel(t);
+        for (int flat = 0; flat < total; flat++) {
+            int coord[DNN_MAX_DIMS];
+            int rem = flat;
+            for (int d = ndim - 1; d >= 0; d--) {
+                coord[d] = rem % t->shape[d];
+                rem /= t->shape[d];
+            }
+
+            int t_off = t->offset;
+            for (int d = 0; d < ndim; d++)
+                t_off += coord[d] * t->strides[d];
+
+            int o_flat = 0;
+            for (int d = 0; d < ndim; d++) {
+                int c = coord[d];
+                if (d == dim) c += out_dim_offset;
+                o_flat = o_flat * out_shape[d] + c;
+            }
+            od[o_flat] = td[t_off];
+        }
+    }
+}
+
+
+/* ── tensor_cat ──
+ *
+ * Concatenate tensors a and b along dimension dim.
+ *
+ *   a and b must have same ndim and same shape in all dims except dim.
+ *   Output shape[dim] = a->shape[dim] + b->shape[dim].
+ *
+ * Autograd: backward splits grad_output along dim and scatters to a, b.
+ */
+
+tensor *tensor_cat(const tensor *a, const tensor *b, int dim) {
+    assert(a && b);
+    assert(a->ndim == b->ndim && "tensor_cat: ndim must match");
+
+    int ndim = a->ndim;
+    if (dim < 0) dim += ndim;
+    assert(dim >= 0 && dim < ndim && "tensor_cat: dim out of range");
+
+    for (int d = 0; d < ndim; d++) {
+        if (d != dim)
+            assert(a->shape[d] == b->shape[d] && "tensor_cat: shape mismatch");
+    }
+
+    int out_shape[DNN_MAX_DIMS];
+    memcpy(out_shape, a->shape, ndim * sizeof(int));
+    out_shape[dim] = a->shape[dim] + b->shape[dim];
+
+    tensor *out = _tensor_scratch_create(ndim, out_shape, 0);
+    float *od = (float*)out->data;
+
+    _cat_copy(od, a, dim, 0, out_shape);
+    _cat_copy(od, b, dim, a->shape[dim], out_shape);
+
+    /* Autograd tape */
+    if (dnn_grad_enabled() &&
+        (tensor_requires_grad(a) || tensor_requires_grad(b))) {
+        grad_fn *fn = _grad_fn_create();
+        fn->backward  = cat_backward;
+        fn->n_inputs  = 2;
+        fn->inputs    = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
+        fn->inputs[0] = (tensor*)a;
+        fn->inputs[1] = (tensor*)b;
+        fn->n_saved   = 1;
+        fn->saved_tensors = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        int *saved_dim = mem_scratch_alloc(sizeof(int), NULL);
+        *saved_dim = dim;
+        fn->saved_tensors[0] = (tensor*)saved_dim;
+        out->requires_grad = 1;
+        out->grad_fn = fn;
+    }
+
+    return out;
+}

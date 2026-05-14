@@ -209,7 +209,7 @@ tokenizer ──> embedding ─────────────────�
                                            │  │
 matmul_2d ──> [15a] batched_matmul ✅ ──────┤  │
                                             │  │
-[15b] tensor_cat ──> [15c] kv_cache ────────┤  │
+[15b] tensor_cat ✅ ──> [15c] kv_cache ✅ ──┤  │
                                             │  │
                                        transformer_block
                                        (attn + swiglu ffn + pre-norm + residual)
@@ -251,8 +251,8 @@ Gaps found during code audit before assembling the full model.
 | # | Item | Depends on | Lines |
 |---|------|------------|-------|
 | 15a | `tensor_matmul` batched n-dim support (3D+) | — | ~80 | ✅ **DONE** |
-| 15b | `tensor_cat` along dim with autograd | — | ~80 |
-| 15c | KV-cache struct + append helper | (15b) | ~50 |
+| 15b | `tensor_cat` along dim with autograd | — | ~80 | **DONE** |
+| 15c | KV-cache struct + append helper | (15b) | ~50 | ✅ **DONE**
 | 15d | Bump scratch pool (192MB → 512MB) | — | ~1 |
 
 #### 15a — Batched `tensor_matmul` ✅ **DONE**
@@ -290,58 +290,82 @@ NumPy-style broadcasting:
 
 ---
 
-#### 15b — `tensor_cat` along dim with autograd
+#### 15b — `tensor_cat` along dim with autograd ✅ **DONE**
 
-**Why:** KV-cache appends new K/V tokens along the sequence dim each step.
-`tensor_slice` can write but needs pre-allocated max-size buffer. `tensor_cat`
-is more natural and enables dynamic growth.
+**What was implemented:**
 
-**What to do:**
+Extended `src/ops_elem.c` with `tensor_cat` and a `_cat_copy` helper, plus
+`cat_backward`:
 
-```c
-tensor *tensor_cat(const tensor *a, const tensor *b, int dim);
-```
+- **Forward:** Concatenates `a` and `b` along `dim`. All non-`dim` dimensions
+  must match. Supports negative dim indexing. Output is contiguous, allocated
+  from scratch pool.
+- **Copy:** `_cat_copy` has a contiguous fast path (row-by-row `memcpy`) and a
+  general coord-decompose fallback for strided inputs (e.g. after transpose).
+- **Backward:** Splits `grad_output` along `dim` — elements with
+  `coord[dim] < a->shape[dim]` flow to `a`'s grad buffer, rest to `b`.
+  Has contiguous fast path (nested `for` loops, no coord-decompose) and a
+  general coord-decompose fallback. Handles `a == b` (self-concatenation)
+  correctly by accumulating both halves into the same buffer.
+- **Autograd:** `grad_fn` wired; saves `dim` for backward. Grad mode
+  respected — no tape when either input doesn't require grad or
+  `dnn_no_grad` is active.
 
-- Concatenate `a` and `b` along `dim`. All other dims must match.
-- Allocate output from scratch pool, copy both inputs.
-- Autograd backward: split `grad_output` along `dim` at the boundary
-  (size of `a->shape[dim]`), scatter each half to the corresponding input.
-- No BLAS needed — pure memcpy / strided copy.
+**Tests added:**
+- `test/ref_cat.py` — PyTorch reference: 1D, 2D dim=0/dim=1, 3D dim=1,
+  partial grad, self-concatenation, chain with matmul, exact value match.
+- `test/test_cat.c` — C tests: 1D/2D/3D forward, dim normalization,
+  backward (simple, 2D dim0/dim1, partial grad, self, sum loss, no-grad,
+  chain with matmul).
 
-**Effort:** ~80 lines + test.
+**Files changed:**
+- `include/ops.h` — added `tensor_cat` declaration
+- `src/ops_elem.c` — added `cat_backward`, `_cat_copy`, `tensor_cat`
+- `test/ref_cat.py` — new PyTorch reference
+- `test/test_cat.c` — new C test suite
+- `docs/transformer_todo.md` — marked 15b done
 
 ---
 
-#### 15c — KV-cache struct + append
+#### 15c — KV-cache struct + append helper ✅ **DONE**
 
-**Why:** Autoregressive generation feeds one token at a time. Without caching,
-each step recomputes K/V for all past tokens — O(N²) per step vs O(N) with cache.
+**What was implemented:**
 
-**What to do:**
+- **`kv_cache` struct** in `include/transformer.h` — holds `k_cache`, `v_cache`
+  tensors (params pool), `seq_len`, `max_seq`.
+- **`kv_cache_create(B, H, max_seq, d_k)`** — allocates zero-filled `[B, H, max_seq, d_k]`
+  tensors from params pool via `tensor_zeros`.  seq_len starts at 0.
+- **`kv_cache_append(kvc, K_new, V_new)`** — copies N_new tokens into the cache
+  at position `seq_len` along dim 2.  Uses direct pointer arithmetic on the
+  cache buffer with per-(b,h) memcpy — no scratch allocs during append.
+  Asserts K/V are 4D, batch/head/d_k match, and cache has room.
+- **`kv_cache_get_K(kvc)` / `kv_cache_get_V(kvc)`** — returns `tensor_slice`
+  views of valid portion `[B, H, seq_len, d_k]` (lightweight, shares cache
+  buffer).  Asserts `seq_len > 0`.
+- **No autograd** — all cache ops are eval-only (params pool tensors created
+  with `requires_grad=0`, no `grad_fn` wired).  KV-cache is NOT used during
+  training.
 
-```c
-typedef struct {
-    tensor *k_cache;   // [B, H, max_seq, d_k], params pool
-    tensor *v_cache;   // [B, H, max_seq, d_k], params pool
-    int     seq_len;   // current valid length
-    int     max_seq;
-} kv_cache;
+**Design decision:** Append avoids `tensor_slice` scratch allocs in the hot
+loop by computing cache buffer offsets directly.  A single `kv_cache_append`
+call does zero scratch allocations — just `memcpy` into pre-allocated
+param-pool buffers.  Get uses `tensor_slice` (one small scratch alloc per
+view) since it's called once per forward pass during generation.
 
-kv_cache *kv_cache_create(int B, int H, int max_seq, int d_k);
-```
+**Tests added:**
+- `test/ref_kv_cache.py` — PyTorch reference: create cache, append one/multiple
+  tokens, multi-batch/multi-head, fill to max seq, empty slice, value matching.
+- `test/test_kv_cache.c` — C tests: create/zeroed, append one token (verify data
+  in cache buffer via coord-based `tget`), append multiple tokens cumulatively,
+  multi-batch multi-head exact position checks, fill to capacity, seq_len
+  growth tracking.  All pass.
 
-- Pre-allocate full-size buffers in params pool.
-- `kv_cache_append(kvc, K_new, V_new)` — writes new K/V slices at
-  position `seq_len`, increments `seq_len`. Uses `tensor_slice` on the
-  cache to get the writable view (no alloc, no autograd — inference only).
-- `kv_cache_get(kvc)` — returns `(K, V)` views of shape `[B, H, seq_len, d_k]`
-  via `tensor_slice` along dim 2.
-- No autograd needed — generation is eval-only (`dnn_no_grad`).
-
-**KV-cache is NOT used during training** (teacher forcing computes full
-sequence in one shot). So no backward pass required.
-
-**Effort:** ~50 lines + test.
+**Files changed:**
+- `include/transformer.h` — added `kv_cache` struct + function declarations
+- `src/transformer.c` — replaced placeholder with `kv_cache_*` implementation
+- `test/ref_kv_cache.py` — new PyTorch reference
+- `test/test_kv_cache.c` — new C test suite
+- `docs/transformer_todo.md` — marked 15c done
 
 ---
 

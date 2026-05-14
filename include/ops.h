@@ -42,4 +42,7 @@ tensor *tensor_pow(const tensor *t, float exp);
 tensor *tensor_neg(const tensor *t);
 tensor *tensor_triu(int N, int diagonal);
 
+/* ── Tensor concatenation ── */
+tensor *tensor_cat(const tensor *a, const tensor *b, int dim);
+
 #endif /* DNN_OPS_H */
