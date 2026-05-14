@@ -9,5 +9,6 @@
 #include "norm.h"
 #include "conv.h"
 #include "optim.h"
+#include "attention.h"
 
 #endif /* DNN_H */
