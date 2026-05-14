@@ -200,18 +200,19 @@ Allocates from data pool. Encode/decode are O(N) linear walks.
 ### Dependency graph
 
 ```
-sigmoid ──> silu ──> swiglu
-                        │
-embedding ──────────────┤
-                        │
-matmul ──> attention ───┤
-softmax    causal_mask   │
-rope ───────────────────┤
-                        │
-tokenizer ──> embedding ─┤
-                        │
-                   transformer_block
-                   (attn + swiglu ffn + pre-norm + residual)
+sigmoid ──> silu ──> swiglu ──────────────────┐
+embedding ────────────────────────────────────┤
+                                              │
+causal_softmax ──> attention ─────────────────┤
+rope ──────────────────────────────────────┐  │
+tokenizer ──> embedding ───────────────────┤  │
+                                           │  │
+matmul_2d ──> [15a] batched_matmul ✅ ──────┤  │
+                                            │  │
+[15b] tensor_cat ──> [15c] kv_cache ────────┤  │
+                                            │  │
+                                       transformer_block
+                                       (attn + swiglu ffn + pre-norm + residual)
 ```
 
 ### Phase 1 — Foundation (no new ops, just compose)
@@ -243,14 +244,130 @@ tokenizer ──> embedding ─┤
 |---|------|------------|-------|
 | 14 | Tokenizer: byte-level encode + decode + special tokens | — | ~60 | DONE |
 
+### Phase 3b — Transformer Primitives
+
+Gaps found during code audit before assembling the full model.
+
+| # | Item | Depends on | Lines |
+|---|------|------------|-------|
+| 15a | `tensor_matmul` batched n-dim support (3D+) | — | ~80 | ✅ **DONE** |
+| 15b | `tensor_cat` along dim with autograd | — | ~80 |
+| 15c | KV-cache struct + append helper | (15b) | ~50 |
+| 15d | Bump scratch pool (192MB → 512MB) | — | ~1 |
+
+#### 15a — Batched `tensor_matmul` ✅ **DONE**
+
+**What was implemented:**
+
+Extended `tensor_matmul` in `src/ops_matrix.c` to handle N ≥ 2 dims with
+NumPy-style broadcasting:
+
+- **Forward:** Computes broadcast batch shape from all dims except the last 2.
+  Loops over batch elements calling `cblas_sgemm` per slice (or manual triple
+  loop when slices are non-contiguous). Output is a contiguous N-D tensor
+  with shape `[broadcast(leading_dims), M, N]`.
+- **Backward:** Same batch loop with `cblas_sgemm` (or manual loop) for both
+  `da = gd @ B^T` and `db = A^T @ gd`. Handles self-matmul (`a == b`)
+  through all batch dims. Gradient accumulation correctly sums over
+  broadcast dims.
+- **Strided fallback:** When inner 2D slices are non-contiguous (column
+  stride != 1), uses full stride-based element-wise loops.
+- **2D fast path preserved:** No change to the existing optimized 2D code path.
+- **Autograd:** `grad_fn` wired; backward function discriminates 2D vs ND
+  at runtime.
+
+**Tests added:**
+- `test/ref_batched_matmul.py` — PyTorch reference: 3D batched, broadcast
+  both ways, 4D broadcast, self-matmul, finite-diff check, single-batch vs 2D.
+- `test/test_batched_matmul.c` — C tests: 3D, 4D, broadcast, self-matmul,
+  single-batch vs 2D equivalence, numerical gradient check, PyTorch reference
+  values match, no-grad mode, regression checks for 2D still works.
+
+**Files changed:**
+- `src/ops_matrix.c` — batched matmul forward + backward
+- `test/ref_batched_matmul.py` — new PyTorch reference
+- `test/test_batched_matmul.c` — new C test suite
+
+---
+
+#### 15b — `tensor_cat` along dim with autograd
+
+**Why:** KV-cache appends new K/V tokens along the sequence dim each step.
+`tensor_slice` can write but needs pre-allocated max-size buffer. `tensor_cat`
+is more natural and enables dynamic growth.
+
+**What to do:**
+
+```c
+tensor *tensor_cat(const tensor *a, const tensor *b, int dim);
+```
+
+- Concatenate `a` and `b` along `dim`. All other dims must match.
+- Allocate output from scratch pool, copy both inputs.
+- Autograd backward: split `grad_output` along `dim` at the boundary
+  (size of `a->shape[dim]`), scatter each half to the corresponding input.
+- No BLAS needed — pure memcpy / strided copy.
+
+**Effort:** ~80 lines + test.
+
+---
+
+#### 15c — KV-cache struct + append
+
+**Why:** Autoregressive generation feeds one token at a time. Without caching,
+each step recomputes K/V for all past tokens — O(N²) per step vs O(N) with cache.
+
+**What to do:**
+
+```c
+typedef struct {
+    tensor *k_cache;   // [B, H, max_seq, d_k], params pool
+    tensor *v_cache;   // [B, H, max_seq, d_k], params pool
+    int     seq_len;   // current valid length
+    int     max_seq;
+} kv_cache;
+
+kv_cache *kv_cache_create(int B, int H, int max_seq, int d_k);
+```
+
+- Pre-allocate full-size buffers in params pool.
+- `kv_cache_append(kvc, K_new, V_new)` — writes new K/V slices at
+  position `seq_len`, increments `seq_len`. Uses `tensor_slice` on the
+  cache to get the writable view (no alloc, no autograd — inference only).
+- `kv_cache_get(kvc)` — returns `(K, V)` views of shape `[B, H, seq_len, d_k]`
+  via `tensor_slice` along dim 2.
+- No autograd needed — generation is eval-only (`dnn_no_grad`).
+
+**KV-cache is NOT used during training** (teacher forcing computes full
+sequence in one shot). So no backward pass required.
+
+**Effort:** ~50 lines + test.
+
+---
+
+#### 15d — Bump scratch pool
+
+Current: 192MB in `main.c`. Transformer with B=64, N=512, d=512, 12 layers
+needs ~30MB/layer × 12 = 360MB activations, plus temp buffers.
+
+Change to 512MB in `main.c` (and document in the transformer training entry
+point). For smaller configs (B=16, N=256, d=256, 6 layers) ~30MB is fine,
+but keeping a single safe default avoids cryptic OOM.
+
+```c
+mem_pool scratch = mem_pool_create(512 * 1024 * 1024);
+```
+
+---
+
 ### Phase 4 — Full Model
 
 | # | Item | Depends on | Lines |
 |---|------|------------|-------|
-| 16 | `transformer_block` (pre-norm attn + pre-norm swiglu-ffn + residual) transformer.c | (3,6,7,9,11) | ~60 |
+| 16 | `transformer_block` (pre-norm attn + pre-norm swiglu-ffn + residual) transformer.c | (3,6,7,9,11,15a) | ~60 |
 | 17 | Decoder-only LM (embed → N×block → norm → lm_head) | (4,16) | ~60 |
 | 18 | Training loop (next-token prediction, teacher forcing, cross-entropy) | (17) | ~100 |
-| 19 | Generation loop (autoregressive, kv-cache optional) | (17) | ~80 |
+| 19 | Generation loop (autoregressive, kv-cache optional) | (17,15b,15c) | ~80 |
 
 ### Total estimated new code
 
