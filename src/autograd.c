@@ -4,6 +4,7 @@
 #include <string.h>
 #include <assert.h>
 
+
 /* ── Grad mode ── */
 
 static _Thread_local int _grad_enabled = 1;
@@ -51,42 +52,69 @@ static int _in_list(tensor *t, tensor **list, int n) {
     return 0;
 }
 
-/* DFS topological sort: collect non-leaf tensors in dependency order */
-static void _build_topo(tensor *t, tensor ***topo, int *n, int *cap) {
-    if (!t->grad_fn) return;
-    if (_in_list(t, *topo, *n)) return;
-
-    for (int i = 0; i < t->grad_fn->n_inputs; i++) {
-        _build_topo(t->grad_fn->inputs[i], topo, n, cap);
-    }
-
-    /* walk parent chains of each input — views have no grad_fn but their
-       parent tensors may, and those need to be in the topo order for
-       gradient to continue flowing backward. */
+/* Count reachable grad_fn nodes via DFS. Uses scratch-allocated seen array.
+ * Parent-chain tensors are NOT prematurely added to seen — the recursive
+ * _count_reachable call adds them naturally. */
+static int _count_reachable(tensor *t, tensor **seen, int *n_seen) {
+    if (!t->grad_fn) return 0;
+    if (_in_list(t, seen, *n_seen)) return 0;
+    seen[(*n_seen)++] = t;
+    int count = 1;
+    for (int i = 0; i < t->grad_fn->n_inputs; i++)
+        count += _count_reachable(t->grad_fn->inputs[i], seen, n_seen);
     for (int i = 0; i < t->grad_fn->n_inputs; i++) {
         tensor *p = t->grad_fn->inputs[i];
         while (p->parent) {
             p = p->parent;
-            if (p->grad_fn && !_in_list(p, *topo, *n))
-                _build_topo(p, topo, n, cap);
+            if (p->grad_fn && !_in_list(p, seen, *n_seen))
+                count += _count_reachable(p, seen, n_seen);
+        }
+    }
+    return count;
+}
+
+/* Fill pre-allocated topo array via DFS. seen array prevents duplicates.
+ * Parent-chain tensors are NOT prematurely added to seen — the recursive
+ * _build_topo_from call adds them naturally, matching original realloc-based
+ * traversal order. */
+static void _build_topo_from(tensor *t, tensor **topo, int *n,
+                              tensor **seen, int *n_seen) {
+    if (!t->grad_fn) return;
+    if (_in_list(t, seen, *n_seen)) return;
+    seen[(*n_seen)++] = t;
+
+    for (int i = 0; i < t->grad_fn->n_inputs; i++)
+        _build_topo_from(t->grad_fn->inputs[i], topo, n, seen, n_seen);
+
+    for (int i = 0; i < t->grad_fn->n_inputs; i++) {
+        tensor *p = t->grad_fn->inputs[i];
+        while (p->parent) {
+            p = p->parent;
+            if (p->grad_fn && !_in_list(p, seen, *n_seen))
+                _build_topo_from(p, topo, n, seen, n_seen);
         }
     }
 
-    if (*n >= *cap) {
-        *cap = *cap ? *cap * 2 : 64;
-        *topo = realloc(*topo, *cap * sizeof(tensor*));
-        assert(*topo && "_build_topo: realloc failed");
-    }
-    (*topo)[(*n)++] = t;
+    topo[(*n)++] = t;
 }
 
 void dnn_backward(tensor *loss) {
     assert(loss);
 
-    /* build topological order of non-leaf tensors reachable from loss */
-    int cap = 0, n = 0;
-    tensor **topo = NULL;
-    _build_topo(loss, &topo, &n, &cap);
+    /* First pass: count reachable grad_fn nodes.
+       Temp seen array from scratch — no heap alloc. */
+    tensor **tmp = mem_scratch_alloc(256 * sizeof(tensor*), NULL);
+    int n_tmp = 0;
+    int n_nodes = _count_reachable(loss, tmp, &n_tmp);
+
+    /* Allocate exact-size topo array from scratch pool */
+    tensor **topo = mem_scratch_alloc(n_nodes * sizeof(tensor*), NULL);
+
+    /* Second pass: fill topo order using fresh seen array */
+    tensor **seen = mem_scratch_alloc(256 * sizeof(tensor*), NULL);
+    int n_seen = 0, n = 0;
+    _build_topo_from(loss, topo, &n, seen, &n_seen);
+    assert(n == n_nodes && "dnn_backward: topo count mismatch");
 
     /* allocate and set loss gradient to all-ones (grad of sum(loss)) */
     if (!loss->grad) {
@@ -123,5 +151,5 @@ void dnn_backward(tensor *loss) {
         fn->backward(fn, &gv);
     }
 
-    free(topo);
+    /* No free — all allocations are from scratch pool, reclaimed on reset */
 }

@@ -73,7 +73,16 @@ In `ln_backward()`, the expression `gd[s*d+j] * (wd ? wd[j] : 1.0f)` was compute
 
 ## 10. `dnn_backward` uses `realloc` — violates pool-only rule
 
-The topological sort in `dnn_backward()` (`autograd.c:68`) grows via `realloc`, which calls heap alloc during training. Should use scratch pool with doubling strategy (`mem_scratch_alloc`) or pre-allocate based on graph depth estimate.
+The topological sort in `dnn_backward()` (`autograd.c:68`) grew via `realloc`, calling heap alloc during training.
+
+**implemented: true** — Replaced with two-pass approach using scratch pool:
+1. `_count_reachable()` — first DFS pass counts grad_fn nodes using a scratch-allocated seen array (256 pointers, ~2KB)
+2. Exact-size `topo` array allocated from scratch pool
+3. `_build_topo_from()` — second DFS pass fills the pre-allocated array
+
+No `realloc`, no `free`. All allocations from scratch pool, reclaimed on `mem_pool_reset(scratch)`. Parent-chain tensor traversal preserved by NOT prematurely adding parent tensors to the seen set — the recursive call handles addition naturally.
+
+**Measured impact:** 29.1–29.2 batch/s vs baseline 29.3–29.6. Within run-to-run noise (~1-2%). No regression.
 
 ## 11. No vectorization on broadcast backward hot loops
 
