@@ -221,43 +221,45 @@ tokenizer ──> embedding ─┤
 
 | # | Item | Depends on | Lines |
 |---|------|------------|-------|
-| 1 | `tensor_sigmoid` forward + backward + test | — | ~60 |
-| 2 | `tensor_silu` (compose from sigmoid+mul, or fuse) | (1) | ~10 / ~40 |
+| 1 | `tensor_sigmoid` forward + backward + test | — | ~60 | DONE |
+| 2 | `tensor_silu` (compose from sigmoid+mul) | (1) | ~10 / ~40 |
 | 3 | SwiGLU FFN block (compose from existing linear + silu + mul) | (1,2) | ~30 |
 | 4 | Embedding lookup + backward | — | ~80 |
 | 5 | Causal mask via `tensor_triu` + `tensor_fill(-inf)` | — | ~40 |
 | 6 | Scaled dot-product attention (compose from matmul + softmax + mask) | (5) | ~60 |
 | 7 | Multi-head split/merge wrappers | — | ~80 |
 
-### Phase 2 — Position & Fusions
+### Phase 2 — Activation Fusion & Position Encoding
 
 | # | Item | Depends on | Lines |
 |---|------|------------|-------|
-| 8 | RoPE frequency table init | — | ~40 |
-| 9 | `tensor_rope` — dedicated in-place Q/K rotation | (8) | ~100 |
-| 10 | Fused `tensor_causal_softmax(scores)` — no mask materialization | — | ~120 |
-| 11 | Fused `tensor_attention(Q,K,V, mask)` — end-to-end | (10) | ~80 |
+| 8  | Fused `tensor_silu(x)` — single-pass Swish (no intermediate sigmoid tensor) | (1) | ~40 |
+| 9  | Fused `tensor_swiglu(gate, up)` — single-pass gated activation | (8) | ~40 |
+| 10 | RoPE frequency table init | — | ~40 |
+| 11 | `tensor_rope` — dedicated in-place Q/K rotation | (10) | ~100 |
+| 12 | Fused `tensor_causal_softmax(scores)` — no mask materialization | — | ~120 |
+| 13 | Fused `tensor_attention(Q,K,V, mask)` — end-to-end | (12) | ~80 |
 
 ### Phase 3 — Tokenizer
 
 | # | Item | Depends on | Lines |
 |---|------|------------|-------|
-| 12 | Byte-level vocab file format + Python training script | — | ~150 (py) |
-| 13 | C tokenizer: encode (BPE greedy) + decode | (12) | ~300 |
-| 14 | Tokenizer → tensor pipeline (text → IDs → embedding) | (4, 13) | ~30 |
+| 14 | Byte-level vocab file format + Python training script | — | ~150 (py) |
+| 15 | C tokenizer: encode (BPE greedy) + decode | (14) | ~300 |
+| 16 | Tokenizer → tensor pipeline (text → IDs → embedding) | (4, 15) | ~30 |
 
 ### Phase 4 — Full Model
 
 | # | Item | Depends on | Lines |
 |---|------|------------|-------|
-| 15 | `transformer_block` (pre-norm attn + pre-norm swiglu-ffn + residual) | (3,6,7,9) | ~60 |
-| 16 | Decoder-only LM (embed → N×block → norm → lm_head) | (4,15) | ~60 |
-| 17 | Training loop (next-token prediction, teacher forcing, cross-entropy) | (16) | ~100 |
-| 18 | Generation loop (autoregressive, kv-cache optional) | (16) | ~80 |
+| 17 | `transformer_block` (pre-norm attn + pre-norm swiglu-ffn + residual) | (3,6,7,9,11) | ~60 |
+| 18 | Decoder-only LM (embed → N×block → norm → lm_head) | (4,17) | ~60 |
+| 19 | Training loop (next-token prediction, teacher forcing, cross-entropy) | (18) | ~100 |
+| 20 | Generation loop (autoregressive, kv-cache optional) | (18) | ~80 |
 
 ### Total estimated new code
 
-- **C source:** ~1300–1500 lines across `src/`, `include/`
+- **C source:** ~1400–1600 lines across `src/`, `include/
 - **Python:** ~150 lines for BPE trainer script
 - **Tests:** ~400 lines (one test per new op, plus integration test for training loop)
 - **No new dependencies** — Accelerate BLAS + libm + zlib already in the Makefile. BPE trainer needs Python + `tokenizers` or `tiktoken` (dev-only, not linked into C binary).
