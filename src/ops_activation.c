@@ -503,14 +503,20 @@ static void dropout_backward(grad_fn *fn, tensor *grad_output) {
 
     if (tensor_requires_grad(input)) {
         float *ig = _grad_ensure(input);
-        for (int i = 0; i < n; i++) {
-            int coord[DNN_MAX_DIMS];
-            int r = i;
-            for (int d = ndim - 1; d >= 0; d--) {
-                coord[d] = r % input->shape[d];
-                r /= input->shape[d];
+        if (tensor_is_contiguous(input)) {
+            int off = input->offset;
+            for (int i = 0; i < n; i++)
+                ig[off + i] += gd[i] * mask[i] * scale;
+        } else {
+            for (int i = 0; i < n; i++) {
+                int coord[DNN_MAX_DIMS];
+                int r = i;
+                for (int d = ndim - 1; d >= 0; d--) {
+                    coord[d] = r % input->shape[d];
+                    r /= input->shape[d];
+                }
+                ig[_bcast_off(input, ndim, coord)] += gd[i] * mask[i] * scale;
             }
-            ig[_bcast_off(input, ndim, coord)] += gd[i] * mask[i] * scale;
         }
     }
 }
@@ -534,15 +540,23 @@ tensor *tensor_dropout(const tensor *t, float p) {
 
     /* generate mask and apply: out = mask * t / (1-p) */
     float *mask = mem_scratch_alloc((size_t)n * sizeof(float), NULL);
-    for (int i = 0; i < n; i++) {
-        int coord[DNN_MAX_DIMS];
-        int r = i;
-        for (int d = ndim - 1; d >= 0; d--) {
-            coord[d] = r % t->shape[d];
-            r /= t->shape[d];
+    if (tensor_is_contiguous(t)) {
+        float *tp = td + t->offset;
+        for (int i = 0; i < n; i++) {
+            mask[i] = ((float)rand() / (float)RAND_MAX) >= p ? 1.0f : 0.0f;
+            od[i]   = mask[i] * tp[i] * scale;
         }
-        mask[i] = ((float)rand() / (float)RAND_MAX) >= p ? 1.0f : 0.0f;
-        od[i]   = mask[i] * td[_bcast_off(t, ndim, coord)] * scale;
+    } else {
+        for (int i = 0; i < n; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = ndim - 1; d >= 0; d--) {
+                coord[d] = r % t->shape[d];
+                r /= t->shape[d];
+            }
+            mask[i] = ((float)rand() / (float)RAND_MAX) >= p ? 1.0f : 0.0f;
+            od[i]   = mask[i] * td[_bcast_off(t, ndim, coord)] * scale;
+        }
     }
 
     /* autograd tape */

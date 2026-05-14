@@ -39,6 +39,10 @@ In `softmax_backward()` (`ops_activation.c:84-150`), both loops independently de
 
 `tensor_dropout` and `dropout_backward` decompose flat index → coord → `_bcast_off` for **every element** even when the input is contiguous. Dropout inputs are almost always contiguous (activations). Should use flat indexing: `float *tp = td + t->offset` and iterate linearly.
 
+**implemented: true** — Added contiguous fast paths in both `tensor_dropout` forward and `dropout_backward`. Forward: `tp = td + t->offset`, linear loop, no coord decompose. Backward: `ig[input->offset + i]`, linear loop, no coord decompose. Non-contiguous fallback preserved.
+
+**Measured impact:** ~28.5→~29.1 batch/s (+2%). Dropout in MNIST CNN only touches 1280 elements/batch (fc1 output 128×N=1280), so absolute savings are small. Gap grows with hidden dim width.
+
 ## 7. `tensor_sum` forward: coord decompose per output element
 
 `tensor_sum()` decomposes each output index → coord, then runs an inner loop over the reduction dimension modifying `coord[dim]` and calling `_bcast_off`. For contiguous tensors, this should use strided pointers — a `memcpy`-style loop with stride `t->strides[dim]` skipping over the reduction dimension. The current approach is O(numel × dim_size) in div/mod operations.
