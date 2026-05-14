@@ -374,23 +374,25 @@ tensor *tensor_cross_entropy(const tensor *logits, const tensor *target, int dim
 
     float total_loss = 0.0f;
 
-    /* fast path: 2D contiguous logits, dim=1 (most common — classification) */
+    /* fast path: 2D contiguous logits, dim=1 (most common — classification)
+     * 2 row reads per row: max (SIMD), then sum_exp (SIMD) + scalar loss.
+     */
     if (ndim == 2 && dim == 1 && tensor_is_contiguous(logits)) {
         int N = logits->shape[0], C = logits->shape[1];
         for (int n = 0; n < N; n++) {
             float *row = ld + n * C;
-            /* Pass 1: max along row (SIMD horizontal max) */
             float mx = simd_reduce_max_f32(row, C);
-            /* Pass 2: sum(exp(row - max))  (SIMD vector expf + reduction) */
             float se = simd_exp_sum_shifted_f32(row, C, mx);
             max_vals[n] = mx;
             sum_exp[n]  = se;
-            /* Pass 3: loss = logsumexp - logit[target] */
             total_loss += logf(se) + mx - row[td[n]];
         }
     } else {
-        /* general nD fallback */
-        for (int s = 0; s < n_slices; s++) sum_exp[s] = 0.0f;
+        /* general nD fallback — 2 full passes over logits (was 3).
+         * Pass 1 finds max per slice.  Pass 2 computes sum_exp and saves
+         * the target logit value.  Loss computed per-slice from saved values.
+         */
+        float *target_logits = mem_scratch_alloc(n_slices * sizeof(float), NULL);
 
         /* Pass 1: find max along dim for each slice */
         for (int i = 0; i < numel; i++) {
@@ -414,7 +416,8 @@ tensor *tensor_cross_entropy(const tensor *logits, const tensor *target, int dim
             if (val > max_vals[slice_idx]) max_vals[slice_idx] = val;
         }
 
-        /* Pass 2: sum of exp(x - max) for each slice */
+        /* Pass 2: sum of exp(x - max) + save target logit per slice */
+        for (int s = 0; s < n_slices; s++) { sum_exp[s] = 0.0f; target_logits[s] = 0.0f; }
         for (int i = 0; i < numel; i++) {
             int coord[DNN_MAX_DIMS];
             int r = i;
@@ -434,31 +437,15 @@ tensor *tensor_cross_entropy(const tensor *logits, const tensor *target, int dim
 
             float val = ld[_bcast_off(logits, ndim, coord)];
             sum_exp[slice_idx] += expf(val - max_vals[slice_idx]);
+            if (coord[dim] == td[slice_idx])
+                target_logits[slice_idx] = val;
         }
 
-        /* Pass 3: compute loss = mean(logsumexp - logits[target]) */
-        for (int i = 0; i < numel; i++) {
-            int coord[DNN_MAX_DIMS];
-            int r = i;
-            for (int d = ndim - 1; d >= 0; d--) {
-                coord[d] = r % logits->shape[d];
-                r /= logits->shape[d];
-            }
-
-            int slice_idx = 0;
-            int stride = 1;
-            for (int d = ndim - 1; d >= 0; d--) {
-                if (d != dim) {
-                    slice_idx += coord[d] * stride;
-                    stride *= logits->shape[d];
-                }
-            }
-
-            if (coord[dim] == td[slice_idx]) {
-                float val = ld[_bcast_off(logits, ndim, coord)];
-                float lse = max_vals[slice_idx] + logf(sum_exp[slice_idx]);
-                total_loss += lse - val;
-            }
+        /* compute loss per slice from saved max, sum_exp, target_logit */
+        total_loss = 0.0f;
+        for (int s = 0; s < n_slices; s++) {
+            float lse = max_vals[s] + logf(sum_exp[s]);
+            total_loss += lse - target_logits[s];
         }
     }
 

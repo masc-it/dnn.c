@@ -4,9 +4,15 @@
 
 `tensor_relu()` (`ops_activation.c:40`) calls `_tensor_scratch_create` for output even when input doesn't need the original buffer preserved. For a 3-conv MNIST CNN, that's 3 extra tensors ~10.4MB written per batch. Fix: detect when input is non-leaf intermediate (no grad needed on original data) and write in-place into the input buffer. Already documented as "implemented: false" in `cnn_optim.md`.
 
-## 2. Cross-entropy forward: 3 full passes over logits
+**implemented: true -> reverted** — `tensor_relu` now modifies the input data buffer in-place and returns a lightweight view tensor (24 bytes on scratch pool) sharing that buffer. `relu_backward` derives the mask from the output values (`out[i] > 0` is equivalent to `in[i] > 0`), so no saved tensors are needed. The view preserves the prior op's `grad_fn` chain for correct topological sort traversal. REVERT REASON: `make run` batch/s went from 32/s -> 26/s.
 
-Even the 2D fast path does **3 separate row traversals**: max → sum_exp → loss. Each re-reads the entire row from DRAM. Could fuse to 2 passes: (1) max + first half of sum_exp using speculative max, or buffer the row and do all 3 in one pass. For batch=128, C=10 (MNIST), this is negligible, but for larger C (e.g. ImageNet 1000) it's 3× the memory traffic.
+## 2. Cross-entropy forward: 3 passes over logits (nD path only)
+
+The 2D fast path (`ndim==2 && dim==1 && contiguous`) was already **2 row reads** (max via SIMD, sum_exp via SIMD) + 1 scalar access (`row[td[n]]`). The "Pass 3" comment was misleading — it's not a full pass.
+
+The **general nD path** did 3 full coord-decompose passes (max, sum_exp, loss). Fused to 2 passes by saving the target logit value during the sum_exp pass and computing loss per-slice afterward. Saves ~33% of index decomposition work on the nD path.
+
+**Status: done.** 2D path left as-is (already optimal). nD path passes reduced 3→2. No measurable impact on MNIST CNN benchmark (uses 2D path).
 
 ## 3. Softmax backward: coord decomposition done twice
 
