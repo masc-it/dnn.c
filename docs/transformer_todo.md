@@ -211,7 +211,7 @@ matmul_2d ──> [15a] batched_matmul ✅ ──────┤  │
                                             │  │
 [15b] tensor_cat ✅ ──> [15c] kv_cache ✅ ──┤  │
                                             │  │
-                                       transformer_block
+                                       transformer_block ✅
                                        (attn + swiglu ffn + pre-norm + residual)
 ```
 
@@ -384,11 +384,50 @@ mem_pool scratch = mem_pool_create(512 * 1024 * 1024);
 
 ---
 
+#### 16 — `transformer_block` ✅ **DONE**
+
+**What was implemented:**
+
+- **`transformer_block` struct** in `include/transformer.h` — holds Q/K/V/output
+  projections (`linear`), `n_heads`, `d_k`, `d_model`, pre-norm params for both
+  attention and FFN sublayers (`attn_norm_weight/bias`, `ffn_norm_weight/bias`),
+  and a `swiglu_ffn`.
+- **`transformer_block_create(d_model, n_heads, d_k, intermediate_size)`** —
+  allocates all params from params pool.  Asserts `d_model == n_heads * d_k`.
+  Norm γ init to 1, β to 0.
+- **`transformer_block_forward(block, x)`** — implements the pre-norm
+  decoder-only architecture:
+
+      1. Layer norm → Q/K/V projections → split heads
+      2. Fused causal attention (`tensor_attention` with implicit masking)
+      3. Merge heads → output projection → residual add
+      4. Layer norm → SwiGLU FFN → residual add
+
+  Input is `[B, N, d_model]` (3D), output same shape.  All sub-operations
+  have autograd wired — backward flows gradients through the full graph.
+  No extra mask needed (causal masking is implicit in `tensor_attention`).
+
+**Tests added:**
+- `test/ref_transformer.py` — PyTorch reference: full block forward + backward
+  with seed=42.  Supports `--small` flag for compact test config.
+- `test/test_transformer.c` — C tests: block creation shapes, all 19 param
+  groups get non-finite grads, numerical gradient check (finite diff on input),
+  no-grad mode, 2-block autograd chain, batch B=2, seq len N=1 and N=7,
+  forward+backward structural validation, approximate forward match with
+  weight-synced PyTorch reference.
+
+**Files changed:**
+- `include/transformer.h` — added `transformer_block` struct + function decls
+- `src/transformer.c` — added `transformer_block_create`, `transformer_block_forward`
+- `test/ref_transformer.py` — new PyTorch reference
+- `test/test_transformer.c` — new C test suite
+---
+
 ### Phase 4 — Full Model
 
 | # | Item | Depends on | Lines |
 |---|------|------------|-------|
-| 16 | `transformer_block` (pre-norm attn + pre-norm swiglu-ffn + residual) transformer.c | (3,6,7,9,11,15a) | ~60 |
+| 16 | `transformer_block` (pre-norm attn + pre-norm swiglu-ffn + residual) transformer.c | (3,6,7,9,11,15a) | ~60 | ✅ **DONE** |
 | 17 | Decoder-only LM (embed → N×block → norm → lm_head) | (4,16) | ~60 |
 | 18 | Training loop (next-token prediction, teacher forcing, cross-entropy) | (17) | ~100 |
 | 19 | Generation loop (autoregressive, kv-cache optional) | (17,15b,15c) | ~80 |

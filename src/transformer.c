@@ -1,9 +1,15 @@
 #include "transformer.h"
+#include "nn.h"
+#include "norm.h"
+#include "ops.h"
+#include "attention.h"
+#include "multihead.h"
 #include "pool.h"
 #include "tensor_int.h"
 #include "autograd.h"
 #include <assert.h>
 #include <string.h>
+#include <math.h>
 
 /* ── KV Cache ── */
 
@@ -89,4 +95,80 @@ tensor *kv_cache_get_V(kv_cache *kvc) {
     assert(kvc && "kv_cache_get_V: NULL cache");
     assert(kvc->seq_len > 0 && "kv_cache_get_V: empty cache");
     return tensor_slice(kvc->v_cache, 2, 0, kvc->seq_len);
+}
+
+/* ── Transformer Block ── */
+
+transformer_block *transformer_block_create(int d_model, int n_heads, int d_k,
+                                             int intermediate_size) {
+    assert(d_model > 0 && n_heads > 0 && d_k > 0 && intermediate_size > 0);
+    assert(d_model == n_heads * d_k && "d_model must equal n_heads * d_k");
+
+    transformer_block *block = mem_params_alloc(sizeof(transformer_block), NULL);
+    block->d_model  = d_model;
+    block->n_heads  = n_heads;
+    block->d_k      = d_k;
+
+    block->q_proj   = linear_create(d_model, n_heads * d_k);
+    block->k_proj   = linear_create(d_model, n_heads * d_k);
+    block->v_proj   = linear_create(d_model, n_heads * d_k);
+    block->out_proj = linear_create(n_heads * d_k, d_model);
+
+    /* Pre-norm params: init γ=1, β=0 */
+    block->attn_norm_weight = tensor_zeros(1, (int[]){d_model}, 1);
+    block->attn_norm_bias   = tensor_zeros(1, (int[]){d_model}, 1);
+    float *wn = tensor_data_ptr(block->attn_norm_weight);
+    for (int i = 0; i < d_model; i++) wn[i] = 1.0f;
+
+    block->ffn_norm_weight = tensor_zeros(1, (int[]){d_model}, 1);
+    block->ffn_norm_bias   = tensor_zeros(1, (int[]){d_model}, 1);
+    float *wf = tensor_data_ptr(block->ffn_norm_weight);
+    for (int i = 0; i < d_model; i++) wf[i] = 1.0f;
+
+    block->ffn = swiglu_ffn_create(d_model, intermediate_size);
+
+    return block;
+}
+
+tensor *transformer_block_forward(transformer_block *block, const tensor *x) {
+    assert(block && x);
+    assert(x->ndim >= 2);
+    assert(x->shape[x->ndim - 1] == block->d_model);
+
+    /* ── Attention sublayer (pre-norm) ── */
+    tensor *residual = (tensor*)x;
+    tensor *h = tensor_layer_norm(x, block->attn_norm_weight,
+                                   block->attn_norm_bias, 1e-5f);
+
+    /* QKV projections: [B, N, d_model] → [B, N, n_heads * d_k] */
+    tensor *Q = linear_forward(block->q_proj, h);
+    tensor *K = linear_forward(block->k_proj, h);
+    tensor *V = linear_forward(block->v_proj, h);
+
+    /* Split heads: [B, N, H*d_k] → [B, H, N, d_k] */
+    tensor *Qh = tensor_split_heads(Q, block->n_heads);
+    tensor *Kh = tensor_split_heads(K, block->n_heads);
+    tensor *Vh = tensor_split_heads(V, block->n_heads);
+
+    /* Fused causal attention (no extra mask needed) */
+    tensor *attn_out = tensor_attention(Qh, Kh, Vh, NULL);
+
+    /* Merge heads: [B, H, N, d_k] → [B, N, H*d_k] */
+    tensor *attn_merged = tensor_merge_heads(attn_out);
+
+    /* Output projection: [B, N, H*d_k] → [B, N, d_model] */
+    tensor *attn_proj = linear_forward(block->out_proj, attn_merged);
+
+    /* First residual: x = x + attn_proj */
+    tensor *x_after_attn = tensor_add(residual, attn_proj);
+
+    /* ── FFN sublayer (pre-norm) ── */
+    residual = x_after_attn;
+    h = tensor_layer_norm(x_after_attn, block->ffn_norm_weight,
+                           block->ffn_norm_bias, 1e-5f);
+
+    tensor *ffn_out = swiglu_ffn_forward(block->ffn, h);
+
+    /* Second residual: return x + ffn_out */
+    return tensor_add(residual, ffn_out);
 }
