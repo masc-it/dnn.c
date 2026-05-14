@@ -245,6 +245,172 @@ static void test_linear_no_bias(void) {
     printf("OK\n");
 }
 
+/* ── SwiGLU FFN ── */
+
+static void test_swiglu_ffn_create_shapes(void) {
+    printf("  test_swiglu_ffn_create_shapes... ");
+    swiglu_ffn *ffn = swiglu_ffn_create(4, 8);
+    assert(ffn->d_model == 4);
+    assert(ffn->intermediate_size == 8);
+    assert(ffn->gate_proj->in_features  == 4);
+    assert(ffn->gate_proj->out_features == 8);
+    assert(ffn->up_proj->in_features    == 4);
+    assert(ffn->up_proj->out_features   == 8);
+    assert(ffn->down_proj->in_features  == 8);
+    assert(ffn->down_proj->out_features == 4);
+    printf("OK\n");
+}
+
+static void test_swiglu_ffn_forward(void) {
+    printf("  test_swiglu_ffn_forward... ");
+    /* d_model=2, intermediate_size=3, batch=1 */
+    swiglu_ffn *ffn = swiglu_ffn_create(2, 3);
+    /* Set weights to known values
+     * gate_proj weight [2,3], bias [3]
+     * up_proj   weight [2,3], bias [3]
+     * down_proj weight [3,2], bias [2] */
+    float *wg = tensor_data_ptr(ffn->gate_proj->weight);
+    wg[0]=1; wg[1]=2; wg[2]=3; wg[3]=4; wg[4]=5; wg[5]=6;
+    float *bg = tensor_data_ptr(ffn->gate_proj->bias);
+    bg[0]=0; bg[1]=0; bg[2]=0;
+
+    float *wu = tensor_data_ptr(ffn->up_proj->weight);
+    wu[0]=0.1f; wu[1]=0.2f; wu[2]=0.3f; wu[3]=0.4f; wu[4]=0.5f; wu[5]=0.6f;
+    float *bu = tensor_data_ptr(ffn->up_proj->bias);
+    bu[0]=0; bu[1]=0; bu[2]=0;
+
+    float *wd = tensor_data_ptr(ffn->down_proj->weight);
+    wd[0]=1; wd[1]=4; wd[2]=2; wd[3]=5; wd[4]=3; wd[5]=6;
+    float *bd = tensor_data_ptr(ffn->down_proj->bias);
+    bd[0]=0; bd[1]=0;
+
+    tensor *x = tensor_zeros(2, (int[]){1, 2}, 0);
+    float *xp = tensor_data_ptr(x);
+    xp[0]=1; xp[1]=2;
+
+    tensor *y = swiglu_ffn_forward(ffn, x);
+    /* Check output shape: (1, 2) */
+    assert(tensor_ndim(y) == 2);
+    assert(tensor_shape(y, 0) == 1);
+    assert(tensor_shape(y, 1) == 2);
+
+    /* Values computed by running dnn.c swiglu_ffn (not PyTorch — no torch on CI).
+     * python3 math.exp reference (for documentation):
+     *   gate = SiLU([9,12,15]) ≈ [8.99888945, 11.99992627, 14.99999541]
+     *   up = [0.9, 1.2, 1.5], hidden = gate*up ≈ [8.09900050, 14.39991152, 22.49999312]
+     *   out = hidden@W_d ≈ [104.39880290, 239.39551834]
+     * dnn.c actual (may differ at 1e-5 due to fast expf polynomial):
+     */
+    float exp[] = {104.39879608f, 239.39552307f};
+    check_data_ary(y, exp, 2, "y");
+    printf("OK\n");
+}
+
+static void test_swiglu_ffn_backward(void) {
+    printf("  test_swiglu_ffn_backward... ");
+    swiglu_ffn *ffn = swiglu_ffn_create(2, 3);
+    /* identity-like weights for predictable gradient */
+    float *wg = tensor_data_ptr(ffn->gate_proj->weight);
+    wg[0]=1; wg[1]=0; wg[2]=0; wg[3]=0; wg[4]=1; wg[5]=0;
+    float *bg = tensor_data_ptr(ffn->gate_proj->bias);
+    bg[0]=0; bg[1]=0; bg[2]=0;
+
+    float *wu = tensor_data_ptr(ffn->up_proj->weight);
+    wu[0]=1; wu[1]=0; wu[2]=0; wu[3]=0; wu[4]=1; wu[5]=0;
+    float *bu = tensor_data_ptr(ffn->up_proj->bias);
+    bu[0]=0; bu[1]=0; bu[2]=0;
+
+    float *wd = tensor_data_ptr(ffn->down_proj->weight);
+    wd[0]=1; wd[1]=0; wd[2]=0; wd[3]=1; wd[4]=0; wd[5]=0;
+    float *bd = tensor_data_ptr(ffn->down_proj->bias);
+    bd[0]=0; bd[1]=0;
+
+    tensor *x = tensor_zeros(2, (int[]){1, 2}, 0);
+    float *xp = tensor_data_ptr(x);
+    xp[0]=2; xp[1]=3;
+
+    tensor *y = swiglu_ffn_forward(ffn, x);
+    dnn_backward(y);
+
+    /* All 6 parameter tensors should have non-zero gradients */
+    assert(tensor_grad(ffn->gate_proj->weight) && "gate_proj dW");
+    assert(tensor_grad(ffn->gate_proj->bias)   && "gate_proj db");
+    assert(tensor_grad(ffn->up_proj->weight)   && "up_proj dW");
+    assert(tensor_grad(ffn->up_proj->bias)     && "up_proj db");
+    assert(tensor_grad(ffn->down_proj->weight) && "down_proj dW");
+    assert(tensor_grad(ffn->down_proj->bias)   && "down_proj db");
+    printf("OK\n");
+}
+
+static void test_swiglu_ffn_input_grad(void) {
+    printf("  test_swiglu_ffn_input_grad... ");
+    swiglu_ffn *ffn = swiglu_ffn_create(2, 3);
+    float *wg = tensor_data_ptr(ffn->gate_proj->weight);
+    wg[0]=1; wg[1]=0; wg[2]=0; wg[3]=0; wg[4]=1; wg[5]=0;
+    float *bg = tensor_data_ptr(ffn->gate_proj->bias);
+    bg[0]=0; bg[1]=0; bg[2]=0;
+
+    float *wu = tensor_data_ptr(ffn->up_proj->weight);
+    wu[0]=1; wu[1]=0; wu[2]=0; wu[3]=0; wu[4]=1; wu[5]=0;
+    float *bu = tensor_data_ptr(ffn->up_proj->bias);
+    bu[0]=0; bu[1]=0; bu[2]=0;
+
+    float *wd = tensor_data_ptr(ffn->down_proj->weight);
+    wd[0]=1; wd[1]=0; wd[2]=0; wd[3]=1; wd[4]=0; wd[5]=0;
+    float *bd = tensor_data_ptr(ffn->down_proj->bias);
+    bd[0]=0; bd[1]=0;
+
+    tensor *x = tensor_zeros(2, (int[]){1, 2}, 1);
+    float *xp = tensor_data_ptr(x);
+    xp[0]=2; xp[1]=3;
+
+    tensor *y = swiglu_ffn_forward(ffn, x);
+    dnn_backward(y);
+
+    /* gradient should flow back to input */
+    assert(tensor_grad(x) && "dx should be computed");
+    assert(fabsf(tensor_grad(x)[0]) > 0 && "dx[0] non-zero");
+    assert(fabsf(tensor_grad(x)[1]) > 0 && "dx[1] non-zero");
+    printf("OK\n");
+}
+
+static void test_swiglu_ffn_batch(void) {
+    printf("  test_swiglu_ffn_batch... ");
+    swiglu_ffn *ffn = swiglu_ffn_create(2, 3);
+    float *wg = tensor_data_ptr(ffn->gate_proj->weight);
+    wg[0]=1; wg[1]=2; wg[2]=3; wg[3]=4; wg[4]=5; wg[5]=6;
+    float *bg = tensor_data_ptr(ffn->gate_proj->bias);
+    bg[0]=0; bg[1]=0; bg[2]=0;
+
+    float *wu = tensor_data_ptr(ffn->up_proj->weight);
+    wu[0]=0.1f; wu[1]=0.2f; wu[2]=0.3f; wu[3]=0.4f; wu[4]=0.5f; wu[5]=0.6f;
+    float *bu = tensor_data_ptr(ffn->up_proj->bias);
+    bu[0]=0; bu[1]=0; bu[2]=0;
+
+    float *wd = tensor_data_ptr(ffn->down_proj->weight);
+    wd[0]=1; wd[1]=4; wd[2]=2; wd[3]=5; wd[4]=3; wd[5]=6;
+    float *bd = tensor_data_ptr(ffn->down_proj->bias);
+    bd[0]=0; bd[1]=0;
+
+    /* batch of 2 */
+    tensor *x = tensor_zeros(2, (int[]){2, 2}, 0);
+    float *xp = tensor_data_ptr(x);
+    xp[0]=1; xp[1]=2;  /* row 0 */
+    xp[2]=3; xp[3]=4;  /* row 1 */
+
+    tensor *y = swiglu_ffn_forward(ffn, x);
+    assert(tensor_shape(y, 0) == 2);
+    assert(tensor_shape(y, 1) == 2);
+
+    /* dnn.c actual values:
+     * python3 math.exp reference: y2 = [497.99999980, 1135.79999919]
+     */
+    float exp[] = {104.39880371f, 239.39550781f,
+                    498.00000000f, 1135.80004883f};
+    check_data_ary(y, exp, 4, "y");
+    printf("OK\n");
+}
+
 /* ── Integration: linear + relu ── */
 
 static void test_linear_relu(void) {
@@ -319,6 +485,26 @@ int main(void) {
     mem_pool_reset(&scratch);
 
     test_linear_relu();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_swiglu_ffn_create_shapes();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_swiglu_ffn_forward();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_swiglu_ffn_backward();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_swiglu_ffn_input_grad();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_swiglu_ffn_batch();
     mem_pool_reset(&params);
     mem_pool_reset(&scratch);
 

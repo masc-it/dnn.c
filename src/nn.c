@@ -29,3 +29,36 @@ tensor *linear_forward(linear *l, const tensor *input) {
     tensor *mm = tensor_matmul(input, l->weight);
     return tensor_add(mm, l->bias);
 }
+
+/* ── SwiGLU FFN ── */
+
+swiglu_ffn *swiglu_ffn_create(int d_model, int intermediate_size) {
+    assert(d_model > 0 && intermediate_size > 0);
+
+    swiglu_ffn *ffn = mem_params_alloc(sizeof(swiglu_ffn), NULL);
+    ffn->d_model          = d_model;
+    ffn->intermediate_size = intermediate_size;
+    ffn->gate_proj = linear_create(d_model, intermediate_size);
+    ffn->up_proj   = linear_create(d_model, intermediate_size);
+    ffn->down_proj = linear_create(intermediate_size, d_model);
+    return ffn;
+}
+
+tensor *swiglu_ffn_forward(swiglu_ffn *ffn, const tensor *x) {
+    assert(ffn);
+    assert(x);
+    assert(x->ndim >= 2);
+    assert(x->shape[x->ndim - 1] == ffn->d_model);
+
+    /* gate = SiLU(x @ W_g + b_g) */
+    tensor *gate = tensor_silu(linear_forward(ffn->gate_proj, x));
+
+    /* up = x @ W_u + b_u */
+    tensor *up = linear_forward(ffn->up_proj, x);
+
+    /* hidden = gate ⊗ up */
+    tensor *hidden = tensor_mul(gate, up);
+
+    /* out = hidden @ W_d + b_d */
+    return linear_forward(ffn->down_proj, hidden);
+}

@@ -43,8 +43,8 @@ int main(void) {
     mnist_model_cnn *m_cnn = mnist_model_create_cnn();
     printf("CNN model created.\n\n");
 
-    printf("Training CNN (AdamW, lr=0.001, batch=128, max_epochs=3, patience=3):\n");
-    mnist_train_cnn(m_cnn, train_images, train_labels, 3, 128, 0.001f, 5000, 3);
+    printf("Training CNN (AdamW, lr=0.001, batch=128, max_epochs=1, patience=3):\n");
+    mnist_train_cnn(m_cnn, train_images, train_labels, 1, 128, 0.001f, 5000, 3);
 
     printf("\nEvaluating CNN:\n");
     float cnn_train_acc = mnist_eval_cnn(m_cnn, train_images, train_labels);
