@@ -75,6 +75,9 @@ typedef struct {
     tensor    *ffn_norm_weight;     /* [d_model], learnable, init 1 */
     tensor    *ffn_norm_bias;       /* [d_model], learnable, init 0 */
     swiglu_ffn *ffn;               /* d_model → intermediate → d_model */
+    /* RoPE frequency tables (borrowed from decoder_lm, not owned) */
+    tensor    *freqs_cos;           /* [max_seq_len, d_k/2], NULL = no RoPE */
+    tensor    *freqs_sin;           /* [max_seq_len, d_k/2], NULL = no RoPE */
 } transformer_block;
 
 transformer_block *transformer_block_create(int d_model, int n_heads, int d_k,
@@ -148,6 +151,58 @@ tensor *decoder_lm_forward(decoder_lm *lm, const tensor *input_ids);
  *   Caller must reset scratch/data pools before next call.
  */
 tensor *decoder_lm_train_step(decoder_lm *lm, const tensor *input_ids,
-                               adamw_opt *opt);
+                               adamw_opt *opt, float grad_clip,
+                               float *grad_norm_out);
+
+/* ── Cached forward (eval-only, generation) ──
+ *
+ * Forward one token through a single transformer block using KV-cache.
+ *
+ *   x     — [B, N_new, d_model] tensor for new token(s), MUST be contiguous
+ *   cache — KV-cache for this block (stores full K/V history)
+ *
+ *   Appends new K/V to cache, then does attention using cached K/V.
+ *   No autograd wired (generation runs in dnn_no_grad mode).
+ *   Returns [B, N_new, d_model].
+ */
+tensor *transformer_block_forward_cached(transformer_block *block,
+                                          const tensor *x,
+                                          kv_cache *cache);
+
+/* ── Autoregressive generation ──
+ *
+ * Generate token IDs autoregressively from a prompt.
+ *
+ *   lm             — trained decoder LM
+ *   prompt_ids     — [1, N] int tensor, prompt tokens (contiguous)
+ *   max_new_tokens — maximum number of new tokens to generate
+ *   temperature    — sampling temperature (>=0). 0 = argmax (greedy).
+ *   use_cache      — if non-zero, use KV-cache for O(1) per-step inference
+ *   n_out          — output: number of tokens in result
+ *
+ * Returns int array allocated from data pool with token IDs.
+ * Caller must NOT free (pool owns it, reset data pool to release).
+ *
+ * Generation stops when:
+ *   - EOS token (TOKENIZER_EOS_ID = 258) is generated
+ *   - max_new_tokens is reached
+ *   - total sequence length would overflow a reasonable max
+ */
+int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
+                          int max_new_tokens, float temperature,
+                          int use_cache, int *n_out);
+
+/* ── RoPE position encoding ──
+ *
+ * Enable RoPE on all blocks.  Initializes frequency tables in params pool
+ * and sets block->freqs_cos/sin on every block.
+ *
+ *   lm          — decoder LM (all blocks get freqs assigned)
+ *   max_seq_len — maximum sequence length (covers training + generation)
+ *   base        — RoPE base frequency (0.0 = default 10000.0)
+ *
+ * Can be called before or after training.  Safe to call once.
+ */
+void decoder_lm_enable_rope(decoder_lm *lm, int max_seq_len, float base);
 
 #endif /* DNN_TRANSFORMER_H */

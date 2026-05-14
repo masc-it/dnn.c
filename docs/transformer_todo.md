@@ -86,8 +86,8 @@ Straightforward op: `tensor_embedding` reads int IDs from the input tensor's dat
 | Component | Status | Effort |
 |-----------|--------|--------|
 | RoPE frequency table init | `theta_k = base^{-2k/d}` for k=0..d/2-1. Implemented via `tensor_rope_freqs(d, base)` in `src/rope.c`. Tests in `test/test_rope.c` and `ref_rope.py` (PyTorch ref). | Low | DONE |
-| RoPE forward: apply rotation to Q and K | Rotate pairs `(x_{2k}, x_{2k+1})` by `(cos mθ_k, sin mθ_k)`. Needs `cos`/`sin` on each position m. Two approaches: (a) compose via `tensor_mul` + `tensor_add` — works but slow (many passes over data). (b) dedicated `tensor_rope(q, k, freqs)` kernel — single pass, vectorizable. | **Medium-High** |
-| RoPE backward | Gradients for rotated Q/K require rotating grad_output by the same angles. Could reuse forward's sin/cos table. | Medium |
+| RoPE forward: apply rotation to Q and K | Rotate pairs `(x_{2k}, x_{2k+1})` by `(cos mθ_k, sin mθ_k)`. Needs `cos`/`sin` on each position m. Two approaches: (a) compose via `tensor_mul` + `tensor_add` — works but slow (many passes over data). (b) dedicated `tensor_rope(q, k, freqs)` kernel — single pass, vectorizable. | **Medium-High** | DONE |
+| RoPE backward | Gradients for rotated Q/K require rotating grad_output by the same angles. Could reuse forward's sin/cos table. | Medium | DONE |
 
 ### Recommendation
 
@@ -219,6 +219,9 @@ matmul_2d ──> [15a] batched_matmul ✅ ──────┤  │
                                             │
                                        train_step ✅
                                        (teacher forcing + cross-entropy + optimizer)
+                                            │
+                                       gen ✅
+                                       (autoregressive generation, kv-cache optional)
 ```
 
 ### Phase 1 — Foundation (no new ops, just compose)
@@ -517,7 +520,8 @@ mem_pool scratch = mem_pool_create(512 * 1024 * 1024);
 | 16 | `transformer_block` (pre-norm attn + pre-norm swiglu-ffn + residual) transformer.c | (3,6,7,9,11,15a) | ~60 | ✅ **DONE** |
 | 17 | Decoder-only LM (embed → N×block → norm → lm_head) | (4,16) | ~60 | ✅ **DONE** |
 | 18 | Training loop (next-token prediction, teacher forcing, cross-entropy) | (17) | ~100 | ✅ **DONE** |
-| 19 | Generation loop (autoregressive, kv-cache optional) | (17,15b,15c) | ~80 |
+| 19 | Generation loop (autoregressive, kv-cache optional) | (17,15b,15c) | ~80 | ✅ **DONE** |
+| 20 | Gradient clipping (L2 norm + value) | (18) | ~80 | ✅ **DONE** |
 
 ### Total estimated new code
 
@@ -525,6 +529,126 @@ mem_pool scratch = mem_pool_create(512 * 1024 * 1024);
 - **Python:** none needed
 - **Tests:** ~400 lines (one test per new op, plus integration test for training loop)
 - **No new dependencies** — Accelerate BLAS + libm + zlib already in the Makefile.
+
+#### 19 — Generation loop (autoregressive, kv-cache optional) ✅ **DONE**
+
+**What was implemented:**
+
+- **`transformer_block_forward_cached(block, x, cache)`** — forward one token
+  through a single block using KV-cache:
+
+  1. Pre-norm + QKV projection + split heads (`Qh`, `Kh`, `Vh` all `[B, H, N_new, d_k]`)
+  2. `kv_cache_append(cache, Kh, Vh)` — store new K/V in the pre-allocated cache
+  3. `kv_cache_get_K` / `kv_cache_get_V` — slice views of full cached `[B, H, S, d_k]`
+  4. Inline scaled dot-product attention: `scores = Q @ K_full^T * scale` with
+     cblas_sgemm, softmax over last dim (no causal mask — single new token
+     attends to all past tokens), then `O = P @ V_full`
+  5. Merge heads + output projection + residual
+  6. Pre-norm + SwiGLU FFN + residual
+
+  No autograd wired (generation runs in `dnn_no_grad` mode).
+  Supports batch > 1 (though generation currently only uses batch=1).
+  Uses BLAS (cblas_sgemm) with NO_CBLAS fallback.
+
+- **`_argmax(logits, vocab_size)`** — picks token with highest logit
+- **`_sample_with_temp(logits, vocab_size, temp)`** — categorical sampling
+  with temperature: softmax(logits / temp), then sample from CDF via `rand()`
+
+- **`decoder_lm_generate(lm, prompt_ids, max_new_tokens, temperature,
+   use_cache, &n_out)`** — full autoregressive generation:
+
+  **No-cache path:**
+  - Loop: build tensor from accumulated output, call `decoder_lm_forward` to
+    get logits for all positions, extract last token's logits, sample
+  - O(N²) per step — full forward pass every iteration
+
+  **KV-cache path:**
+  - Create `kv_cache` per layer (pre-allocated to max_seq = prompt_len +
+    max_new_tokens)
+  - Process prompt tokens one-by-one to populate cache (embed → cached block
+    forward for each layer)
+  - On last prompt token: sample next token from logits
+  - Then loop: sample, embed, cached block forward, final norm + lm_head
+  - Each step is O(1) in sequence length — only processes the single new token
+
+  Generation stops on EOS (ID 258) or max_new_tokens.
+  Runs in `dnn_no_grad` — no autograd tape created.
+  Returns int array from data pool (caller resets data pool to free).
+
+**Tests added:**
+- `test/ref_generation.py` — PyTorch reference: creates decoder LM, trains 5
+  steps, generates with argmax + temperature, with/without cache, short prompt.
+  Verifies cached == non-cached outputs match exactly.
+- `test/test_generation.c` — C tests (8 tests):
+  - Argmax no-cache: finite tokens in vocab range, prompt prefix preserved
+  - Cached vs non-cached equivalence (multiple seeds/configs)
+  - Short prompt (N=1): both paths match
+  - Max new tokens limit respected
+  - Deterministic: same seed produces same output
+  - Temperature sampling: structurally valid (may match argmax)
+  - Various model configs: cached/non-cached match across architectures
+  - No-grad mode: generation doesn't accumulate grads
+
+**Files changed:**
+- `include/transformer.h` — added `transformer_block_forward_cached`,
+  `decoder_lm_generate` declarations
+- `src/transformer.c` — added `transformer_block_forward_cached`, `_argmax`,
+  `_sample_with_temp`, `decoder_lm_generate`
+- `test/ref_generation.py` — new PyTorch reference
+- `test/test_generation.c` — new C test suite
+- `docs/transformer_todo.md` — marked 19 done
+
+---
+
+#### 20 — Gradient clipping (L2 norm + value) ✅ **DONE**
+
+**What was implemented:**
+
+Two gradient clipping functions in `optim.h`/`optim.c`:
+
+- **`clip_grad_norm(params, n_params, max_norm)`** — L2 norm clipping. Computes
+  total L2 norm of all gradients across all params. If `total_norm > max_norm`,
+  scales all gradients by `max_norm / total_norm`. Returns the total norm BEFORE
+  clipping (for logging). No-op if `max_norm <= 0`. Uses `double` accumulator
+  for the norm sum to improve precision.
+
+- **`clip_grad_value(params, n_params, clip_value)`** — element-wise value
+  clipping. Clamps each gradient element to `[-clip_value, clip_value]`.
+  No-op if `clip_value <= 0`.
+
+**Integration into training step:**
+
+- `decoder_lm_train_step(lm, input_ids, opt, grad_clip)` now accepts a
+  `grad_clip` float parameter. If `> 0`, calls `clip_grad_norm` on the
+  optimizer's params after `dnn_backward` and before `adamw_step`.
+- `main_lm.c` passes `grad_clip=1.0f` to the training step.
+- All existing callers updated to pass `0.0f` (no change in behavior).
+
+**Tests added:**
+- `test/ref_grad_clip.py` — PyTorch reference: clip norm basic (large grads
+  scaled), no-op when norm < max_norm, extreme clip (norm reduced to exactly
+  max_norm), value clip, max_norm=0 no-op, training with/without clip comparison.
+- `test/test_grad_clip.c` — C tests (10 tests):
+  - Norm clip basic: norm reduced to <= max_norm
+  - Norm clip no-op: norm < max_norm → unchanged
+  - Norm clip zero/negative max_norm: no-op
+  - Norm clip extreme: very small max_norm works
+  - Norm clip return value: returns norm before clipping
+  - Value clip basic: max abs grad reduced to <= clip_value
+  - Value clip no-op: large clip_value doesn't change grads
+  - Value clip zero/negative: no-op
+  - Clip in training step: loss finite and positive
+  - Multi-step training with clip: loss decreases monotonically
+
+**Files changed:**
+- `include/optim.h` — added `clip_grad_norm`, `clip_grad_value` declarations
+- `src/optim.c` — added `clip_grad_norm`, `clip_grad_value` implementations
+- `include/transformer.h` — added `grad_clip` param to `decoder_lm_train_step`
+- `src/transformer.c` — added clipping call in `decoder_lm_train_step`
+- `main_lm.c` — passes `grad_clip=1.0f`
+- `test/test_grad_clip.c` — new C test suite
+- `test/ref_grad_clip.py` — new PyTorch reference
+- `docs/transformer_todo.md` — marked 20 done
 
 ### Architectural considerations
 

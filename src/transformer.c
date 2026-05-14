@@ -4,6 +4,7 @@
 #include "ops.h"
 #include "attention.h"
 #include "multihead.h"
+#include "rope.h"
 #include "pool.h"
 #include "tensor_int.h"
 #include "autograd.h"
@@ -11,6 +12,16 @@
 #include <assert.h>
 #include <string.h>
 #include <math.h>
+#include <stdlib.h>
+
+/* BLAS for fast matmul in cached attention */
+#if defined(__APPLE__)
+#  include <Accelerate/Accelerate.h>
+#elif defined(HAVE_CBLAS)
+#  include <cblas.h>
+#else
+#  define NO_CBLAS 1
+#endif
 
 /* ── KV Cache ── */
 
@@ -128,6 +139,10 @@ transformer_block *transformer_block_create(int d_model, int n_heads, int d_k,
 
     block->ffn = swiglu_ffn_create(d_model, intermediate_size);
 
+    /* RoPE disabled by default */
+    block->freqs_cos = NULL;
+    block->freqs_sin = NULL;
+
     return block;
 }
 
@@ -150,6 +165,16 @@ tensor *transformer_block_forward(transformer_block *block, const tensor *x) {
     tensor *Qh = tensor_split_heads(Q, block->n_heads);
     tensor *Kh = tensor_split_heads(K, block->n_heads);
     tensor *Vh = tensor_split_heads(V, block->n_heads);
+
+    /* ── RoPE: apply rotary position encoding to Q, K ── */
+    if (block->freqs_cos && block->freqs_sin) {
+        /* Slice freq tables to match current sequence length */
+        int N = Qh->shape[2];
+        tensor *fc = tensor_slice(block->freqs_cos, 0, 0, N);
+        tensor *fs = tensor_slice(block->freqs_sin, 0, 0, N);
+        Qh = tensor_rope(Qh, fc, fs);
+        Kh = tensor_rope(Kh, fc, fs);
+    }
 
     /* Fused causal attention (no extra mask needed) */
     tensor *attn_out = tensor_attention(Qh, Kh, Vh, NULL);
@@ -246,7 +271,8 @@ tensor *decoder_lm_forward(decoder_lm *lm, const tensor *input_ids) {
 /* ── Training step ── */
 
 tensor *decoder_lm_train_step(decoder_lm *lm, const tensor *input_ids,
-                               adamw_opt *opt) {
+                               adamw_opt *opt, float grad_clip,
+                               float *grad_norm_out) {
     assert(lm && input_ids && opt);
     assert(input_ids->ndim == 2 && "train_step: input_ids must be 2D [B, N]");
     assert(input_ids->contiguous && "train_step: input_ids must be contiguous");
@@ -277,9 +303,367 @@ tensor *decoder_lm_train_step(decoder_lm *lm, const tensor *input_ids,
     /* ── Backward ── */
     dnn_backward(loss);
 
+    /* ── Gradient clipping ── */
+    float gn = 0.0f;
+    if (grad_clip > 0.0f) {
+        gn = clip_grad_norm(opt->params, opt->n_params, grad_clip);
+    } else {
+        /* Compute norm even without clipping, for logging */
+        double sum_sq = 0.0;
+        for (int i = 0; i < opt->n_params; i++) {
+            float *g = tensor_grad(opt->params[i]);
+            if (!g) continue;
+            int n = tensor_numel(opt->params[i]);
+            for (int j = 0; j < n; j++)
+                sum_sq += (double)g[j] * (double)g[j];
+        }
+        gn = sqrtf((float)sum_sq);
+    }
+    if (grad_norm_out) *grad_norm_out = gn;
+
     /* ── Update ── */
     adamw_step(opt);
     adamw_zero_grad(opt);
 
     return loss;
+}
+
+/* ── Cached transformer block forward (eval-only, generation) ── */
+
+tensor *transformer_block_forward_cached(transformer_block *block,
+                                          const tensor *x,
+                                          kv_cache *cache) {
+    assert(block && x && cache);
+    assert(x->contiguous && "cached forward: x must be contiguous");
+    assert(x->ndim >= 2);
+    assert(x->shape[x->ndim - 1] == block->d_model);
+
+    int B     = x->shape[0];
+    int N_new = x->shape[x->ndim - 2];  /* sequence dim for new tokens */
+    int H     = block->n_heads;
+    int d_k   = block->d_k;
+
+    /* Pre-norm */
+    tensor *h = tensor_layer_norm(x, block->attn_norm_weight,
+                                   block->attn_norm_bias, 1e-5f);
+
+    /* QKV projections */
+    tensor *Q = linear_forward(block->q_proj, h);  /* [B, N_new, H*d_k] */
+    tensor *K = linear_forward(block->k_proj, h);
+    tensor *V = linear_forward(block->v_proj, h);
+
+    /* Split heads */
+    tensor *Qh = tensor_split_heads(Q, H);  /* [B, H, N_new, d_k] */
+    tensor *Kh = tensor_split_heads(K, H);
+    tensor *Vh = tensor_split_heads(V, H);
+
+    /* ── RoPE: apply to Q, K with position offset ── */
+    if (block->freqs_cos && block->freqs_sin) {
+        /* New tokens are at positions [cache->seq_len, cache->seq_len + N_new)
+         * Slice the freq tables to start at the current cache position. */
+        int pos_offset = cache->seq_len;
+        tensor *fc_slice = tensor_slice(block->freqs_cos, 0, pos_offset, N_new);
+        tensor *fs_slice = tensor_slice(block->freqs_sin, 0, pos_offset, N_new);
+        Qh = tensor_rope(Qh, fc_slice, fs_slice);
+        Kh = tensor_rope(Kh, fc_slice, fs_slice);
+    }
+
+    /* Append new K/V to cache */
+    kv_cache_append(cache, Kh, Vh);
+
+    /* Get full cached K/V */
+    tensor *K_full = kv_cache_get_K(cache);  /* [B, H, S, d_k] */
+    tensor *V_full = kv_cache_get_V(cache);  /* [B, H, S, d_k] */
+
+    int S = K_full->shape[2];
+    float scale = 1.0f / sqrtf((float)d_k);
+
+    /* Output allocation */
+    tensor *attn_out = _tensor_scratch_create(4, (int[]){B, H, N_new, d_k}, 0);
+    float *od = (float*)attn_out->data;
+    float *qd = (float*)Qh->data;
+    float *kd = (float*)K_full->data;
+    float *vd = (float*)V_full->data;
+
+    /* Temp scores [N_new, S] */
+    float *scores = mem_scratch_alloc((size_t)N_new * S * sizeof(float), NULL);
+
+    for (int b = 0; b < B; b++) {
+        for (int h = 0; h < H; h++) {
+            int bh = b * H + h;
+
+            float *q_slice = qd + bh * N_new * d_k;
+            float *k_slice = kd + bh * S * d_k;
+            float *v_slice = vd + bh * S * d_k;
+            float *o_slice = od + bh * N_new * d_k;
+
+            /* scores = Q @ K^T * scale  [N_new, S] */
+#if NO_CBLAS
+            for (int i = 0; i < N_new; i++)
+                for (int j = 0; j < S; j++) {
+                    float sum = 0.0f;
+                    for (int kk = 0; kk < d_k; kk++)
+                        sum += q_slice[i * d_k + kk] * k_slice[j * d_k + kk];
+                    scores[i * S + j] = sum * scale;
+                }
+#else
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                        N_new, S, d_k, scale, q_slice, d_k, k_slice, d_k,
+                        0.0f, scores, S);
+#endif
+
+            /* Softmax over last dim — no causal mask, all past visible */
+            for (int i = 0; i < N_new; i++) {
+                float *row = scores + i * S;
+                float mx = -INFINITY;
+                for (int j = 0; j < S; j++)
+                    if (row[j] > mx) mx = row[j];
+                float se = 0.0f;
+                for (int j = 0; j < S; j++)
+                    se += expf(row[j] - mx);
+                float inv_se = 1.0f / se;
+                for (int j = 0; j < S; j++)
+                    row[j] = expf(row[j] - mx) * inv_se;
+            }
+
+            /* O = P @ V  [N_new, d_k] */
+#if NO_CBLAS
+            for (int i = 0; i < N_new; i++)
+                for (int j = 0; j < d_k; j++) {
+                    float sum = 0.0f;
+                    for (int kk = 0; kk < S; kk++)
+                        sum += scores[i * S + kk] * v_slice[kk * d_k + j];
+                    o_slice[i * d_k + j] = sum;
+                }
+#else
+            cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                        N_new, d_k, S, 1.0f, scores, S, v_slice, d_k,
+                        0.0f, o_slice, d_k);
+#endif
+        }
+    }
+
+    /* No autograd — generation is eval-only */
+
+    /* Merge heads: [B, H, N_new, d_k] → [B, N_new, H*d_k] */
+    tensor *attn_merged = tensor_merge_heads(attn_out);
+
+    /* Output projection */
+    tensor *attn_proj = linear_forward(block->out_proj, attn_merged);
+
+    /* First residual */
+    tensor *x_after_attn = tensor_add(x, attn_proj);
+
+    /* ── FFN sublayer (pre-norm) ── */
+    h = tensor_layer_norm(x_after_attn, block->ffn_norm_weight,
+                           block->ffn_norm_bias, 1e-5f);
+    tensor *ffn_out = swiglu_ffn_forward(block->ffn, h);
+
+    /* Second residual */
+    return tensor_add(x_after_attn, ffn_out);
+}
+
+
+/* ── Sampling helpers ── */
+
+static int _argmax(const float *logits, int vocab_size) {
+    int best = 0;
+    float best_val = logits[0];
+    for (int i = 1; i < vocab_size; i++) {
+        if (logits[i] > best_val) {
+            best_val = logits[i];
+            best = i;
+        }
+    }
+    return best;
+}
+
+static int _sample_with_temp(const float *logits, int vocab_size, float temp) {
+    /* NumPy-style categorical sampling:
+     *   probs = softmax(logits / temp)
+     *   sample = np.random.choice(vocab_size, p=probs)
+     */
+    float inv_temp = 1.0f / temp;
+
+    /* Find max for numerical stability */
+    float mx = -INFINITY;
+    for (int i = 0; i < vocab_size; i++) {
+        float v = logits[i] * inv_temp;
+        if (v > mx) mx = v;
+    }
+
+    /* Compute exp and sum */
+    float sum = 0.0f;
+    for (int i = 0; i < vocab_size; i++) {
+        sum += expf(logits[i] * inv_temp - mx);
+    }
+
+    /* Draw from cumulative distribution */
+    float r = (float)rand() / (float)RAND_MAX;
+    float cum = 0.0f;
+    for (int i = 0; i < vocab_size; i++) {
+        cum += expf(logits[i] * inv_temp - mx) / sum;
+        if (r < cum) return i;
+    }
+
+    /* Fallback (shouldn't reach here due to floating point) */
+    return vocab_size - 1;
+}
+
+
+/* ── Autoregressive generation ── */
+
+int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
+                          int max_new_tokens, float temperature,
+                          int use_cache, int *n_out) {
+    assert(lm && prompt_ids);
+    assert(prompt_ids->ndim == 2 && "generate: prompt_ids must be 2D [1, N]");
+    assert(prompt_ids->shape[0] == 1 && "generate: only batch=1 supported");
+    assert(prompt_ids->contiguous && "generate: prompt_ids must be contiguous");
+    assert(max_new_tokens > 0);
+    assert(temperature >= 0.0f && "generate: temperature must be >= 0");
+
+    int prompt_len = prompt_ids->shape[1];
+    int max_len = prompt_len + max_new_tokens;
+    int vocab_size = lm->vocab_size;
+    int d_model = lm->d_model;
+    int B = 1;  /* single-batch generation */
+
+    /* Allocate output buffer from data pool */
+    int *output = mem_data_alloc((size_t)max_len * sizeof(int), NULL);
+    memcpy(output, prompt_ids->data, (size_t)prompt_len * sizeof(int));
+    int cur_len = prompt_len;
+
+    /* Enter no-grad mode for generation */
+    dnn_grad_ctx no_grad_ctx = dnn_no_grad_enter();
+
+    if (use_cache && lm->n_layers > 0) {
+        /* ── KV-cache path ── */
+        int d_k = lm->blocks[0]->d_k;
+        int H   = lm->blocks[0]->n_heads;
+
+        /* Create KV-caches for each layer */
+        kv_cache **caches = mem_scratch_alloc((size_t)lm->n_layers * sizeof(kv_cache*), NULL);
+        int max_seq = max_len;
+        for (int i = 0; i < lm->n_layers; i++) {
+            caches[i] = kv_cache_create(B, H, max_seq, d_k);
+        }
+
+        /* Process prompt tokens one-by-one to populate cache */
+        tensor *single_id_data = tensor_zeros_data(1, (int[]){1});  /* 1D int tensor */
+
+        for (int p = 0; p < prompt_len; p++) {
+            /* Set single token ID */
+            ((int*)single_id_data->data)[0] = output[p];
+
+            /* Embed: [1] → [1, d_model], then reshape to [1, 1, d_model] */
+            tensor *flat_emb = tensor_embedding(lm->embedding_table, single_id_data);
+            tensor *h = tensor_reshape(flat_emb, 3, (int[]){1, 1, d_model});
+
+            /* Pass through all transformer blocks with cache */
+            for (int i = 0; i < lm->n_layers; i++) {
+                h = transformer_block_forward_cached(lm->blocks[i], h, caches[i]);
+            }
+
+            /* Final norm + lm_head (only needed for last prompt token's logits) */
+            if (p == prompt_len - 1) {
+                h = tensor_layer_norm(h, lm->norm_weight, lm->norm_bias, 1e-5f);
+                tensor *logits = linear_forward(lm->lm_head, h);  /* [1, 1, vocab] */
+                float *ld = tensor_data_ptr(logits);
+
+                int next_id;
+                if (temperature == 0.0f) {
+                    next_id = _argmax(ld, vocab_size);
+                } else {
+                    next_id = _sample_with_temp(ld, vocab_size, temperature);
+                }
+
+                output[cur_len++] = next_id;
+
+                if (next_id == 258) goto done_generate;  /* EOS */
+            }
+        }
+
+        /* Generation loop: one token at a time using cache */
+        while (cur_len < max_len) {
+            ((int*)single_id_data->data)[0] = output[cur_len - 1];
+
+            tensor *flat_emb = tensor_embedding(lm->embedding_table, single_id_data);
+            tensor *h = tensor_reshape(flat_emb, 3, (int[]){1, 1, d_model});
+
+            for (int i = 0; i < lm->n_layers; i++) {
+                h = transformer_block_forward_cached(lm->blocks[i], h, caches[i]);
+            }
+
+            h = tensor_layer_norm(h, lm->norm_weight, lm->norm_bias, 1e-5f);
+            tensor *logits = linear_forward(lm->lm_head, h);
+            float *ld = tensor_data_ptr(logits);
+
+            int next_id;
+            if (temperature == 0.0f) {
+                next_id = _argmax(ld, vocab_size);
+            } else {
+                next_id = _sample_with_temp(ld, vocab_size, temperature);
+            }
+
+            output[cur_len++] = next_id;
+            if (next_id == 258) goto done_generate;
+        }
+
+done_generate:
+        ;
+
+    } else {
+        /* ── No cache path: full forward each step ── */
+        while (cur_len < max_len) {
+            /* Build tensor from current output buffer */
+            tensor *ids_tensor = tensor_zeros_data(2, (int[]){1, cur_len});
+            memcpy(ids_tensor->data, output, (size_t)cur_len * sizeof(int));
+
+            /* Full forward pass */
+            tensor *logits = decoder_lm_forward(lm, ids_tensor);  /* [1, cur_len, vocab] */
+
+            /* Get last token's logits */
+            float *ld = tensor_data_ptr(logits);
+            float *last_logits = ld + (cur_len - 1) * vocab_size;
+
+            int next_id;
+            if (temperature == 0.0f) {
+                next_id = _argmax(last_logits, vocab_size);
+            } else {
+                next_id = _sample_with_temp(last_logits, vocab_size, temperature);
+            }
+
+            output[cur_len++] = next_id;
+            if (next_id == 258) goto done_nocache;
+        }
+done_nocache:
+        ;
+    }
+
+    /* Restore grad mode */
+    dnn_no_grad_exit(no_grad_ctx);
+
+    *n_out = cur_len;
+    return output;
+}
+
+
+/* ── RoPE position encoding ── */
+
+void decoder_lm_enable_rope(decoder_lm *lm, int max_seq_len, float base) {
+    assert(lm && max_seq_len > 0);
+
+    int d_k = lm->blocks[0]->d_k;
+    assert(d_k % 2 == 0 && "RoPE requires even head dimension");
+
+    /* Init frequency tables in params pool */
+    tensor *freqs_cos, *freqs_sin;
+    tensor_rope_freqs_init(&freqs_cos, &freqs_sin, d_k, max_seq_len, base);
+
+    /* Assign to every block */
+    for (int i = 0; i < lm->n_layers; i++) {
+        lm->blocks[i]->freqs_cos = freqs_cos;
+        lm->blocks[i]->freqs_sin = freqs_sin;
+    }
 }

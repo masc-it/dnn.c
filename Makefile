@@ -6,6 +6,7 @@ OMPFLAGS  = -Xpreprocessor -fopenmp
 
 SRCDIR   = src
 OBJDIR   = obj
+BUILDDIR = build
 TESTDIR  = test
 
 SRCS     = $(wildcard $(SRCDIR)/*.c)

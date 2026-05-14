@@ -99,6 +99,139 @@ void adamw_zero_grad(adamw_opt *opt) {
     }
 }
 
+/* ── LR Scheduler ── */
+
+static float _lr_compute(const lr_scheduler *sched, int t) {
+    int schedule = sched->schedule;
+    float base   = sched->base_lr;
+    float min_lr = sched->min_lr;
+    int warmup   = sched->warmup_iters;
+    int total    = sched->total_iters;
+    int step_sz  = sched->step_size;
+    float gamma  = sched->gamma;
+
+    /* Linear warmup phase */
+    if (warmup > 0 && t < warmup) {
+        return base * (float)(t + 1) / (float)warmup;
+    }
+
+    /* Post-warmup: adjust t relative to warmup end */
+    int post_t = t - warmup;
+    if (post_t < 0) post_t = 0;
+
+    switch (schedule) {
+    case LR_SCHEDULE_CONSTANT:
+    case LR_SCHEDULE_LINEAR_WARMUP:
+        return base;
+
+    case LR_SCHEDULE_COSINE:
+    case LR_SCHEDULE_LINEAR_WARMUP_COSINE: {
+        /* Cosine decay from base to min_lr over (total - warmup) steps */
+        int decay_iters = total - warmup;
+        if (decay_iters <= 0) return base;  /* no decay period */
+        float cosine_decay = 0.5f * (1.0f + cosf((float)M_PI * post_t / decay_iters));
+        return min_lr + (base - min_lr) * cosine_decay;
+    }
+
+    case LR_SCHEDULE_STEP:
+        if (step_sz <= 0) return base;
+        return base * powf(gamma, (float)(post_t / step_sz));
+
+    case LR_SCHEDULE_EXPONENTIAL:
+        if (post_t == 0) return base;
+        return base * powf(gamma, (float)post_t);
+
+    default:
+        return base;
+    }
+}
+
+lr_scheduler *lr_scheduler_create(adamw_opt *opt, int schedule,
+                                   float base_lr,
+                                   int warmup_iters, int total_iters,
+                                   float min_lr,
+                                   int step_size, float gamma) {
+    lr_scheduler *sched = mem_params_alloc(sizeof(lr_scheduler), NULL);
+    sched->opt          = opt;
+    sched->schedule     = schedule;
+    sched->base_lr      = base_lr;
+    sched->warmup_iters = warmup_iters;
+    sched->total_iters  = total_iters;
+    sched->step_size    = step_size;
+    sched->gamma        = gamma;
+    sched->t            = 0;
+
+    /* min_lr default: base_lr/10 if negative */
+    sched->min_lr = (min_lr < 0.0f) ? base_lr / 10.0f : min_lr;
+
+    /* Set initial LR on optimizer */
+    opt->lr = _lr_compute(sched, 0);
+
+    return sched;
+}
+
+void lr_scheduler_step(lr_scheduler *sched) {
+    sched->t++;
+    sched->opt->lr = _lr_compute(sched, sched->t);
+}
+
+float lr_scheduler_get_lr(const lr_scheduler *sched) {
+    return _lr_compute(sched, sched->t);
+}
+
+void lr_scheduler_reset(lr_scheduler *sched) {
+    sched->t = 0;
+    sched->opt->lr = _lr_compute(sched, 0);
+}
+
+void lr_scheduler_destroy(lr_scheduler *sched) {
+    (void)sched;
+}
+
+/* ── Gradient Clipping ── */
+
+float clip_grad_norm(tensor **params, int n_params, float max_norm) {
+    if (max_norm <= 0.0f) return 0.0f;
+
+    double total_norm_sq = 0.0;
+    for (int i = 0; i < n_params; i++) {
+        float *g = tensor_grad(params[i]);
+        if (!g) continue;
+        int n = tensor_numel(params[i]);
+        for (int j = 0; j < n; j++)
+            total_norm_sq += (double)g[j] * (double)g[j];
+    }
+
+    float total_norm = sqrtf((float)total_norm_sq);
+
+    if (total_norm > max_norm) {
+        float scale = max_norm / total_norm;
+        for (int i = 0; i < n_params; i++) {
+            float *g = tensor_grad(params[i]);
+            if (!g) continue;
+            int n = tensor_numel(params[i]);
+            for (int j = 0; j < n; j++)
+                g[j] *= scale;
+        }
+    }
+
+    return total_norm;
+}
+
+void clip_grad_value(tensor **params, int n_params, float clip_value) {
+    if (clip_value <= 0.0f) return;
+
+    for (int i = 0; i < n_params; i++) {
+        float *g = tensor_grad(params[i]);
+        if (!g) continue;
+        int n = tensor_numel(params[i]);
+        for (int j = 0; j < n; j++) {
+            if (g[j] > clip_value)      g[j] =  clip_value;
+            else if (g[j] < -clip_value) g[j] = -clip_value;
+        }
+    }
+}
+
 void adamw_step(adamw_opt *opt) {
     opt->t++;
     float lr  = opt->lr;

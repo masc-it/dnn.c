@@ -82,7 +82,7 @@ static void test_train_step_basic(void) {
     int ids[] = {3, 6, 7, 0, 4, 3, 4, 7};
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ids);
 
-    tensor *loss = decoder_lm_train_step(lm, input_ids, opt);
+    tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 0.0f, NULL);
 
     float loss_val = tensor_data_ptr(loss)[0];
     assert(isfinite(loss_val) && "loss non-finite");
@@ -120,7 +120,7 @@ static void test_gradients_flow(void) {
     /* Before step, no grads exist */
     assert(tensor_grad(lm->embedding_table) == NULL);
 
-    tensor *loss = decoder_lm_train_step(lm, input_ids, opt);
+    tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 0.0f, NULL);
 
     /* After step, all params have finite grads */
     float loss_val = tensor_data_ptr(loss)[0];
@@ -197,7 +197,7 @@ static void test_params_update(void) {
     int ids[] = {3, 6, 7, 0, 4, 3, 4, 7};
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ids);
 
-    decoder_lm_train_step(lm, input_ids, opt);
+    decoder_lm_train_step(lm, input_ids, opt, 0.0f, NULL);
 
     /* Embedding table should have changed */
     float *emb_final = tensor_data_ptr(lm->embedding_table);
@@ -247,7 +247,7 @@ static void test_loss_decreases(void) {
         /* Rebuild input_ids (data pool was reset) */
         input_ids = make_int_tensor(2, (int[]){B, N}, ids);
 
-        tensor *loss = decoder_lm_train_step(lm, input_ids, opt);
+        tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 0.0f, NULL);
         losses[step] = tensor_data_ptr(loss)[0];
         printf("    step %d: loss=%.6f\n", step, losses[step]);
         assert(isfinite(losses[step]));
@@ -297,7 +297,7 @@ static void test_ref_values(void) {
         mem_pool_reset(&data);
         input_ids = make_int_tensor(2, (int[]){B, N}, ref_input_ids);
 
-        tensor *loss = decoder_lm_train_step(lm, input_ids, opt);
+        tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 0.0f, NULL);
         float c_loss = tensor_data_ptr(loss)[0];
         float diff = fabsf(c_loss - ref_losses[step]);
 
@@ -350,7 +350,7 @@ static void test_various_shapes(void) {
 
         tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ids);
 
-        tensor *loss = decoder_lm_train_step(lm, input_ids, opt);
+        tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 0.0f, NULL);
         float lv = tensor_data_ptr(loss)[0];
         assert(isfinite(lv) && lv > 0.0f);
 

@@ -92,8 +92,10 @@ static void shuffle_int(int *arr, int n) {
 #define VOCAB_SIZE     261
 #define BATCH_SIZE      16
 #define MAX_EPOCHS      10
-#define LR            0.001f
+#define LR            5e-4f
 #define LOG_EVERY       10
+#define GEN_EVERY       30
+#define GEN_NEW_TOKENS  64
 
 int main(void) {
     /* ── Pools ── */
@@ -126,6 +128,10 @@ int main(void) {
     decoder_lm *lm = decoder_lm_create(VOCAB_SIZE, D_MODEL, N_LAYERS,
                                         N_HEADS, D_K, INTERMEDIATE);
     printf("  model created.\n");
+
+    /* ── Enable RoPE ── */
+    decoder_lm_enable_rope(lm, ds.seq_len, 10000.0f);
+    printf("  RoPE enabled (base=10000.0, max_seq=%d).\n", ds.seq_len);
 
     /* ── Collect all trainable params ── */
     tensor *all_params[256];
@@ -163,13 +169,24 @@ int main(void) {
 
     /* ── Create optimizer ── */
     adamw_opt *opt = adamw_create(all_params, n_params, LR,
-                                   0.9f, 0.999f, 1e-8f, 0.01f);
+                                   0.9f, 0.999f, 1e-8f, 1e-4f);
 
     /* ── Training loop ── */
     int N          = ds.seq_len;
     int n_seqs     = ds.num_sequences;
     int batch_size = BATCH_SIZE;
     int n_batches  = (n_seqs + batch_size - 1) / batch_size;
+
+    /* ── Create LR scheduler (warmup + cosine) ── */
+    int total_training_steps  = n_batches * MAX_EPOCHS;
+    int warmup_steps          = n_batches;  /* warmup over 1 epoch */
+
+    lr_scheduler *sched = lr_scheduler_create(opt, LR_SCHEDULE_LINEAR_WARMUP_COSINE,
+                                                LR, warmup_steps, total_training_steps,
+                                                1e-5f,  /* min_lr */
+                                                0, 0);
+    printf("  LR scheduler: warmup=%d steps, cosine decay over %d steps, base_lr=%.2e, min_lr=%.2e\n",
+           warmup_steps, total_training_steps, LR, 1e-5f);
 
     printf("\nTraining (AdamW, lr=%.4f, batch=%d, max_epochs=%d):\n",
            LR, batch_size, MAX_EPOCHS);
@@ -205,8 +222,12 @@ int main(void) {
             }
 
             /* ── Train step ── */
-            tensor *loss = decoder_lm_train_step(lm, input_ids, opt);
+            float grad_norm;
+            tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 1.0f, &grad_norm);
             float loss_val = ((float *)loss->data)[0];
+
+            /* Advance LR scheduler after each training step */
+            lr_scheduler_step(sched);
 
             epoch_loss    += loss_val;
             epoch_batches++;
@@ -219,10 +240,28 @@ int main(void) {
                 double elapsed = (double)(now.tv_sec - epoch_t0.tv_sec)
                                + (double)(now.tv_nsec - epoch_t0.tv_nsec) / 1e9;
                 double batch_s = (double)(b + 1) / elapsed;
+                float current_lr = lr_scheduler_get_lr(sched);
 
-                printf("  epoch %2d/%d  batch %4d/%d  loss %.6f  %.1f batch/s\n",
+                printf("  epoch %2d/%d  batch %4d/%d  loss %.6f  lr %.2e  gn %.4e  %.1f batch/s\n",
                        epoch + 1, MAX_EPOCHS, b + 1, n_batches,
-                       epoch_loss / epoch_batches, batch_s);
+                       epoch_loss / epoch_batches, current_lr, grad_norm, batch_s);
+            }
+
+            /* ── Generate sample every GEN_EVERY batches ── */
+            if ((b + 1) % GEN_EVERY == 0) {
+                mem_pool_reset(&scratch);
+
+                int n_out;
+                tensor *prompt = tensor_zeros_data(2, (int[]){1, 1});
+                ((int*)prompt->data)[0] = TOKENIZER_BOS_ID;  /* <|im_start|> */
+
+                int *gen_ids = decoder_lm_generate(lm, prompt, GEN_NEW_TOKENS,
+                                                    0.0f, 1, &n_out);
+
+                tokenizer tok = tokenizer_with_chat_template();
+                char *text = tokenizer_decode(&tok, gen_ids, n_out);
+                printf("  ── gen (batch %d):\n  >> %s\n", b + 1, text);
+                free(text);
             }
 
             /* free scratch + data */
@@ -235,12 +274,33 @@ int main(void) {
         double epoch_sec = (double)(epoch_t1.tv_sec - epoch_t0.tv_sec)
                          + (double)(epoch_t1.tv_nsec - epoch_t0.tv_nsec) / 1e9;
 
-        printf("  ── epoch %2d done  avg loss %.6f  %.2fs  %.1f batch/s\n",
+        float epoch_end_lr = lr_scheduler_get_lr(sched);
+        printf("  ── epoch %2d done  avg loss %.6f  lr %.2e  %.2fs  %.1f batch/s\n",
                epoch + 1, epoch_loss / epoch_batches,
-               epoch_sec, n_batches / epoch_sec);
+               epoch_end_lr, epoch_sec, n_batches / epoch_sec);
     }
 
     printf("\nTraining complete.  Total steps: %d\n", total_steps);
+
+    /* ── Final generation ── */
+    {
+        mem_pool_reset(&scratch);
+        mem_pool_reset(&data);
+
+        printf("\nFinal generation:\n");
+
+        int n_out;
+        tensor *prompt = tensor_zeros_data(2, (int[]){1, 1});
+        ((int*)prompt->data)[0] = TOKENIZER_BOS_ID;
+
+        int *gen_ids = decoder_lm_generate(lm, prompt, GEN_NEW_TOKENS * 2,
+                                            0.0f, 1, &n_out);
+
+        tokenizer tok = tokenizer_with_chat_template();
+        char *text = tokenizer_decode(&tok, gen_ids, n_out);
+        printf("  >> %s\n", text);
+        free(text);
+    }
 
     /* ── Cleanup ── */
     free(indices);
