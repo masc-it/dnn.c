@@ -563,3 +563,37 @@ tensor *tensor_neg(const tensor *t) {
     }
     return out;
 }
+
+/* ── tensor_triu ──
+ *
+ * Create [N, N] causal mask from scratch pool.
+ *   Element (i,j) = -INFINITY if j >= i + diagonal,
+ *                   0.0f otherwise.
+ *
+ * For standard causal attention (attend to self + past) use diagonal=1:
+ *   j > i  → -inf (future masked)
+ *   j <= i → 0    (self + past kept)
+ *
+ * For no-self-attention use diagonal=0:
+ *   j >= i → -inf (self + future masked)
+ *   j < i  → 0    (past only)
+ *
+ * No grad_fn attached — mask is a constant input. Gradients flow through
+ * tensor_add into it but are dropped (requires_grad=0).
+ */
+tensor *tensor_triu(int N, int diagonal) {
+    assert(N > 0);
+    tensor *out = _tensor_scratch_create(2, (int[]){N, N}, 0);
+    float *od = (float*)out->data + out->offset;
+    for (int i = 0; i < N; i++) {
+        for (int j = 0; j < N; j++) {
+            int idx = i * N + j;
+            if (j >= i + diagonal) {
+                od[idx] = -INFINITY;
+            } else {
+                od[idx] = 0.0f;
+            }
+        }
+    }
+    return out;
+}

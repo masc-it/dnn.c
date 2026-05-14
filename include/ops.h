@@ -35,5 +35,6 @@ tensor *tensor_embedding(const tensor *table, const tensor *ids);
 /* ── Utility ── */
 tensor *tensor_pow(const tensor *t, float exp);
 tensor *tensor_neg(const tensor *t);
+tensor *tensor_triu(int N, int diagonal);
 
 #endif /* DNN_OPS_H */

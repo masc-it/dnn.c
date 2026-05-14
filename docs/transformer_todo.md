@@ -225,7 +225,7 @@ tokenizer ──> embedding ─┤
 | 2 | `tensor_silu` (compose from sigmoid+mul) | (1) | ~10 / ~40 | DONE |
 | 3 | SwiGLU FFN block (compose from existing linear + silu + mul) | (1,2) | ~30 | DONE |
 | 4 | Embedding lookup + backward | — | ~80 | DONE |
-| 5 | Causal mask via `tensor_triu` + `tensor_fill(-inf)` | — | ~40 |
+| 5 | Causal mask via `tensor_triu` + `tensor_fill(-inf)` | — | ~40 | DONE |
 | 6 | Scaled dot-product attention (compose from matmul + softmax + mask) | (5) | ~60 |
 | 7 | Multi-head split/merge wrappers | — | ~80 |
 
