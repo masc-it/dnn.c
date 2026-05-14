@@ -88,6 +88,14 @@ No `realloc`, no `free`. All allocations from scratch pool, reclaimed on `mem_po
 
 The scalar fallback loops in `add_backward` / `sub_backward` / `mul_backward` / `div_backward` have no `#pragma omp simd`. The inner body has irregular memory access (via `_bcast_off`), so auto-vectorization fails and no hint is given to the compiler.
 
+**implemented: true** — Split each broadcast fallback loop into two phases:
+1. **Offset precompute**: pure integer arithmetic (coord decompose + `_bcast_off`), marked with `#pragma omp simd`. No function calls, no data dependencies between iterations — compiler can SIMD-vectorize the div/mod chain and stride computation.
+2. **Accumulation**: scalar scatter loop using precomputed offsets. Gather/scatter on NEON cannot be SIMD-vectorized, but the body is now just a load + multiply-add with no branching.
+
+Additionally, `_grad_ensure` calls are hoisted before the SIMD loop, so the hot path has zero function calls.
+
+**Measured impact:** 29.3–29.5 batch/s baseline vs 29.0–29.4 after. Within run-to-run noise (~1-2%). No regression. The MNIST CNN benchmark is dominated by conv GEMM (~2.3B FLOPs/step), so element-wise broadcast backward ops are a tiny fraction of total time. Benefit scales with the ratio of element-wise ops to matrix ops in the workload.
+
 ## 12. Softmax 2D+dim-1 fast path missing in backward
 
 `softmax_backward` has **no** 2D contiguous fast path — only the general nD coord-decompose path. The forward does have one (and uses NEON). So softmax backward for a classifier (the most common use) is ~10× slower than it could be.

@@ -33,24 +33,31 @@ static void add_backward(grad_fn *fn, tensor *grad_output) {
         }
         return;
     }
+    /* Broadcast fallback: precompute offsets (SIMD-able integer math),
+     * then accumulate (scalar scatter, cannot SIMD on NEON). */
+    float *ag_ptr = (a->grad_fn || a->requires_grad) ? _grad_ensure(a) : NULL;
+    float *bg_ptr = (b->grad_fn || b->requires_grad) ? _grad_ensure(b) : NULL;
+    int *a_offs = ag_ptr ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
+    int *b_offs = bg_ptr ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
+    int out_ndim = grad_output->ndim;
+#pragma omp simd
     for (int i = 0; i < out_numel; i++) {
         int coord[DNN_MAX_DIMS];
         int r = i;
-        for (int d = grad_output->ndim - 1; d >= 0; d--) {
+        for (int d = out_ndim - 1; d >= 0; d--) {
             coord[d] = r % grad_output->shape[d];
             r /= grad_output->shape[d];
         }
-        float g = g_data[i];
-        int a_off = _bcast_off(a, grad_output->ndim, coord);
-        int b_off = _bcast_off(b, grad_output->ndim, coord);
-        if (a->grad_fn || a->requires_grad) {
-            float *ag = _grad_ensure(a);
-            ag[a_off] += g;
-        }
-        if (b->grad_fn || b->requires_grad) {
-            float *bg = _grad_ensure(b);
-            bg[b_off] += g;
-        }
+        if (a_offs) a_offs[i] = _bcast_off(a, out_ndim, coord);
+        if (b_offs) b_offs[i] = _bcast_off(b, out_ndim, coord);
+    }
+    if (ag_ptr) {
+        for (int i = 0; i < out_numel; i++)
+            ag_ptr[a_offs[i]] += g_data[i];
+    }
+    if (bg_ptr) {
+        for (int i = 0; i < out_numel; i++)
+            bg_ptr[b_offs[i]] += g_data[i];
     }
 }
 
@@ -139,24 +146,29 @@ static void sub_backward(grad_fn *fn, tensor *grad_output) {
         }
         return;
     }
+    float *ag_ptr = (a->grad_fn || a->requires_grad) ? _grad_ensure(a) : NULL;
+    float *bg_ptr = (b->grad_fn || b->requires_grad) ? _grad_ensure(b) : NULL;
+    int *a_offs = ag_ptr ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
+    int *b_offs = bg_ptr ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
+    int out_ndim = grad_output->ndim;
+#pragma omp simd
     for (int i = 0; i < out_numel; i++) {
         int coord[DNN_MAX_DIMS];
         int r = i;
-        for (int d = grad_output->ndim - 1; d >= 0; d--) {
+        for (int d = out_ndim - 1; d >= 0; d--) {
             coord[d] = r % grad_output->shape[d];
             r /= grad_output->shape[d];
         }
-        float g = g_data[i];
-        int a_off = _bcast_off(a, grad_output->ndim, coord);
-        int b_off = _bcast_off(b, grad_output->ndim, coord);
-        if (a->grad_fn || a->requires_grad) {
-            float *ag = _grad_ensure(a);
-            ag[a_off] += g;
-        }
-        if (b->grad_fn || b->requires_grad) {
-            float *bg = _grad_ensure(b);
-            bg[b_off] -= g;
-        }
+        if (a_offs) a_offs[i] = _bcast_off(a, out_ndim, coord);
+        if (b_offs) b_offs[i] = _bcast_off(b, out_ndim, coord);
+    }
+    if (ag_ptr) {
+        for (int i = 0; i < out_numel; i++)
+            ag_ptr[a_offs[i]] += g_data[i];
+    }
+    if (bg_ptr) {
+        for (int i = 0; i < out_numel; i++)
+            bg_ptr[b_offs[i]] -= g_data[i];
     }
 }
 
@@ -240,26 +252,29 @@ static void mul_backward(grad_fn *fn, tensor *grad_output) {
     }
     float *ad = (float*)a->data;
     float *bd = (float*)b->data;
+    float *ag_ptr = (a->grad_fn || a->requires_grad) ? _grad_ensure(a) : NULL;
+    float *bg_ptr = (b->grad_fn || b->requires_grad) ? _grad_ensure(b) : NULL;
+    int *a_offs = ag_ptr ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
+    int *b_offs = bg_ptr ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
+    int out_ndim = grad_output->ndim;
+#pragma omp simd
     for (int i = 0; i < out_numel; i++) {
         int coord[DNN_MAX_DIMS];
         int r = i;
-        for (int d = grad_output->ndim - 1; d >= 0; d--) {
+        for (int d = out_ndim - 1; d >= 0; d--) {
             coord[d] = r % grad_output->shape[d];
             r /= grad_output->shape[d];
         }
-        float g = g_data[i];
-        int a_off = _bcast_off(a, grad_output->ndim, coord);
-        int b_off = _bcast_off(b, grad_output->ndim, coord);
-        float av = ad[a_off];
-        float bv = bd[b_off];
-        if (a->grad_fn || a->requires_grad) {
-            float *ag = _grad_ensure(a);
-            ag[a_off] += bv * g;
-        }
-        if (b->grad_fn || b->requires_grad) {
-            float *bg = _grad_ensure(b);
-            bg[b_off] += av * g;
-        }
+        if (a_offs) a_offs[i] = _bcast_off(a, out_ndim, coord);
+        if (b_offs) b_offs[i] = _bcast_off(b, out_ndim, coord);
+    }
+    if (ag_ptr) {
+        for (int i = 0; i < out_numel; i++)
+            ag_ptr[a_offs[i]] += bd[b_offs[i]] * g_data[i];
+    }
+    if (bg_ptr) {
+        for (int i = 0; i < out_numel; i++)
+            bg_ptr[b_offs[i]] += ad[a_offs[i]] * g_data[i];
     }
 }
 
@@ -349,26 +364,29 @@ static void div_backward(grad_fn *fn, tensor *grad_output) {
     }
     float *ad = (float*)a->data;
     float *bd = (float*)b->data;
+    float *ag_ptr = (a->grad_fn || a->requires_grad) ? _grad_ensure(a) : NULL;
+    float *bg_ptr = (b->grad_fn || b->requires_grad) ? _grad_ensure(b) : NULL;
+    int *a_offs = ag_ptr ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
+    int *b_offs = bg_ptr ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
+    int out_ndim = grad_output->ndim;
+#pragma omp simd
     for (int i = 0; i < out_numel; i++) {
         int coord[DNN_MAX_DIMS];
         int r = i;
-        for (int d = grad_output->ndim - 1; d >= 0; d--) {
+        for (int d = out_ndim - 1; d >= 0; d--) {
             coord[d] = r % grad_output->shape[d];
             r /= grad_output->shape[d];
         }
-        float g = g_data[i];
-        int a_off = _bcast_off(a, grad_output->ndim, coord);
-        int b_off = _bcast_off(b, grad_output->ndim, coord);
-        float av = ad[a_off];
-        float bv = bd[b_off];
-        if (a->grad_fn || a->requires_grad) {
-            float *ag = _grad_ensure(a);
-            ag[a_off] += (1.0f / bv) * g;
-        }
-        if (b->grad_fn || b->requires_grad) {
-            float *bg = _grad_ensure(b);
-            bg[b_off] += (-av / (bv * bv)) * g;
-        }
+        if (a_offs) a_offs[i] = _bcast_off(a, out_ndim, coord);
+        if (b_offs) b_offs[i] = _bcast_off(b, out_ndim, coord);
+    }
+    if (ag_ptr) {
+        for (int i = 0; i < out_numel; i++)
+            ag_ptr[a_offs[i]] += (1.0f / bd[b_offs[i]]) * g_data[i];
+    }
+    if (bg_ptr) {
+        for (int i = 0; i < out_numel; i++)
+            bg_ptr[b_offs[i]] += (-ad[a_offs[i]] / (bd[b_offs[i]] * bd[b_offs[i]])) * g_data[i];
     }
 }
 
