@@ -193,17 +193,27 @@ static void conv2d_backward(grad_fn *fn, tensor *grad_output) {
     float *wd = tensor_data_ptr(weight);
     float *gd = tensor_data_ptr(grad_output);
 
-    /* ── d_bias: sum over (N, H_out, W_out) ── */
+    /* ── d_bias: sum over (N, H_out, W_out) ──
+     *
+     *  gd layout: (N, out_C, H_out, W_out) contiguous.
+     *  For each oc, sum over all spatial positions in all batch items.
+     *  Inner ow loop is vectorized via #pragma omp simd.
+     */
     if (bias && tensor_requires_grad(bias)) {
         float *bg = _grad_ensure(bias);
+        size_t oc_stride = (size_t)H_out * W_out;
 #pragma omp parallel for
         for (int oc = 0; oc < out_C; oc++) {
             float acc = 0.0f;
-            for (int n = 0; n < N; n++)
-                for (int oh = 0; oh < H_out; oh++)
+            for (int n = 0; n < N; n++) {
+                float *g_chan = gd + ((size_t)n * out_C + oc) * oc_stride;
+                for (int oh = 0; oh < H_out; oh++) {
+                    float *g_row = g_chan + (size_t)oh * W_out;
+                    #pragma omp simd reduction(+:acc)
                     for (int ow = 0; ow < W_out; ow++)
-                        acc += gd[(n * out_C + oc) * H_out * W_out
-                                  + oh * W_out + ow];
+                        acc += g_row[ow];
+                }
+            }
             bg[oc] += acc;
         }
     }
