@@ -29,6 +29,9 @@ tensor *tensor_mean(const tensor *t, int dim);
 /* ── Loss ── */
 tensor *tensor_cross_entropy(const tensor *logits, const tensor *target, int dim);
 
+/* ── Embedding ── */
+tensor *tensor_embedding(const tensor *table, const tensor *ids);
+
 /* ── Utility ── */
 tensor *tensor_pow(const tensor *t, float exp);
 tensor *tensor_neg(const tensor *t);
