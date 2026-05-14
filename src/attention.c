@@ -298,6 +298,7 @@ tensor *tensor_attention(tensor *Q, tensor *K, tensor *V,
 #endif
 
         /* ── Add mask ── */
+        // TODO: check for optim room
         if (md) {
             for (int i = 0; i < N; i++) {
                 for (int j = 0; j < N; j++) {

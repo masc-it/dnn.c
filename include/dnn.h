@@ -11,5 +11,6 @@
 #include "optim.h"
 #include "attention.h"
 #include "multihead.h"
+#include "rope.h"
 
 #endif /* DNN_H */
