@@ -572,6 +572,101 @@ static void test_relu_chain(void) {
 
 /* ── Matmul tests ── */
 
+/* ── Sigmoid tests ── */
+
+static void test_sigmoid_simple(void) {
+    printf("  test_sigmoid_simple... ");
+    tensor *a = scalar(0.0f, 1);
+    tensor *c = tensor_sigmoid(a);
+    float *cp = tensor_data_ptr(c);
+    assert(fabsf(cp[0] - 0.5f) < EPS && "sigmoid(0) = 0.5");
+    dnn_backward(c);
+    /* dσ/dx at 0 = 0.5 * 0.5 = 0.25 */
+    check_grad(a, 0.25f, "da");
+    printf("OK\n");
+}
+
+static void test_sigmoid_positive(void) {
+    printf("  test_sigmoid_positive... ");
+    tensor *a = scalar(2.0f, 1);
+    tensor *c = tensor_sigmoid(a);
+    float *cp = tensor_data_ptr(c);
+    float sig_ref = 1.0f / (1.0f + expf(-2.0f));
+    assert(fabsf(cp[0] - sig_ref) < EPS && "sigmoid(2)");
+    dnn_backward(c);
+    float expected_grad = sig_ref * (1.0f - sig_ref);
+    check_grad(a, expected_grad, "da");
+    printf("OK\n");
+}
+
+static void test_sigmoid_negative(void) {
+    printf("  test_sigmoid_negative... ");
+    tensor *a = scalar(-2.0f, 1);
+    tensor *c = tensor_sigmoid(a);
+    float *cp = tensor_data_ptr(c);
+    float sig_ref = 1.0f / (1.0f + expf(2.0f));
+    assert(fabsf(cp[0] - sig_ref) < EPS && "sigmoid(-2)");
+    dnn_backward(c);
+    float expected_grad = sig_ref * (1.0f - sig_ref);
+    check_grad(a, expected_grad, "da");
+    printf("OK\n");
+}
+
+static void test_sigmoid_array(void) {
+    printf("  test_sigmoid_array... ");
+    float vals[] = {-3.0f, -1.0f, 0.0f, 2.0f, 4.0f};
+    tensor *a = tensor_zeros(1, (int[]){5}, 1);
+    float *ad = tensor_data_ptr(a);
+    for (int i = 0; i < 5; i++) ad[i] = vals[i];
+
+    tensor *c = tensor_sigmoid(a);
+    float *cd = tensor_data_ptr(c);
+
+    /* check forward */
+    for (int i = 0; i < 5; i++) {
+        float expected = 1.0f / (1.0f + expf(-vals[i]));
+        assert(fabsf(cd[i] - expected) < EPS && "sigmoid array forward");
+    }
+
+    dnn_backward(c);
+    float *ag = tensor_grad(a);
+    assert(ag && "sigmoid array grad not NULL");
+
+    /* check backward: dσ/dx = σ*(1-σ) for unit gout */
+    for (int i = 0; i < 5; i++) {
+        float sig = 1.0f / (1.0f + expf(-vals[i]));
+        float expected_grad = sig * (1.0f - sig);
+        assert(fabsf(ag[i] - expected_grad) < EPS && "sigmoid array backward");
+    }
+    printf("OK\n");
+}
+
+static void test_sigmoid_chain(void) {
+    printf("  test_sigmoid_chain... ");
+    /* c = sigmoid(a) + a
+     * dc/da = σ(a)*(1-σ(a)) + 1 */
+    tensor *a = scalar(1.0f, 1);
+    tensor *s = tensor_sigmoid(a);
+    tensor *c = tensor_add(s, a);
+    dnn_backward(c);
+    float sig = 1.0f / (1.0f + expf(-1.0f));
+    float expected_grad = sig * (1.0f - sig) + 1.0f;
+    check_grad(a, expected_grad, "da");
+    printf("OK\n");
+}
+
+static void test_sigmoid_no_grad(void) {
+    printf("  test_sigmoid_no_grad... ");
+    tensor *a = scalar(3.0f, 0);
+    tensor *c = tensor_sigmoid(a);
+    float *cp = tensor_data_ptr(c);
+    float sig_ref = 1.0f / (1.0f + expf(-3.0f));
+    assert(fabsf(cp[0] - sig_ref) < EPS && "sigmoid no-grad forward");
+    assert(tensor_grad(a) == NULL && "sigmoid no-grad: no grad allocated");
+    assert(tensor_grad(c) == NULL && "sigmoid no-grad: output has no grad");
+    printf("OK\n");
+}
+
 static void test_matmul_simple(void) {
     printf("  test_matmul_simple... ");
     /* A (2,3) @ B (3,2) = C (2,2) */
@@ -1444,6 +1539,30 @@ int main(void) {
     mem_pool_reset(&scratch);
 
     test_relu_chain();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_sigmoid_simple();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_sigmoid_positive();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_sigmoid_negative();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_sigmoid_array();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_sigmoid_chain();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_sigmoid_no_grad();
     mem_pool_reset(&params);
     mem_pool_reset(&scratch);
 
