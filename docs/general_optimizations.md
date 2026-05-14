@@ -47,6 +47,10 @@ In `softmax_backward()` (`ops_activation.c:84-150`), both loops independently de
 
 `tensor_sum()` decomposes each output index → coord, then runs an inner loop over the reduction dimension modifying `coord[dim]` and calling `_bcast_off`. For contiguous tensors, this should use strided pointers — a `memcpy`-style loop with stride `t->strides[dim]` skipping over the reduction dimension. The current approach is O(numel × dim_size) in div/mod operations.
 
+**implemented: true** — Added contiguous fast path in `tensor_sum` forward and `sum_backward`. Forward uses 3-loop strided access (outer_dims × dim_size × inner) with flat pointer arithmetic instead of coord decompose + `_bcast_off` per element. Backward uses same strided pattern to broadcast grad_output back to input shape. General coord-decompose fallback preserved for non-contiguous tensors. Also saves `dim` in grad_fn saved_tensors so backward doesn't need to recover it from shape comparison.
+
+**Measured impact:** ~29.0 batch/s baseline vs ~28.9 after. Unchanged within noise. `tensor_sum`/`tensor_mean` are not in the MNIST CNN hot path (cross_entropy used directly, not `mean` reduction on logits). Benefit will appear in models using sum/mean reductions as part of their forward pass.
+
 ## 8. Conv2d backward d_bias: nested scalar loops
 
 Four nested loops (`oc, n, oh, ow`) summing `gd[...]` per output channel (`conv.c:170-178`). Could be a `cblas_sgemv` with a ones-vector: `d_bias = gd^T @ 1`. Or at minimum `#pragma omp simd reduction(+:acc)` on the inner loop instead of the outer-parallel + scalar reduction.
