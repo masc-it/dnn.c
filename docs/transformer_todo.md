@@ -151,50 +151,47 @@ This is correct and autograd-wired automatically. The 3-scratch-tensor overhead 
 
 - **Nothing.** No text processing, no vocabulary, no tokenizer in the codebase. MNIST loads raw image bytes, not text.
 
+### Scope
+
+Byte-level only — each byte value (0–255) maps directly to a token ID. No BPE, no subword merging, no external training data. Vocab size = 256 + special tokens (BOS, EOS, PAD, UNK) = ~260.
+
 ### What's needed
 
 | Component | Status | Effort |
 |-----------|--------|--------|
-| UTF-8 byte encoding | Python has `.encode("utf-8")`. In C need a UTF-8 decoder or treat raw bytes (byte-level BPE works on byte values 0-255). Simplest: treat input as raw byte sequence (each byte = 1 token). Compatible with GPT-2's byte-level BPE base. | Low |
-| BPE merge table | Pre-computed BPE merges (from training on some corpus). Need a file format: sorted merge list `(byte_pair, new_id)`. | **High** (needs training script) |
-| Tokenizer encode: text → IDs | Walk byte sequence, apply BPE merges greedily. O(N) with hash table for merge lookup. | Medium |
-| Tokenizer decode: IDs → text | Walk ID sequence, each ID maps to a byte sequence (from vocab). Concatenate. | Low-Medium |
-| Vocabulary data structures | `char *vocab[size]` — each entry is a byte string. `merge_ranks[(b1,b2)]` — map from byte pair to priority/rank. | Medium |
-| Integration: text → tensor | Encode to tokens → allocate `tensor_zeros_data(1, [N])` → copy IDs into data region as ints. This is the input to `tensor_embedding`. | Low |
+| Tokenizer struct | Holds byte-to-ID lookup (identity map: byte[n] = n) and special token IDs. ~12 bytes. | Trivial |
+| Encode: text → IDs | Walk UTF-8 byte string, emit one ID per byte. If byte is valid UTF-8 continuation, treat same as any other byte. | Low |
+| Decode: IDs → text | Walk ID sequence, map each ID back to byte value. If ID >= 256, skip special tokens or emit replacement char. | Low |
+| Special tokens | BOS (257), EOS (258), PAD (259), UNK (260). Encode prepends BOS/appends EOS. Decode strips specials. | Low |
+| Integration: text → tensor | Encode to IDs → allocate `tensor_zeros_data(1, [N])` → copy IDs into data region as ints. Input to `tensor_embedding`. | Low |
 
 ### Recommendation
 
-**Three-tier approach:**
+Simple flat tokenizer, no hash tables, no merge files. Encode = byte-for-ID copy. Decode = ID-for-byte copy (clamp to 0–255).
 
-**Tier 1 (MVP): Raw byte mode**
-No BPE. Treat each UTF-8 byte as a token. Vocab size = 256 (+ special tokens = ~260). Embedding table is tiny. Works for character-level generation — poor quality but gets the pipeline running immediately.
-
-**Tier 2 (BPE): Python-based training + C decoder**
-Train BPE merges in Python (using HuggingFace `tokenizers` or `tiktoken`). Export as:
-- `vocab.bin` — binary file: `[vocab_size][byte_len][bytes]`
-- `merges.bin` — binary file: `[num_merges][b1][b2][new_id]`
-
-Write C `tokenizer.h` / `tokenizer.c`:
 ```c
 typedef struct {
-    int   vocab_size;
-    char **vocab;
-    int   *merge_buf;  // flat merge table for O(1) pair lookup
+    int bos_id, eos_id, pad_id, unk_id;
 } tokenizer;
 
 int  *tokenizer_encode(tokenizer *tok, const char *text, int *len);
 char *tokenizer_decode(tokenizer *tok, const int *ids, int len);
 ```
 
-**Tier 3 (Optimized):** Byte-level BPE with regex pre-tokenization (GPT-2 pattern), Unicode normalization, special token handling. This matches "state of the art" (GPT-4 / Llama 3 level tokenization).
+Embedding table vocab size = 261 (256 bytes + BOS/EOS/PAD/UNK). No lookup table needed for tokenizer — byte value is the ID.
+
+Allocates from data pool. Encode/decode are O(N) linear walks.
 
 ### Effort estimate
 
-| Tier | Components | Effort | Quality |
-|------|------------|--------|---------|
-| 1 — Raw bytes | No new C code beyond embed lookup. Just wire ID→tensor pipeline. | Very low | Poor |
-| 2 — Python BPE + C decode | Python script + C tokenizer (~300 lines) | Medium | Good |
-| 3 — Full byte-level BPE | Regex pre-tokenization, unicode normalization, special tokens, pretokenize cache | High | SOTA |
+| Component | Lines |
+|-----------|-------|
+| Tokenizer struct + init | ~10 |
+| Encode (byte walk) | ~15 |
+| Decode (ID walk) | ~15 |
+| Special token handling | ~10 |
+| Tensor pipeline (text→tensor) | ~20 |
+| **Total** | **~60** |
 
 ---
 
@@ -209,10 +206,10 @@ embedding ──────────────┤
                         │
 matmul ──> attention ───┤
 softmax    causal_mask   │
-ropo ───────────────────┤
-                         │
+rope ───────────────────┤
+                        │
 tokenizer ──> embedding ─┤
-                         │
+                        │
                    transformer_block
                    (attn + swiglu ffn + pre-norm + residual)
 ```
@@ -244,25 +241,24 @@ tokenizer ──> embedding ─┤
 
 | # | Item | Depends on | Lines |
 |---|------|------------|-------|
-| 14 | Byte-level vocab file format + Python training script | — | ~150 (py) |
-| 15 | C tokenizer: encode (BPE greedy) + decode | (14) | ~300 |
-| 16 | Tokenizer → tensor pipeline (text → IDs → embedding) | (4, 15) | ~30 |
+| 14 | Tokenizer: byte-level encode + decode + special tokens | — | ~60 |
+| 15 | Tokenizer → tensor pipeline (text → IDs → embedding) | (4, 14) | ~20 |
 
 ### Phase 4 — Full Model
 
 | # | Item | Depends on | Lines |
 |---|------|------------|-------|
-| 17 | `transformer_block` (pre-norm attn + pre-norm swiglu-ffn + residual) | (3,6,7,9,11) | ~60 |
-| 18 | Decoder-only LM (embed → N×block → norm → lm_head) | (4,17) | ~60 |
-| 19 | Training loop (next-token prediction, teacher forcing, cross-entropy) | (18) | ~100 |
-| 20 | Generation loop (autoregressive, kv-cache optional) | (18) | ~80 |
+| 16 | `transformer_block` (pre-norm attn + pre-norm swiglu-ffn + residual) | (3,6,7,9,11) | ~60 |
+| 17 | Decoder-only LM (embed → N×block → norm → lm_head) | (4,16) | ~60 |
+| 18 | Training loop (next-token prediction, teacher forcing, cross-entropy) | (17) | ~100 |
+| 19 | Generation loop (autoregressive, kv-cache optional) | (17) | ~80 |
 
 ### Total estimated new code
 
-- **C source:** ~1400–1600 lines across `src/`, `include/
-- **Python:** ~150 lines for BPE trainer script
+- **C source:** ~1300–1500 lines across `src/`, `include/
+- **Python:** none needed
 - **Tests:** ~400 lines (one test per new op, plus integration test for training loop)
-- **No new dependencies** — Accelerate BLAS + libm + zlib already in the Makefile. BPE trainer needs Python + `tokenizers` or `tiktoken` (dev-only, not linked into C binary).
+- **No new dependencies** — Accelerate BLAS + libm + zlib already in the Makefile.
 
 ### Architectural considerations
 
