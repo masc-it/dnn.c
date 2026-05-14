@@ -126,16 +126,76 @@ tensor *tensor_sigmoid(const tensor *t) {
     return out;
 }
 
+/* ── silu_backward ──
+ *
+ *   silu(x) = x * sigmoid(x)
+ *   silu'(x) = sigmoid(x) * (1 + x - x*sigmoid(x))
+ *
+ * Recomputes sigmoid(x) from saved input — no intermediate tensor needed.
+ */
+
+static void silu_backward(grad_fn *fn, tensor *grad_output) {
+    tensor *a = fn->inputs[0];
+    int n = _numel(a->ndim, a->shape);
+    float *g_data = (float*)grad_output->data;
+    float *ad = (float*)a->data;
+
+    if (a->grad_fn || a->requires_grad) {
+        float *ag = _grad_ensure(a);
+        if (tensor_is_contiguous(a) && tensor_is_contiguous(grad_output)) {
+            simd_silu_bwd(ag + a->offset, ad + a->offset, g_data, n);
+        } else {
+            for (int i = 0; i < n; i++) {
+                int off = _flat_off(a, i);
+                float x = ad[off];
+                float sig = 1.0f / (1.0f + expf(-x));
+                ag[off] += sig * (1.0f + x - x * sig) * g_data[i];
+            }
+        }
+    }
+}
+
 /* ── silu (Swish) ──
  *
  *   silu(x) = x * sigmoid(x)
  *
- * Composed from tensor_mul + tensor_sigmoid.  Autograd wired automatically.
+ * Fused single-pass: computes x*sigmoid(x) in one loop over input,
+ * no intermediate sigmoid tensor allocated.  Autograd wired via
+ * silu_backward (no saved tensors needed).
  */
 
 tensor *tensor_silu(const tensor *t) {
     assert(t);
-    return tensor_mul(t, tensor_sigmoid(t));
+
+    tensor *out = _tensor_scratch_create(t->ndim, t->shape, 0);
+    int numel = _numel(t->ndim, t->shape);
+    float *od = (float*)out->data;
+    float *td = (float*)t->data;
+
+    if (tensor_is_contiguous(t)) {
+        float *tp = td + t->offset;
+        simd_silu_fwd(od, tp, numel);
+    } else {
+        for (int i = 0; i < numel; i++) {
+            int off = _flat_off(t, i);
+            float x = td[off];
+            od[out->offset + i] = x / (1.0f + expf(-x));
+        }
+    }
+
+    /* autograd tape */
+    if (dnn_grad_enabled() && tensor_requires_grad(t)) {
+        grad_fn *fn = _grad_fn_create();
+        fn->backward = silu_backward;
+        fn->n_inputs = 1;
+        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs[0] = (tensor*)t;
+        fn->n_saved = 0;
+        out->requires_grad = 1;
+        out->grad_fn = fn;
+    }
+
+    return out;
 }
 
 /* ── softmax_backward ── */

@@ -305,4 +305,68 @@ static inline void simd_sigmoid_bwd(float *grad_acc, const float *sig,
 #endif
 }
 
+/* ══════════════════════════════════════════════════════════════════
+ *  SiLU (Swish) forward:  y = x * sigmoid(x) = x / (1 + exp(-x))
+ *
+ *  Single-pass fused — no intermediate sigmoid tensor.
+ * ══════════════════════════════════════════════════════════════════ */
+
+static inline void simd_silu_fwd(float *out, const float *in, int n) {
+#if DNN_HAVE_NEON
+    const float32x4_t one = vdupq_n_f32(1.0f);
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t x = vld1q_f32(in + i);
+        float32x4_t exp_neg_x = simd_expf_f32(vnegq_f32(x));
+        float32x4_t sig = vdivq_f32(one, vaddq_f32(one, exp_neg_x));
+        vst1q_f32(out + i, vmulq_f32(x, sig));
+    }
+    for (; i < n; i++)
+        out[i] = in[i] / (1.0f + expf(-in[i]));
+#else
+    for (int i = 0; i < n; i++)
+        out[i] = in[i] / (1.0f + expf(-in[i]));
+#endif
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  SiLU (Swish) backward:  grad_acc += sig * (1 + x - x*sig) * grad_out
+ *
+ *  where sig = sigmoid(x).  Derivation:
+ *    silu(x)  = x * sigmoid(x)
+ *    silu'(x) = sigmoid(x) + x * sigmoid'(x)
+ *             = sigmoid(x) * (1 + x * (1 - sigmoid(x)))
+ *             = sigmoid(x) * (1 + x - x*sigmoid(x))
+ * ══════════════════════════════════════════════════════════════════ */
+
+static inline void simd_silu_bwd(float *grad_acc, const float *in,
+                                  const float *grad_out, int n) {
+#if DNN_HAVE_NEON
+    const float32x4_t one = vdupq_n_f32(1.0f);
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t x   = vld1q_f32(in + i);
+        float32x4_t g   = vld1q_f32(grad_out + i);
+        float32x4_t acc = vld1q_f32(grad_acc + i);
+        float32x4_t exp_neg_x = simd_expf_f32(vnegq_f32(x));
+        float32x4_t sig = vdivq_f32(one, vaddq_f32(one, exp_neg_x));
+        /* silu'(x) = sig * (1 + x - x*sig) */
+        float32x4_t grad = vmulq_f32(sig,
+            vsubq_f32(vaddq_f32(one, x), vmulq_f32(x, sig)));
+        vst1q_f32(grad_acc + i, vfmaq_f32(acc, grad, g));
+    }
+    for (; i < n; i++) {
+        float x = in[i];
+        float sig = 1.0f / (1.0f + expf(-x));
+        grad_acc[i] += sig * (1.0f + x - x * sig) * grad_out[i];
+    }
+#else
+    for (int i = 0; i < n; i++) {
+        float x = in[i];
+        float sig = 1.0f / (1.0f + expf(-x));
+        grad_acc[i] += sig * (1.0f + x - x * sig) * grad_out[i];
+    }
+#endif
+}
+
 #endif /* DNN_SIMD_H */

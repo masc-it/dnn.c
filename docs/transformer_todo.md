@@ -233,7 +233,7 @@ tokenizer ──> embedding ─┤
 
 | # | Item | Depends on | Lines |
 |---|------|------------|-------|
-| 8  | Fused `tensor_silu(x)` — single-pass Swish (no intermediate sigmoid tensor) | (1) | ~40 |
+| 8  | Fused `tensor_silu(x)` — single-pass Swish (no intermediate sigmoid tensor) | (1) | ~40 | DONE |
 | 9  | Fused `tensor_swiglu(gate, up)` — single-pass gated activation | (8) | ~40 |
 | 10 | RoPE frequency table init | — | ~40 |
 | 11 | `tensor_rope` — dedicated in-place Q/K rotation | (10) | ~100 |
