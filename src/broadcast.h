@@ -27,18 +27,15 @@ static inline int _bcast_off(const tensor *t, int out_ndim, const int *coord) {
     int off = t->offset;
     int lead = out_ndim - t->ndim;
     if (t->contiguous && t->ndim == out_ndim) {
-        /* fast path: contiguous, same ndim, no broadcasting.
-         * Check that no dim has shape-1-broadcasting. */
-        int i;
-        for (i = 0; i < t->ndim; i++)
-            if (t->shape[i] == 1) break;  /* broadcast dim */
-        if (i == t->ndim) {
-            /* no broadcasting → flat index */
-            int flat = 0;
-            for (int d = 0; d < t->ndim; d++)
-                flat = flat * t->shape[d] + coord[d];
-            return t->offset + flat;
+        /* contiguous, same ndim: compute flat index directly from shape.
+         * Handles shape-1 broadcast dims by zeroing coord at those dims.
+         * Avoids redundant shape-1 scan + stride loads. */
+        int flat = 0;
+        for (int d = 0; d < t->ndim; d++) {
+            int c = t->shape[d] == 1 ? 0 : coord[d];
+            flat = flat * t->shape[d] + c;
         }
+        return t->offset + flat;
     }
     for (int d = 0; d < t->ndim; d++) {
         int c = t->shape[d] == 1 ? 0 : coord[lead + d];

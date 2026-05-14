@@ -41,13 +41,15 @@ static void add_backward(grad_fn *fn, tensor *grad_output) {
             r /= grad_output->shape[d];
         }
         float g = g_data[i];
+        int a_off = _bcast_off(a, grad_output->ndim, coord);
+        int b_off = _bcast_off(b, grad_output->ndim, coord);
         if (a->grad_fn || a->requires_grad) {
             float *ag = _grad_ensure(a);
-            ag[_bcast_off(a, grad_output->ndim, coord)] += g;
+            ag[a_off] += g;
         }
         if (b->grad_fn || b->requires_grad) {
             float *bg = _grad_ensure(b);
-            bg[_bcast_off(b, grad_output->ndim, coord)] += g;
+            bg[b_off] += g;
         }
     }
 }
@@ -84,8 +86,9 @@ tensor *tensor_add(const tensor *a, const tensor *b) {
                 coord[d] = r % shape_out[d];
                 r /= shape_out[d];
             }
-            od[out->offset + i] = ad[_bcast_off(a, ndim_out, coord)]
-                                + bd[_bcast_off(b, ndim_out, coord)];
+            int a_off = _bcast_off(a, ndim_out, coord);
+            int b_off = _bcast_off(b, ndim_out, coord);
+            od[out->offset + i] = ad[a_off] + bd[b_off];
         }
     }
 
@@ -144,13 +147,15 @@ static void sub_backward(grad_fn *fn, tensor *grad_output) {
             r /= grad_output->shape[d];
         }
         float g = g_data[i];
+        int a_off = _bcast_off(a, grad_output->ndim, coord);
+        int b_off = _bcast_off(b, grad_output->ndim, coord);
         if (a->grad_fn || a->requires_grad) {
             float *ag = _grad_ensure(a);
-            ag[_bcast_off(a, grad_output->ndim, coord)] += g;
+            ag[a_off] += g;
         }
         if (b->grad_fn || b->requires_grad) {
             float *bg = _grad_ensure(b);
-            bg[_bcast_off(b, grad_output->ndim, coord)] -= g;
+            bg[b_off] -= g;
         }
     }
 }
@@ -185,8 +190,9 @@ tensor *tensor_sub(const tensor *a, const tensor *b) {
                 coord[d] = r % shape_out[d];
                 r /= shape_out[d];
             }
-            od[out->offset + i] = ad[_bcast_off(a, ndim_out, coord)]
-                                - bd[_bcast_off(b, ndim_out, coord)];
+            int a_off = _bcast_off(a, ndim_out, coord);
+            int b_off = _bcast_off(b, ndim_out, coord);
+            od[out->offset + i] = ad[a_off] - bd[b_off];
         }
     }
 
@@ -242,15 +248,17 @@ static void mul_backward(grad_fn *fn, tensor *grad_output) {
             r /= grad_output->shape[d];
         }
         float g = g_data[i];
-        float av = ad[_bcast_off(a, grad_output->ndim, coord)];
-        float bv = bd[_bcast_off(b, grad_output->ndim, coord)];
+        int a_off = _bcast_off(a, grad_output->ndim, coord);
+        int b_off = _bcast_off(b, grad_output->ndim, coord);
+        float av = ad[a_off];
+        float bv = bd[b_off];
         if (a->grad_fn || a->requires_grad) {
             float *ag = _grad_ensure(a);
-            ag[_bcast_off(a, grad_output->ndim, coord)] += bv * g;
+            ag[a_off] += bv * g;
         }
         if (b->grad_fn || b->requires_grad) {
             float *bg = _grad_ensure(b);
-            bg[_bcast_off(b, grad_output->ndim, coord)] += av * g;
+            bg[b_off] += av * g;
         }
     }
 }
@@ -285,8 +293,9 @@ tensor *tensor_mul(const tensor *a, const tensor *b) {
                 coord[d] = r % shape_out[d];
                 r /= shape_out[d];
             }
-            od[out->offset + i] = ad[_bcast_off(a, ndim_out, coord)]
-                                * bd[_bcast_off(b, ndim_out, coord)];
+            int a_off = _bcast_off(a, ndim_out, coord);
+            int b_off = _bcast_off(b, ndim_out, coord);
+            od[out->offset + i] = ad[a_off] * bd[b_off];
         }
     }
 
@@ -348,15 +357,17 @@ static void div_backward(grad_fn *fn, tensor *grad_output) {
             r /= grad_output->shape[d];
         }
         float g = g_data[i];
-        float av = ad[_bcast_off(a, grad_output->ndim, coord)];
-        float bv = bd[_bcast_off(b, grad_output->ndim, coord)];
+        int a_off = _bcast_off(a, grad_output->ndim, coord);
+        int b_off = _bcast_off(b, grad_output->ndim, coord);
+        float av = ad[a_off];
+        float bv = bd[b_off];
         if (a->grad_fn || a->requires_grad) {
             float *ag = _grad_ensure(a);
-            ag[_bcast_off(a, grad_output->ndim, coord)] += (1.0f / bv) * g;
+            ag[a_off] += (1.0f / bv) * g;
         }
         if (b->grad_fn || b->requires_grad) {
             float *bg = _grad_ensure(b);
-            bg[_bcast_off(b, grad_output->ndim, coord)] += (-av / (bv * bv)) * g;
+            bg[b_off] += (-av / (bv * bv)) * g;
         }
     }
 }
@@ -391,8 +402,9 @@ tensor *tensor_div(const tensor *a, const tensor *b) {
                 coord[d] = r % shape_out[d];
                 r /= shape_out[d];
             }
-            od[out->offset + i] = ad[_bcast_off(a, ndim_out, coord)]
-                                / bd[_bcast_off(b, ndim_out, coord)];
+            int a_off = _bcast_off(a, ndim_out, coord);
+            int b_off = _bcast_off(b, ndim_out, coord);
+            od[out->offset + i] = ad[a_off] / bd[b_off];
         }
     }
 

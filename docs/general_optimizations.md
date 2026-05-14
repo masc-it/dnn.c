@@ -18,13 +18,22 @@ The **general nD path** did 3 full coord-decompose passes (max, sum_exp, loss). 
 
 In `softmax_backward()` (`ops_activation.c:84-150`), both loops independently decompose flat index → `coord[DNN_MAX_DIMS]` → `slice_idx`. This is 2× the div/mod work. Fuse into one loop.
 
+**implemented: true** — Two changes:
+- Added 2D contiguous fast path (ndim==2, dim==1). Avoids coord decomposition entirely. Iterates row-by-row with direct pointer access. Covers classifier use case (~95% of softmax calls).
+- General nD path: saved `slice_idx` to int scratch buffer in first loop, reuse in second. Eliminates second coord decompose. Adds `numel * sizeof(int)` scratch overhead (acceptable for non-classifier softmax like attention).
+- No measurable change on MNIST CNN benchmark (uses cross_entropy backward, not softmax backward).
+
 ## 4. Element-wise backward broadcast paths: coord decompose per element ×2
 
 `add_backward`, `sub_backward`, `mul_backward`, `div_backward` — all have a broadcast fallback that decomposes flat index → coord for **each input tensor separately** via `_bcast_off`. This is the full coord decompose + stride multiply per element, per input. For non-broadcast but non-contiguous cases, this is pure overhead that strided loops would avoid.
 
+**implemented: true** — Precomputed `a_off` / `b_off` once per element in all four backward functions and their forward broadcast paths. For `mul_backward`/`div_backward`, this reduced `_bcast_off` calls from **4× per element** (2 reads + 2 writes) to **2× per element**. Eliminates redundant offset recomputation that the compiler may not optimize away due to aliasing through `_grad_ensure`. No measurable change on MNIST CNN benchmark (~28.5 batch/s, within noise). Expected benefit grows with ndim (more dims = more stride-loop iterations saved).
+
 ## 5. `_bcast_off` fast-path too narrow
 
-The fast path in `_bcast_off()` (`broadcast.h:38-46`) only fires when `t->contiguous && t->ndim == out_ndim && no dim has shape==1`. The common case of "contiguous, same ndim, no broadcast" is fast. But "contiguous, same ndim, shape-1 broadcast" falls through to the slow per-element stride loop even though the index computation is just `idx = flat_index % i` with zero-stride for 1-sized dims. Could add a second fast path.
+**implemented: true** — `_bcast_off()` (`broadcast.h:34`) removed the wasteful O(ndim) scan that checked for shape-1 dims before entering the flat-index fast path. The flat index computation now handles shape-1 dims inline by zeroing the coordinate at those dims (`t->shape[d] == 1 ? 0 : coord[d]`), which is equivalent to multiplying by stride[d] for those dims. This is 1× O(ndim) per call instead of 2× O(ndim) (scan + compute).
+
+**Measured impact:** ~28.4 batch/s baseline vs ~28.5 batch/s after. Within noise (~2%). Element-wise ops with broadcasting are a tiny fraction of CNN training time (dominated by conv GEMM). Benefit would be proportionally larger in MLP-dominated workloads where broadcast-add is a bottleneck.
 
 ## 6. Dropout forward/backward: coord decompose on contiguous tensors
 

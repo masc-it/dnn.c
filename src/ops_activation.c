@@ -87,54 +87,63 @@ static void softmax_backward(grad_fn *fn, tensor *grad_output) {
     int dim_size = a->shape[dim];
     int n_slices = numel / dim_size;
 
-    if (a->grad_fn || a->requires_grad) {
-        float *ag = _grad_ensure(a);
+    if (!(a->grad_fn || a->requires_grad)) return;
 
-        /* dot = sum(sm * g, dim) for each slice */
-        float *dot = mem_scratch_alloc(n_slices * sizeof(float), NULL);
+    float *ag = _grad_ensure(a);
 
-        for (int i = 0; i < numel; i++) {
-            int coord[DNN_MAX_DIMS];
-            int r = i;
-            for (int d = ndim - 1; d >= 0; d--) {
-                coord[d] = r % a->shape[d];
-                r /= a->shape[d];
-            }
+    /* ── 2D fast path (N, C), dim=1, contiguous ── */
+    if (ndim == 2 && dim == 1
+        && tensor_is_contiguous(a)
+        && tensor_is_contiguous(saved_out)
+        && tensor_is_contiguous(grad_output)) {
+        int N = a->shape[0], C = a->shape[1];
+        for (int n = 0; n < N; n++) {
+            float *sm_row = sm_data + n * C;
+            float *g_row  = g_data + n * C;
+            float *ag_row = ag + n * C;
 
-            int slice_idx = 0;
-            int stride = 1;
-            for (int d = ndim - 1; d >= 0; d--) {
-                if (d != dim) {
-                    slice_idx += coord[d] * stride;
-                    stride *= a->shape[d];
-                }
-            }
+            /* dot = sum(sm * g) over this row */
+            float dot = 0.0f;
+            for (int c = 0; c < C; c++)
+                dot += sm_row[c] * g_row[c];
 
-            dot[slice_idx] += sm_data[_flat_off(saved_out, i)] * g_data[i];
+            /* dL/dx_i = sm_i * (g_i - dot) */
+            for (int c = 0; c < C; c++)
+                ag_row[c] += sm_row[c] * (g_row[c] - dot);
+        }
+        return;
+    }
+
+    /* ── General nD: fuse coord decompose — compute slice_idx once ── */
+    float *dot = mem_scratch_alloc(n_slices * sizeof(float), NULL);
+    int   *sid = mem_scratch_alloc(numel * sizeof(int), NULL);
+
+    for (int i = 0; i < numel; i++) {
+        int coord[DNN_MAX_DIMS];
+        int r = i;
+        for (int d = ndim - 1; d >= 0; d--) {
+            coord[d] = r % a->shape[d];
+            r /= a->shape[d];
         }
 
-        /* dL/dx_i = sm_i * (g_i - dot) */
-        for (int i = 0; i < numel; i++) {
-            int coord[DNN_MAX_DIMS];
-            int r = i;
-            for (int d = ndim - 1; d >= 0; d--) {
-                coord[d] = r % a->shape[d];
-                r /= a->shape[d];
+        int slice_idx = 0;
+        int stride = 1;
+        for (int d = ndim - 1; d >= 0; d--) {
+            if (d != dim) {
+                slice_idx += coord[d] * stride;
+                stride *= a->shape[d];
             }
-
-            int slice_idx = 0;
-            int stride = 1;
-            for (int d = ndim - 1; d >= 0; d--) {
-                if (d != dim) {
-                    slice_idx += coord[d] * stride;
-                    stride *= a->shape[d];
-                }
-            }
-
-            float sm_val = sm_data[_flat_off(saved_out, i)];
-            int off = _flat_off(a, i);
-            ag[off] += sm_val * (g_data[i] - dot[slice_idx]);
         }
+
+        sid[i] = slice_idx;
+        dot[slice_idx] += sm_data[_flat_off(saved_out, i)] * g_data[i];
+    }
+
+    for (int i = 0; i < numel; i++) {
+        int   si    = sid[i];
+        float sm_val = sm_data[_flat_off(saved_out, i)];
+        int   off   = _flat_off(a, i);
+        ag[off] += sm_val * (g_data[i] - dot[si]);
     }
 }
 
