@@ -126,6 +126,18 @@ tensor *tensor_sigmoid(const tensor *t) {
     return out;
 }
 
+/* ── silu (Swish) ──
+ *
+ *   silu(x) = x * sigmoid(x)
+ *
+ * Composed from tensor_mul + tensor_sigmoid.  Autograd wired automatically.
+ */
+
+tensor *tensor_silu(const tensor *t) {
+    assert(t);
+    return tensor_mul(t, tensor_sigmoid(t));
+}
+
 /* ── softmax_backward ── */
 
 static void softmax_backward(grad_fn *fn, tensor *grad_output) {

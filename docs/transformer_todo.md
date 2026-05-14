@@ -222,7 +222,7 @@ tokenizer ──> embedding ─┤
 | # | Item | Depends on | Lines |
 |---|------|------------|-------|
 | 1 | `tensor_sigmoid` forward + backward + test | — | ~60 | DONE |
-| 2 | `tensor_silu` (compose from sigmoid+mul) | (1) | ~10 / ~40 |
+| 2 | ✅ `tensor_silu` (compose from sigmoid+mul) | (1) | ~10 / ~40 |
 | 3 | SwiGLU FFN block (compose from existing linear + silu + mul) | (1,2) | ~30 |
 | 4 | Embedding lookup + backward | — | ~80 |
 | 5 | Causal mask via `tensor_triu` + `tensor_fill(-inf)` | — | ~40 |

@@ -667,6 +667,100 @@ static void test_sigmoid_no_grad(void) {
     printf("OK\n");
 }
 
+static void test_silu_scalar(void) {
+    printf("  test_silu_scalar... ");
+    /* 9 scalar values in one 1D tensor — forward + backward, check all */
+    float xs[]  = { 0.0f, 1.0f, -1.0f, 2.0f, -2.0f, 3.0f, -3.0f, 0.5f, -0.5f };
+    float ef[]  = { 0.00000000f, 0.73105860f, -0.26894143f, 1.76159406f, -0.23840584f,
+                    2.85772252f, -0.14227761f, 0.31122968f, -0.18877034f };
+    float eg[]  = { 0.50000000f, 0.92767054f, 0.07232948f, 1.09078431f, -0.09078425f,
+                    1.08810413f, -0.08810411f, 0.73996121f, 0.26003882f };
+    int n = 9;
+
+    tensor *a = tensor_zeros(1, (int[]){n}, 1);
+    float *ad = tensor_data_ptr(a);
+    for (int i = 0; i < n; i++) ad[i] = xs[i];
+
+    tensor *c = tensor_silu(a);
+    float *cd = tensor_data_ptr(c);
+    for (int i = 0; i < n; i++) {
+        if (fabsf(cd[i] - ef[i]) > EPS) {
+            printf("\n    FAIL: silu(%g) forward[%d]: got %.8f, expected %.8f\n",
+                   xs[i], i, cd[i], ef[i]); assert(0);
+        }
+    }
+
+    dnn_backward(c);
+    float *ag = tensor_grad(a);
+    assert(ag && "silu scalar grad not NULL");
+    for (int i = 0; i < n; i++) {
+        if (fabsf(ag[i] - eg[i]) > EPS) {
+            printf("\n    FAIL: silu(%g) grad[%d]: got %.8f, expected %.8f\n",
+                   xs[i], i, ag[i], eg[i]); assert(0);
+        }
+    }
+    printf("OK\n");
+}
+
+static void test_silu_array(void) {
+    printf("  test_silu_array... ");
+    float vals[]  = {-3.0f, -1.0f, 0.0f, 2.0f, 4.0f};
+    float exp_fwd[] = {-0.14227761f, -0.26894143f, 0.00000000f, 1.76159406f, 3.92805505f};
+    float exp_grad[] = {-0.08810411f, 0.07232948f, 0.50000000f, 1.09078431f, 1.05266464f};
+    int n = 5;
+
+    tensor *a = tensor_zeros(1, (int[]){n}, 1);
+    float *ad = tensor_data_ptr(a);
+    for (int i = 0; i < n; i++) ad[i] = vals[i];
+
+    tensor *c = tensor_silu(a);
+    float *cd = tensor_data_ptr(c);
+
+    for (int i = 0; i < n; i++) {
+        if (fabsf(cd[i] - exp_fwd[i]) > EPS) {
+            printf("\n    FAIL: silu array forward[%d]: got %.8f, expected %.8f\n",
+                   i, cd[i], exp_fwd[i]); assert(0);
+        }
+    }
+
+    dnn_backward(c);
+    float *ag = tensor_grad(a);
+    assert(ag && "silu array grad not NULL");
+
+    for (int i = 0; i < n; i++) {
+        if (fabsf(ag[i] - exp_grad[i]) > EPS) {
+            printf("\n    FAIL: silu array grad[%d]: got %.8f, expected %.8f\n",
+                   i, ag[i], exp_grad[i]); assert(0);
+        }
+    }
+    printf("OK\n");
+}
+
+static void test_silu_chain(void) {
+    printf("  test_silu_chain... ");
+    /* c = silu(a) + a
+     * dc/da = silu'(a) + 1 */
+    tensor *a = scalar(1.0f, 1);
+    tensor *s = tensor_silu(a);
+    tensor *c = tensor_add(s, a);
+    dnn_backward(c);
+    float silu_grad = 0.92767054f;  /* silu'(1) from ref */
+    check_grad(a, silu_grad + 1.0f, "da");
+    printf("OK\n");
+}
+
+static void test_silu_no_grad(void) {
+    printf("  test_silu_no_grad... ");
+    tensor *a = scalar(3.0f, 0);
+    tensor *c = tensor_silu(a);
+    float *cp = tensor_data_ptr(c);
+    float ref = 3.0f / (1.0f + expf(-3.0f));  /* silu(3) */
+    assert(fabsf(cp[0] - ref) < EPS && "silu no-grad forward");
+    assert(tensor_grad(a) == NULL && "silu no-grad: no grad allocated");
+    assert(tensor_grad(c) == NULL && "silu no-grad: output has no grad");
+    printf("OK\n");
+}
+
 static void test_matmul_simple(void) {
     printf("  test_matmul_simple... ");
     /* A (2,3) @ B (3,2) = C (2,2) */
@@ -1563,6 +1657,22 @@ int main(void) {
     mem_pool_reset(&scratch);
 
     test_sigmoid_no_grad();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_silu_scalar();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_silu_array();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_silu_chain();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_silu_no_grad();
     mem_pool_reset(&params);
     mem_pool_reset(&scratch);
 
