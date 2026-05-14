@@ -59,9 +59,11 @@ bench_all: clean
 	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_conv2d.c $(BENCH_LIBS) -o bench_conv2d
 	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_matmul.c $(BENCH_LIBS) -o bench_matmul
 	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_ops.c $(BENCH_LIBS) -o bench_ops
+	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_multihead.c $(BENCH_LIBS) -o bench_multihead
 	echo "=== Conv2D ===" && ./bench_conv2d
 	echo "=== MatMul ===" && ./bench_matmul
 	echo "=== Ops ===" && ./bench_ops
+	echo "=== Multihead ===" && ./bench_multihead
 
 bench_conv2d: $(LIB)
 	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_conv2d.c $(BENCH_LIBS) -o bench_conv2d
@@ -75,8 +77,12 @@ bench_ops: $(LIB)
 	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_ops.c $(BENCH_LIBS) -o bench_ops
 	./bench_ops
 
+bench_multihead: $(LIB)
+	$(CC) $(BENCH_CFLAGS) $(INCDIRS) bench_multihead.c $(BENCH_LIBS) -o bench_multihead
+	./bench_multihead
+
 clean:
-	rm -rf $(OBJDIR) $(LIB) main bench_conv2d bench_matmul bench_ops bench_{baseline,after}
+	rm -rf $(OBJDIR) $(LIB) main bench_conv2d bench_matmul bench_ops bench_multihead bench_{baseline,after}
 
 # include auto-generated deps
 -include $(DEPS)

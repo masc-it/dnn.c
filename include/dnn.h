@@ -10,5 +10,6 @@
 #include "conv.h"
 #include "optim.h"
 #include "attention.h"
+#include "multihead.h"
 
 #endif /* DNN_H */

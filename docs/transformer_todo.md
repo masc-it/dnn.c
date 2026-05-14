@@ -227,7 +227,7 @@ tokenizer ──> embedding ─┤
 | 4 | Embedding lookup + backward | — | ~80 | DONE |
 | 5 | Causal mask via `tensor_triu` + `tensor_fill(-inf)` | — | ~40 | DONE |
 | 6 | Scaled dot-product attention (compose from matmul + softmax + mask) | (5) | ~60 | DONE |
-| 7 | Multi-head split/merge wrappers | — | ~80 |
+| 7 | Multi-head split/merge wrappers | — | ~80 | DONE |
 
 ### Phase 2 — Activation Fusion & Position Encoding
 
