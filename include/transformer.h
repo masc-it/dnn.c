@@ -81,4 +81,53 @@ transformer_block *transformer_block_create(int d_model, int n_heads, int d_k,
 tensor            *transformer_block_forward(transformer_block *block,
                                               const tensor *x);
 
+/* ── Decoder-only Language Model ──
+ *
+ * Full autoregressive LM: embed → N×transformer_block → norm → lm_head
+ *
+ *   input_ids [B, N] (int tokens) → logits [B, N, vocab_size]
+ *
+ * All parameters in params pool.  Autograd wired through entire graph.
+ * No KV-cache during training (teacher forcing computes full seq in one shot).
+ */
+
+typedef struct {
+    tensor             *embedding_table;  /* [vocab_size, d_model] */
+    transformer_block **blocks;           /* [n_layers] */
+    int                 n_layers;
+    tensor             *norm_weight;      /* [d_model], final layer norm, init 1 */
+    tensor             *norm_bias;        /* [d_model], final layer norm, init 0 */
+    linear             *lm_head;          /* d_model → vocab_size */
+    int                 d_model;
+    int                 vocab_size;
+} decoder_lm;
+
+/* Create decoder-only LM.
+ *
+ *   vocab_size       — number of tokens in vocabulary
+ *   d_model          — hidden dimension
+ *   n_layers         — number of transformer blocks
+ *   n_heads          — attention heads per block
+ *   d_k              — head dimension (must satisfy n_heads * d_k == d_model)
+ *   intermediate     — SwiGLU FFN intermediate size
+ *
+ * Allocates all parameters from params pool.  Embedding table and lm_head
+ * are separate tensors (no weight tying by default).
+ */
+decoder_lm *decoder_lm_create(int vocab_size, int d_model,
+                               int n_layers, int n_heads, int d_k,
+                               int intermediate_size);
+
+/* Forward pass.
+ *
+ *   input_ids — [B, N] int tensor (token IDs).  Data stored as int* in
+ *               the float data region (same pattern as cross_entropy target).
+ *               MUST be contiguous.  Batch B and sequence length N are
+ *               inferred from input shape.
+ *
+ *   Returns float tensor [B, N, vocab_size] — unnormalized logits.
+ *   Autograd wired: backward flows gradients to all LM parameters.
+ */
+tensor *decoder_lm_forward(decoder_lm *lm, const tensor *input_ids);
+
 #endif /* DNN_TRANSFORMER_H */

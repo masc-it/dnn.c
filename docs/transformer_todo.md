@@ -421,6 +421,47 @@ mem_pool scratch = mem_pool_create(512 * 1024 * 1024);
 - `src/transformer.c` — added `transformer_block_create`, `transformer_block_forward`
 - `test/ref_transformer.py` — new PyTorch reference
 - `test/test_transformer.c` — new C test suite
+
+---
+
+#### 17 — Decoder-only LM ✅ **DONE**
+
+**What was implemented:**
+
+- **`decoder_lm` struct** in `include/transformer.h` — holds embedding table
+  (`[vocab_size, d_model]`), array of `transformer_block` pointers, final
+  layer norm params, and `lm_head` linear projection (`d_model → vocab_size`).
+- **`decoder_lm_create(vocab_size, d_model, n_layers, n_heads, d_k, intermediate)`**
+  — allocates all parameters from params pool.  Embedding and lm_head are
+  separate tensors (no weight tying by default).  Norm γ init to 1, β to 0.
+- **`decoder_lm_forward(lm, input_ids)`** — full autoregressive LM forward:
+
+      1. Flatten [B, N] → [B*N], embed → [B*N, d_model], reshape → [B, N, d_model]
+      2. Pass through all `n_layers` transformer blocks
+      3. Final layer norm
+      4. LM head: linear([B, N, d_model]) → [B, N, vocab_size]
+
+  Input `input_ids` is a 2D `[B, N]` int tensor (data stored as `int*` in the
+  float region, same pattern as cross_entropy target).  Must be contiguous.
+  Returns `[B, N, vocab_size]` float logits.  Autograd wired through the
+  entire graph — backward flows gradients to all parameters.
+
+**Tests added:**
+- `test/ref_decoder_lm.py` — PyTorch reference: full decoder LM forward +
+  backward with seed=42.  Supports `--small` flag.
+- `test/test_decoder_lm.c` — C tests: create shapes, forward shape + all 21
+  param groups get finite grads, embedding gradient sparsity (only looked-up
+  rows get non-zero grad), numerical gradient check (finite diff on lm_head
+  weight), no-grad mode, batch B=2, seq len N=1 and N=7, weight tying
+  verification (separate tensors), duplicate ID accumulation.
+
+**Files changed:**
+- `include/transformer.h` — added `decoder_lm` struct + `decoder_lm_create`/
+  `decoder_lm_forward` declarations
+- `src/transformer.c` — added `decoder_lm_create` and `decoder_lm_forward`
+- `test/ref_decoder_lm.py` — new PyTorch reference
+- `test/test_decoder_lm.c` — new C test suite
+
 ---
 
 ### Phase 4 — Full Model
@@ -428,7 +469,7 @@ mem_pool scratch = mem_pool_create(512 * 1024 * 1024);
 | # | Item | Depends on | Lines |
 |---|------|------------|-------|
 | 16 | `transformer_block` (pre-norm attn + pre-norm swiglu-ffn + residual) transformer.c | (3,6,7,9,11,15a) | ~60 | ✅ **DONE** |
-| 17 | Decoder-only LM (embed → N×block → norm → lm_head) | (4,16) | ~60 |
+| 17 | Decoder-only LM (embed → N×block → norm → lm_head) | (4,16) | ~60 | ✅ **DONE** |
 | 18 | Training loop (next-token prediction, teacher forcing, cross-entropy) | (17) | ~100 |
 | 19 | Generation loop (autoregressive, kv-cache optional) | (17,15b,15c) | ~80 |
 

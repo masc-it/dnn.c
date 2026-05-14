@@ -172,3 +172,72 @@ tensor *transformer_block_forward(transformer_block *block, const tensor *x) {
     /* Second residual: return x + ffn_out */
     return tensor_add(residual, ffn_out);
 }
+
+/* ── Decoder-only Language Model ── */
+
+decoder_lm *decoder_lm_create(int vocab_size, int d_model,
+                               int n_layers, int n_heads, int d_k,
+                               int intermediate_size) {
+    assert(vocab_size > 0 && d_model > 0 && n_layers > 0);
+    assert(n_heads > 0 && d_k > 0 && intermediate_size > 0);
+    assert(d_model == n_heads * d_k && "d_model must equal n_heads * d_k");
+
+    decoder_lm *lm = mem_params_alloc(sizeof(decoder_lm), NULL);
+    lm->d_model    = d_model;
+    lm->vocab_size = vocab_size;
+    lm->n_layers   = n_layers;
+
+    /* Embedding table: [vocab_size, d_model], uniform init */
+    float bound = 1.0f / sqrtf((float)d_model);
+    lm->embedding_table = tensor_uniform(2, (int[]){vocab_size, d_model}, 1, bound);
+
+    /* Transformer blocks */
+    lm->blocks = mem_params_alloc(n_layers * sizeof(transformer_block*), NULL);
+    for (int i = 0; i < n_layers; i++) {
+        lm->blocks[i] = transformer_block_create(d_model, n_heads, d_k,
+                                                   intermediate_size);
+    }
+
+    /* Final layer norm: γ=1, β=0 */
+    lm->norm_weight = tensor_zeros(1, (int[]){d_model}, 1);
+    lm->norm_bias   = tensor_zeros(1, (int[]){d_model}, 1);
+    float *wn = tensor_data_ptr(lm->norm_weight);
+    for (int i = 0; i < d_model; i++) wn[i] = 1.0f;
+
+    /* LM head: d_model → vocab_size */
+    lm->lm_head = linear_create(d_model, vocab_size);
+
+    return lm;
+}
+
+tensor *decoder_lm_forward(decoder_lm *lm, const tensor *input_ids) {
+    assert(lm && input_ids);
+    assert(input_ids->ndim == 2 && "decoder_lm_forward: input_ids must be 2D [B, N]");
+    assert(input_ids->contiguous && "decoder_lm_forward: input_ids must be contiguous");
+
+    int B = input_ids->shape[0];
+    int N = input_ids->shape[1];
+    int D = lm->d_model;
+
+    /* Flatten [B, N] → [B*N] for embedding lookup */
+    tensor *flat_ids = tensor_flatten((tensor*)input_ids);  /* view, no data copy */
+
+    /* Embed: [B*N] → [B*N, d_model] */
+    tensor *h = tensor_embedding(lm->embedding_table, flat_ids);
+
+    /* Reshape to [B, N, d_model] */
+    h = tensor_reshape(h, 3, (int[]){B, N, D});
+
+    /* Pass through all transformer blocks */
+    for (int i = 0; i < lm->n_layers; i++) {
+        h = transformer_block_forward(lm->blocks[i], h);
+    }
+
+    /* Final layer norm */
+    h = tensor_layer_norm(h, lm->norm_weight, lm->norm_bias, 1e-5f);
+
+    /* LM head: [B, N, d_model] → [B, N, vocab_size] */
+    tensor *logits = linear_forward(lm->lm_head, h);
+
+    return logits;
+}
