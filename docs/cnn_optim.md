@@ -18,6 +18,9 @@ default binary.
 
 **Severity**: blocker (fixed)
 
+**implemented: true** — `main.c` now calls `mnist_model_create_cnn()`,
+`mnist_train_cnn()`, and `mnist_eval_cnn()` in the default path.
+
 ---
 
 ## 2. SCRATCH POOL SIZE (CRITICAL)
@@ -43,12 +46,18 @@ MLP works because activations total <200 KB.
 
 **Severity**: blocker (fixed — bumped to 32 MB)
 
+**implemented: true** — current `main.c` sets scratch pool to 192 MB
+(larger than the 32 MB noted here).
+
 ---
 
 ## 3. CONV2D USES RAW malloc (spec violation — FIXED)
 
 Both `conv2d_forward` and `conv2d_backward` (`src/conv.c`) allocated im2col and
 dcol buffers via `malloc()`/`free()`.  Replaced with scratch pool allocations.
+
+**implemented: true** — all conv buffers use `mem_scratch_alloc`,
+no raw `malloc` in conv.c.
 
 Per-batch alloc sizes for batch=64 (now from scratch pool, no syscall):
 
@@ -64,6 +73,10 @@ Per-batch alloc sizes for batch=64 (now from scratch pool, no syscall):
 
 `tensor_relu` now writes into the input buffer in-place.  Saves ~10.4 MB per
 batch in activation memory and avoids a full copy.
+
+**implemented: false** — `tensor_relu` (`ops_activation.c:40`) still creates a
+new tensor via `_tensor_scratch_create` and writes to a separate output buffer.
+Input tensor is not modified in-place.  Doc's claim is stale or aspirational.
 
 ---
 
@@ -162,6 +175,10 @@ Changed layout to (K, M):
 
 ### Cache audit (updated for (K, M))
 
+**implemented: true** — col stored as (K, M); im2col writes sequential;
+col2im reads sequential; GEMM uses `CblasTrans, CblasTrans`.
+
+
 | Component | BW efficiency | Notes |
 |-----------|--------------|-------|
 | im2col read | ~100% | sequential per row |
@@ -207,6 +224,10 @@ d_weight reuses the buffer directly, saving the entire im2col pass + memset.
 **Expected gain**: ~20-30% reduction in per-batch time (dominated by im2col
 when col is large).
 
+**implemented: true** — forward saves col at `fn->saved_tensors[2]`
+(`conv.c:404`), backward reuses it (`conv.c:218`). No redundant
+im2col in backward.
+
 ### P2 — Peel pad boundary in im2col / col2im
 
 **Impact: eliminate bounds checks for ~90% of positions**.
@@ -218,6 +239,10 @@ the output grid into top pad, interior (no checks), bottom pad.
 **Effort**: ~30 lines in im2col + col2im.
 
 **Expected gain**: ~10% per im2col/col2im call.
+
+**implemented: true** — both oh and ow bounds fully peeled in im2col
+(conv.c:68-71) and col2im. im2col precomputes oh_min/oh_max per kh
+so no per-row bounds check remains in hot path.
 
 ### P3 — Winograd F(2×2, 3×3) for 3×3 kernels
 
@@ -234,12 +259,19 @@ Requires separate forward/backward paths for kH=kW=3.
 
 **Expected gain**: ~40% on 3×3 conv GEMM time.
 
+**implemented: false** — no Winograd code anywhere in codebase.
+`tensor_conv2d` uses im2col+GEMM for all kernel sizes.
+
 ### P4 — Fuse bias add into sgemm beta
 
 **Impact**: eliminate separate bias loop (trivial, ~1% perf).
 
 Pre-fill od with bias values so the GEMM `beta=1.0f` adds bias via the
 accumulator instead of a separate pass.
+
+**implemented: true** — forward conv (`conv.c:347-360`) pre-fills `od` with
+bias via `memcpy` per output-channel block, then calls `cblas_sgemm` with
+`beta=1.0f` to accumulate.
 
 ---
 

@@ -1,6 +1,7 @@
 #include "ops.h"
 #include "autograd.h"
 #include "pool.h"
+#include "pool_int.h"
 #include "tensor_int.h"
 #include "autograd_int.h"
 #include "broadcast.h"
@@ -537,7 +538,7 @@ tensor *tensor_dropout(const tensor *t, float p) {
     float  *td  = (float*)t->data;
 
     /* generate mask and apply: out = mask * t / (1-p) */
-    float *mask = mem_scratch_alloc((size_t)n * sizeof(float), NULL);
+    float *mask = _mem_pool_alloc_nz(_mem_pool_scratch(), (size_t)n * sizeof(float));
     for (int i = 0; i < n; i++) {
         int coord[DNN_MAX_DIMS];
         int r = i;
