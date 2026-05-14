@@ -37,7 +37,7 @@ static void sum_backward(grad_fn *fn, tensor *grad_output) {
             for (int i = 0; i < inner; i++) {
                 float gv = g_data[oi * inner + i];
                 for (int k = 0; k < dim_size; k++)
-                    tg[oi * in_outer_stride + k * inner + i] += gv;
+                    tg[t->offset + oi * in_outer_stride + k * inner + i] += gv;
             }
         }
         return;

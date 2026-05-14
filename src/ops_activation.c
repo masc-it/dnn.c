@@ -68,9 +68,62 @@ tensor *tensor_relu(const tensor *t) {
     return out;
 }
 
+/* ── sigmoid_backward ── */
+
+static void sigmoid_backward(grad_fn *fn, tensor *grad_output) {
+    tensor *a = fn->inputs[0];
+    tensor *saved_out = fn->saved_tensors[0];
+    int n = _numel(a->ndim, a->shape);
+    float *g_data = (float*)grad_output->data;
+    float *sd = (float*)saved_out->data;
+
+    if (a->grad_fn || a->requires_grad) {
+        float *ag = _grad_ensure(a);
+        if (tensor_is_contiguous(a) && tensor_is_contiguous(grad_output)) {
+            simd_sigmoid_bwd(ag + a->offset, sd, g_data, n);
+        } else {
+            for (int i = 0; i < n; i++) {
+                int off = _flat_off(a, i);
+                float sig = sd[i];
+                ag[off] += sig * (1.0f - sig) * g_data[i];
+            }
+        }
+    }
+}
+
 tensor *tensor_sigmoid(const tensor *t) {
-    (void)t;
-    return NULL;
+    assert(t);
+
+    tensor *out = _tensor_scratch_create(t->ndim, t->shape, 0);
+    int numel = _numel(t->ndim, t->shape);
+    float *od = (float*)out->data;
+    float *td = (float*)t->data;
+
+    if (tensor_is_contiguous(t)) {
+        float *tp = td + t->offset;
+        simd_sigmoid_fwd(od, tp, numel);
+    } else {
+        for (int i = 0; i < numel; i++) {
+            int off = _flat_off(t, i);
+            od[out->offset + i] = 1.0f / (1.0f + expf(-td[off]));
+        }
+    }
+
+    /* autograd tape */
+    if (dnn_grad_enabled() && tensor_requires_grad(t)) {
+        grad_fn *fn = _grad_fn_create();
+        fn->backward = sigmoid_backward;
+        fn->n_inputs = 1;
+        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs[0] = (tensor*)t;
+        fn->n_saved = 1;
+        fn->saved_tensors = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->saved_tensors[0] = out;
+        out->requires_grad = 1;
+        out->grad_fn = fn;
+    }
+
+    return out;
 }
 
 /* ── softmax_backward ── */

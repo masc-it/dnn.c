@@ -260,4 +260,49 @@ static inline void simd_ce_bwd_row_kernel(float *grad_out_row,
 
 #endif /* DNN_HAVE_NEON */
 
+/* ══════════════════════════════════════════════════════════════════
+ *  Sigmoid forward:  y = 1 / (1 + exp(-x))
+ * ══════════════════════════════════════════════════════════════════ */
+
+static inline void simd_sigmoid_fwd(float *out, const float *in, int n) {
+#if DNN_HAVE_NEON
+    const float32x4_t one = vdupq_n_f32(1.0f);
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t x = vld1q_f32(in + i);
+        float32x4_t exp_neg_x = simd_expf_f32(vnegq_f32(x));
+        vst1q_f32(out + i, vdivq_f32(one, vaddq_f32(one, exp_neg_x)));
+    }
+    for (; i < n; i++)
+        out[i] = 1.0f / (1.0f + expf(-in[i]));
+#else
+    for (int i = 0; i < n; i++)
+        out[i] = 1.0f / (1.0f + expf(-in[i]));
+#endif
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Sigmoid backward:  grad_acc += sig * (1 - sig) * grad_out
+ * ══════════════════════════════════════════════════════════════════ */
+
+static inline void simd_sigmoid_bwd(float *grad_acc, const float *sig,
+                                     const float *grad_out, int n) {
+#if DNN_HAVE_NEON
+    const float32x4_t one = vdupq_n_f32(1.0f);
+    int i = 0;
+    for (; i + 4 <= n; i += 4) {
+        float32x4_t vsig = vld1q_f32(sig + i);
+        float32x4_t vg   = vld1q_f32(grad_out + i);
+        float32x4_t vacc = vld1q_f32(grad_acc + i);
+        float32x4_t dsig = vmulq_f32(vsig, vsubq_f32(one, vsig));
+        vst1q_f32(grad_acc + i, vfmaq_f32(vacc, dsig, vg));
+    }
+    for (; i < n; i++)
+        grad_acc[i] += sig[i] * (1.0f - sig[i]) * grad_out[i];
+#else
+    for (int i = 0; i < n; i++)
+        grad_acc[i] += sig[i] * (1.0f - sig[i]) * grad_out[i];
+#endif
+}
+
 #endif /* DNN_SIMD_H */
