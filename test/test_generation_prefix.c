@@ -45,7 +45,7 @@ static tensor **collect_params(decoder_lm *lm, int *n_out) {
     all[n++] = lm->embedding_table;
     all[n++] = lm->norm_weight;
     all[n++] = lm->norm_bias;
-    all[n++] = lm->lm_head->weight;
+    /* lm_head->weight excluded — weight tying via transposed view of embedding_table */
     all[n++] = lm->lm_head->bias;
 
     for (int i = 0; i < lm->n_layers; i++) {

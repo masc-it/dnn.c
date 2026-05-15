@@ -27,8 +27,6 @@ static int check_rel(const char *label, float got, float expected, float tol) {
             return 1;
         }
     }
-    dnn_ctx_destroy(&ctx);
-
     return 0;
 }
 

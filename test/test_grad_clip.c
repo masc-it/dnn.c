@@ -309,7 +309,8 @@ static void test_clip_in_training_step(void) {
     tensor *all[256];
     int np = 0;
     all[np++] = lm->embedding_table; all[np++] = lm->norm_weight; all[np++] = lm->norm_bias;
-    all[np++] = lm->lm_head->weight; all[np++] = lm->lm_head->bias;
+    /* lm_head->weight excluded — weight tying via transposed view of embedding_table */
+    all[np++] = lm->lm_head->bias;
     for (int i = 0; i < lm->n_layers; i++) {
         transformer_block *b = lm->blocks[i];
         all[np++] = b->q_proj->weight; all[np++] = b->q_proj->bias;
@@ -354,7 +355,8 @@ static void test_clip_reduces_norm_during_training(void) {
     tensor *all[256];
     int np = 0;
     all[np++] = lm->embedding_table; all[np++] = lm->norm_weight; all[np++] = lm->norm_bias;
-    all[np++] = lm->lm_head->weight; all[np++] = lm->lm_head->bias;
+    /* lm_head->weight excluded — weight tying via transposed view of embedding_table */
+    all[np++] = lm->lm_head->bias;
     for (int i = 0; i < lm->n_layers; i++) {
         transformer_block *b = lm->blocks[i];
         all[np++] = b->q_proj->weight; all[np++] = b->q_proj->bias;

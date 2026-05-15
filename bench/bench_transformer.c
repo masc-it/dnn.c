@@ -72,7 +72,7 @@ int main(void) {
     all_params[n_params++] = lm->embedding_table;
     all_params[n_params++] = lm->norm_weight;
     all_params[n_params++] = lm->norm_bias;
-    all_params[n_params++] = lm->lm_head->weight;
+    /* lm_head->weight excluded — weight tying via transposed view of embedding_table */
     all_params[n_params++] = lm->lm_head->bias;
     for (int i = 0; i < n_layers; i++) {
         transformer_block *b = lm->blocks[i];

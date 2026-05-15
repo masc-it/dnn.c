@@ -103,11 +103,12 @@ static void test_forward_basic(void) {
     /* Backward: sum loss */
     dnn_backward(ctx.scratch, logits);
 
-    /* All major param groups get grads */
+    /* All major param groups get grads.
+     * lm_head->weight is a transposed view of embedding_table (weight tying),
+     * so its grad is on the embedding_table root. */
     assert(tensor_grad(lm->embedding_table)  && "embedding grad NULL");
     assert(tensor_grad(lm->norm_weight)      && "norm_weight grad NULL");
     assert(tensor_grad(lm->norm_bias)        && "norm_bias grad NULL");
-    assert(tensor_grad(lm->lm_head->weight)  && "lm_head weight grad NULL");
     assert(tensor_grad(lm->lm_head->bias)    && "lm_head bias grad NULL");
 
     /* All block params get grads */
@@ -133,7 +134,16 @@ static void test_forward_basic(void) {
 
 }
 
-/* ── Test: embedding gradient only flows to looked-up rows ── */
+/* ── Test: embedding gradient flows correctly with weight tying ──
+ *
+ * With weight tying, lm_head->weight is a transposed view of embedding_table.
+ * During backward, gradients from BOTH the embedding lookup AND the lm_head
+ * output projection accumulate into embedding_table's grad buffer.
+ *
+ * Looked-up rows (2, 5) get grads from both paths.
+ * Non-looked-up rows get grads from lm_head backward only.
+ * So ALL rows have non-zero grads — the embedding lookup path adds
+ * extra gradient mass to rows 2, 5. */
 
 static void test_embedding_grad_sparsity(void) {
     printf("  test_embedding_grad_sparsity... ");
@@ -146,27 +156,40 @@ static void test_embedding_grad_sparsity(void) {
     decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
-    /* Input IDs {2, 5, 2} — only rows 2 and 5 should get gradients */
+    /* Input IDs {2, 5, 2} */
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ref_input_ids);
 
     tensor *logits = decoder_lm_forward(ctx.scratch, lm, input_ids);
     dnn_backward(ctx.scratch, logits);
 
     float *eg = tensor_grad(lm->embedding_table);
+    assert(eg != NULL && "embedding grad NULL");
+
+    /* All rows get grads due to weight tying (lm_head backward).
+     * Looked-up rows (2, 5) should have larger gradient magnitude
+     * from the extra embedding lookup contribution. */
+    float row_norm[10] = {0};
     for (int i = 0; i < vocab; i++) {
-        int should_be_zero = (i != 2 && i != 5);
-        for (int j = 0; j < d_model; j++) {
-            if (should_be_zero) {
-                assert(eg[i * d_model + j] == 0.0f &&
-                       "embedding grad non-zero for non-looked-up row");
-            } else {
-                assert(eg[i * d_model + j] != 0.0f &&
-                       "embedding grad zero for looked-up row");
-            }
-        }
+        for (int j = 0; j < d_model; j++)
+            row_norm[i] += eg[i * d_model + j] * eg[i * d_model + j];
     }
 
-    printf("OK (rows {2,5} get grad, others zero)\n");
+    /* All rows must have non-zero grads */
+    for (int i = 0; i < vocab; i++)
+        assert(row_norm[i] > 0.0f && "all rows should have grads with weight tying");
+
+    /* Rows 2 and 5 (looked up) should have larger norms than
+     * non-looked-up rows (embedding adds extra gradient). */
+    float avg_other = 0.0f;
+    for (int i = 0; i < vocab; i++) {
+        if (i != 2 && i != 5) avg_other += row_norm[i];
+    }
+    avg_other /= (vocab - 2);
+
+    assert(row_norm[2] > avg_other && "row 2 should have larger grad norm");
+    assert(row_norm[5] > avg_other && "row 5 should have larger grad norm");
+
+    printf("OK (all rows get grad via weight tying, looked-up rows {2,5} have larger norm)\n");
 
 }
 
@@ -195,15 +218,16 @@ static void test_numerical_grad(void) {
     int n_checks = 4;
     int n_passed = 0;
 
-    /* Capture lm_head weight data for perturbation */
-    int n_lm = tensor_numel(lm->lm_head->weight);
-    float *lm_w_orig = malloc(n_lm * sizeof(float));
-    memcpy(lm_w_orig, tensor_data_ptr(lm->lm_head->weight), n_lm * sizeof(float));
+    /* For numerical grad we check embedding_table (weight-tying with lm_head).
+     * lm_head.weight is a transposed view sharing embedding_table's data/grad. */
+    int n_emb = tensor_numel(lm->embedding_table);
+    float *emb_orig = malloc(n_emb * sizeof(float));
+    memcpy(emb_orig, tensor_data_ptr(lm->embedding_table), n_emb * sizeof(float));
 
-    float *lm_w_grad_auto = tensor_grad(lm->lm_head->weight);
-    assert(lm_w_grad_auto != NULL);
+    float *emb_grad_auto = tensor_grad(lm->embedding_table);
+    assert(emb_grad_auto != NULL);
 
-    for (int idx = 0; idx < n_lm && n_passed < n_checks; idx += n_lm / n_checks) {
+    for (int idx = 0; idx < n_emb && n_passed < n_checks; idx += n_emb / n_checks) {
         /* +h */
         mem_pool_reset(ctx.scratch);
         mem_pool_reset(ctx.data);
@@ -211,9 +235,9 @@ static void test_numerical_grad(void) {
         srand(42);
         decoder_lm *lm1 = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                              d_k, intermediate);
-        memcpy(tensor_data_ptr(lm1->lm_head->weight), lm_w_orig, n_lm * sizeof(float));
-        float *w1d = tensor_data_ptr(lm1->lm_head->weight);
-        w1d[idx] += h;
+        memcpy(tensor_data_ptr(lm1->embedding_table), emb_orig, n_emb * sizeof(float));
+        float *e1d = tensor_data_ptr(lm1->embedding_table);
+        e1d[idx] += h;
 
         tensor *ids1 = make_int_tensor(2, (int[]){B, N}, input_data);
         tensor *o1 = decoder_lm_forward(ctx.scratch, lm1, ids1);
@@ -229,9 +253,9 @@ static void test_numerical_grad(void) {
         srand(42);
         decoder_lm *lm2 = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                              d_k, intermediate);
-        memcpy(tensor_data_ptr(lm2->lm_head->weight), lm_w_orig, n_lm * sizeof(float));
-        float *w2d = tensor_data_ptr(lm2->lm_head->weight);
-        w2d[idx] -= h;
+        memcpy(tensor_data_ptr(lm2->embedding_table), emb_orig, n_emb * sizeof(float));
+        float *e2d = tensor_data_ptr(lm2->embedding_table);
+        e2d[idx] -= h;
 
         tensor *ids2 = make_int_tensor(2, (int[]){B, N}, input_data);
         tensor *o2 = decoder_lm_forward(ctx.scratch, lm2, ids2);
@@ -240,17 +264,17 @@ static void test_numerical_grad(void) {
         for (int i = 0; i < nel; i++) l2 += o2d[i];
 
         float fd = (l1 - l2) / (2.0f * h);
-        float ag = lm_w_grad_auto[idx];
+        float ag = emb_grad_auto[idx];
         float diff = fabsf(fd - ag);
 
-        printf("    lm_head.weight[%d]: fd=%.6f auto=%.6f diff=%.2e %s\n",
+        printf("    embedding_table[%d]: fd=%.6f auto=%.6f diff=%.2e %s\n",
                idx, fd, ag, diff, diff < 0.05f ? "OK" : "FAIL");
         assert(diff < 0.05f);
         n_passed++;
     }
 
     printf("  numerical gradient: OK (%d checks)\n", n_passed);
-    free(lm_w_orig);
+    free(emb_orig);
 
 }
 

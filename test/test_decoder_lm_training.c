@@ -31,7 +31,8 @@ static tensor **collect_params(decoder_lm *lm, int *n_out) {
     all[n++] = lm->embedding_table;
     all[n++] = lm->norm_weight;
     all[n++] = lm->norm_bias;
-    all[n++] = lm->lm_head->weight;
+    /* lm_head->weight excluded — weight-tying via transposed view of embedding_table,
+     * so embedding_table is the sole optimizer param for that shared data. */
     all[n++] = lm->lm_head->bias;
 
     for (int i = 0; i < lm->n_layers; i++) {
@@ -123,10 +124,11 @@ static void test_gradients_flow(void) {
     float loss_val = tensor_data_ptr(loss)[0];
     printf("    loss=%.6f\n", loss_val);
 
-    /* Check a representative set */
+    /* Check a representative set.
+     * lm_head->weight is a transposed view of embedding_table (weight tying),
+     * so grad is on embedding_table root. */
     assert(tensor_grad(lm->embedding_table) != NULL);
     assert(tensor_grad(lm->norm_weight) != NULL);
-    assert(tensor_grad(lm->lm_head->weight) != NULL);
 
     /* Check grads are finite */
     float *eg = tensor_grad(lm->embedding_table);
