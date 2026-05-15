@@ -2,6 +2,7 @@
 #define DNN_NN_H
 
 #include "tensor.h"
+#include "module.h"
 
 /* ── Linear (fully-connected) layer ──
  *
@@ -11,6 +12,7 @@
  *   bias   shape: [out_features]
  */
 typedef struct linear {
+    module  base;           /* first field — cast (module*)linear safely */
     tensor *weight;
     tensor *bias;
     int     in_features;
@@ -31,9 +33,10 @@ tensor  *linear_forward(struct mem_pool *scratch, linear *l, const tensor *input
  *   Matches Llama/Mistral FFN block.
  */
 typedef struct swiglu_ffn {
-    linear *gate_proj;   /* siLU-gated projection */
-    linear *up_proj;     /* up projection */
-    linear *down_proj;   /* down projection */
+    module  base;         /* first field */
+    linear *gate_proj;    /* siLU-gated projection */
+    linear *up_proj;      /* up projection */
+    linear *down_proj;    /* down projection */
     int     d_model;
     int     intermediate_size;
 } swiglu_ffn;

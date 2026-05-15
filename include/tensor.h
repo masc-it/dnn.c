@@ -48,6 +48,7 @@ int     tensor_requires_grad(const tensor *t);
 void    tensor_set_requires_grad(tensor *t, int req);
 int     tensor_is_leaf(const tensor *t);
 void    tensor_retain_grad(tensor *t);
+void    tensor_zero_grad(tensor *t);
 float  *tensor_grad(const tensor *t);
 tensor *tensor_root(tensor *t);
 void    tensor_print(const tensor *t);

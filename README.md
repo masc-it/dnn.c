@@ -71,7 +71,8 @@ same-shape contiguous inputs.
 - **`transformer_block`** — Decoder block (pre-norm): causal attn + SwiGLU FFN, residual, RoPE
 - **`decoder_lm`** — Full autoregressive LM: embed → N×transformer → norm → lm_head
 - **`mnist_model`** — MLP: 784 → 256 → 10, ReLU + dropout(0.2)
-- **`mnist_model_cnn`** — 3 conv layers (1→32→64→64, 3×3 kernels) + FC 3136→128→10, ReLU + dropout(0.5)
+- **`mnist_model_cnn`** — 3 conv layers (1→32→64→64, 3×3 kernels) + FC 3136→128→10, stride-2 downsampling
+- **`mnist_model_cnn_pool`** — 3 conv layers + avg_pool2d downsampling, comparable architecture
 
 ## KV-Cache
 
@@ -101,6 +102,9 @@ Special tokens occupy IDs 257–260.
 
 - BOS=257, EOS=258, PAD=259, UNK=260
 - Optional special-token strings (`<|im_start|>`, `<|im_end|>`, `<|pad|>`)
+- `tokenizer_default()` — basic byte tokenizer
+- `tokenizer_with_chat_template()` — preset with chat template special strings
+- `tokenizer_with_specials()` — custom special string overrides
 - Encode prepends BOS, appends EOS; decode strips special tokens
 - Binary dataset format: magic header + flat int32 token IDs
 - `tokenizer_text_to_tensor` / `tokenizer_tensor_to_text` for direct tensor I/O
@@ -132,14 +136,15 @@ Special tokens occupy IDs 257–260.
 ### Decoder LM (`main_lm.c`)
 
 - Loads binary tokenized dataset (`data/promessi.bin`) with header + int32 IDs
-- Decoder-only transformer: d_model=128, 4 layers, 4 heads, SwiGLU FFN
-- RoPE position encoding, AdamW, LR scheduler (warmup + cosine)
+- Decoder-only transformer: d_model=256, 2 layers, 4 heads (d_k=64), SwiGLU FFN (int=512)
+- RoPE position encoding, GPT-2 style weight init, AdamW, LR scheduler (warmup + cosine)
+- High-level `decoder_lm_train_step` (forward + shift + loss + backward + grad clip + update)
 - Teacher-forced next-token prediction with cross-entropy
 - Periodic autoregressive generation samples during training
 
 ## Optimizations
 
-- NEON SIMD for ReLU fwd/bwd, softmax, cross-entropy, fast `expf` polynomial
+- NEON SIMD for ReLU fwd/bwd, sigmoid, SiLU, SwiGLU fwd/bwd, avg_pool2d fwd/bwd, softmax, cross-entropy, fast `expf` polynomial
 - OpenMP parallel for im2col/col2im, layer norm, reductions
 - (K,M) column layout in conv — sequential im2col writes, `CblasTrans` GEMM
 - Forward col buffer reused in conv backward (saves 1 im2col per step)
@@ -152,12 +157,13 @@ Special tokens occupy IDs 257–260.
 ## Project Structure
 
 ```
-include/         — Public API headers (tensor.h, ops.h, nn.h, conv.h,
-                   optim.h, norm.h, pool.h, attention.h, multihead.h,
-                   rope.h, tokenizer.h, transformer.h, mnist.h, dnn.h)
+include/         — Public API headers (tensor.h, ops.h, nn.h, autograd.h,
+                   context.h, conv.h, optim.h, norm.h, pool.h,
+                   attention.h, multihead.h, rope.h, tokenizer.h,
+                   transformer.h, mnist.h, dnn.h)
 src/             — Implementation (.c + internal headers)
 test/            — C unit tests + Python reference scripts
-bench/           — Benchmarks (conv2d, matmul, ops, multihead, coord, batched_matmul)
+bench/           — Benchmarks (conv2d, matmul, ops, multihead, transformer, coord, batched_matmul)
 docs/            — Design spec, optimization audit, coding rules
 main.c           — Entry point: CNN training on MNIST
 main_lm.c        — Entry point: decoder-only LM training
@@ -172,7 +178,7 @@ make            # builds libdnn.a + test binaries
 make run        # builds + runs MNIST CNN training
 make run_lm     # builds + runs decoder LM training
 make test       # runs all unit tests
-make bench_all  # conv2d/matmul/ops/multihead benchmarks
+make bench_all  # conv2d/matmul/ops/multihead/transformer benchmarks
 make main       # build + run MNIST
 make main_lm    # build + run decoder LM
 ```

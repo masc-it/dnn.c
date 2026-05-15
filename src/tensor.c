@@ -339,6 +339,11 @@ void tensor_retain_grad(tensor *t) {
     }
 }
 
+void tensor_zero_grad(tensor *t) {
+    if (t->grad)
+        memset(t->grad, 0, (size_t)tensor_numel(t) * sizeof(float));
+}
+
 float *tensor_grad(const tensor *t) {
     return t->grad;
 }

@@ -6,6 +6,7 @@
 #include "tensor.h"
 #include "ops.h"
 #include "autograd.h"
+#include "module.h"
 #include "nn.h"
 #include "norm.h"
 #include "conv.h"
