@@ -1,4 +1,5 @@
 #include "dnn.h"
+#include "context.h"
 #include "transformer.h"
 #include "optim.h"
 #include "pool.h"
@@ -7,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+
+static dnn_ctx ctx;
 
 /* ── Decoder LM benchmark at realistic scale ──
  *
@@ -20,7 +23,7 @@
 static tensor *make_int_tensor(int ndim, const int *shape) {
     int n = 1;
     for (int i = 0; i < ndim; i++) n *= shape[i];
-    tensor *t = tensor_zeros_data(ndim, shape);
+    tensor *t = tensor_zeros_data(ctx.data, ndim, shape);
     for (int i = 0; i < n; i++) ((int*)t->data)[i] = rand() % 100;
     return t;
 }
@@ -52,16 +55,13 @@ int main(void) {
     size_t scratch_pool_sz = 512 * 1024 * 1024;  /* activations for B=2, N=128 */
     size_t data_pool_sz = 16 * 1024 * 1024;
 
-    mem_pool params  = mem_pool_create(param_pool_sz);
-    mem_pool scratch = mem_pool_create(scratch_pool_sz);
-    mem_pool data    = mem_pool_create(data_pool_sz);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 8*1024*1024, 64*1024*1024, 8*1024*1024);
 
     srand(42);
     /* grad mode on by default */
 
     /* ── Create model ── */
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     printf("  Parameters: %.1fM\n", (double)decoder_lm_num_parameters(lm) / 1e6);
@@ -96,9 +96,9 @@ int main(void) {
         all_params[n_params++] = b->ffn->down_proj->bias;
     }
 
-    tensor **pz = mem_params_alloc(n_params * sizeof(tensor*), NULL);
+    tensor **pz = _mem_pool_alloc(ctx.params, n_params * sizeof(tensor*), NULL);
     memcpy(pz, all_params, n_params * sizeof(tensor*));
-    adamw_opt *opt = adamw_create(pz, n_params, 0.001f, 0.9f, 0.999f, 1e-8f, 0.01f);
+    adamw_opt *opt = adamw_create(ctx.params, pz, n_params, 0.001f, 0.9f, 0.999f, 1e-8f, 0.01f);
 
     /* ── Input data ── */
     tensor *input_ids = make_int_tensor(2, (int[]){B, N});
@@ -107,10 +107,10 @@ int main(void) {
 
     /* ── Warmup ── */
     for (int i = 0; i < warmup; i++) {
-        tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 1.0f, NULL);
+        tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 1.0f, NULL);
         (void)loss;
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
         input_ids = make_int_tensor(2, (int[]){B, N});
     }
 
@@ -121,7 +121,7 @@ int main(void) {
     for (int i = 0; i < iters; i++) {
         clock_t start = clock();
 
-        tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 1.0f, NULL);
+        tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 1.0f, NULL);
 
         clock_t end = clock();
         double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
@@ -133,8 +133,8 @@ int main(void) {
         float loss_val = ((float*)loss->data)[0];
         printf("  iter %2d: %7.1f ms  (loss %.4f)\n", i + 1, elapsed * 1000, loss_val);
 
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
         input_ids = make_int_tensor(2, (int[]){B, N});
     }
 
@@ -151,10 +151,8 @@ int main(void) {
     printf("  (B=%d, N=%d, %d tokens/step)\n", B, N, B * N);
     printf("\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
-
     printf("Benchmark complete.\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

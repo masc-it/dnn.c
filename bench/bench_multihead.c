@@ -11,6 +11,7 @@
  */
 
 #include "dnn.h"
+#include "context.h"
 #include "pool.h"
 #include "pool_int.h"
 #include "tensor_int.h"
@@ -19,6 +20,8 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+
+static dnn_ctx ctx;
 
 #ifdef _OPENMP
 #  include <omp.h>
@@ -201,6 +204,8 @@ static int check_eq(const float *a, const float *b, int n, const char *label) {
     for (int i = 0; i < n; i++) {
         if (a[i] != b[i]) {
             printf("  MISMATCH %s[%d]: %.8f != %.8f\n", label, i, a[i], b[i]);
+            dnn_ctx_destroy(&ctx);
+
             return 0;
         }
     }
@@ -362,5 +367,7 @@ int main(void) {
     bench_config("Max (large batch LLM)",        128, 8, 1024, 128);
 
     printf("# done.\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

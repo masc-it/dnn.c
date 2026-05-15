@@ -1,14 +1,17 @@
 #include "dnn.h"
+#include "context.h"
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>
 #include <math.h>
 
+static dnn_ctx ctx;
+
 #define EPS 1e-5f
 
 /* helper: create scalar leaf with given value */
 static tensor *scalar(float v, int rg) {
-    tensor *t = tensor_zeros(1, (int[]){1}, rg);
+    tensor *t = tensor_zeros(ctx.params, 1, (int[]){1}, rg);
     float *p = tensor_data_ptr(t);
     p[0] = v;
     return t;
@@ -40,8 +43,8 @@ static void test_add_simple(void) {
     printf("  test_add_simple... ");
     tensor *a = scalar(1.0f, 1);
     tensor *b = scalar(2.0f, 1);
-    tensor *c = tensor_add(a, b);
-    dnn_backward(c);
+    tensor *c = tensor_add(ctx.scratch, a, b);
+    dnn_backward(ctx.scratch, c);
     check_grad(a, 1.0f, "da");
     check_grad(b, 1.0f, "db");
     printf("OK\n");
@@ -52,9 +55,9 @@ static void test_add_chain(void) {
     tensor *a = scalar(1.0f, 1);
     tensor *b = scalar(2.0f, 1);
     tensor *c = scalar(3.0f, 1);
-    tensor *d = tensor_add(a, b);
-    tensor *e = tensor_add(d, c);
-    dnn_backward(e);
+    tensor *d = tensor_add(ctx.scratch, a, b);
+    tensor *e = tensor_add(ctx.scratch, d, c);
+    dnn_backward(ctx.scratch, e);
     check_grad(a, 1.0f, "da");
     check_grad(b, 1.0f, "db");
     check_grad(c, 1.0f, "dc");
@@ -64,8 +67,8 @@ static void test_add_chain(void) {
 static void test_add_multi_use(void) {
     printf("  test_add_multi_use... ");
     tensor *a = scalar(5.0f, 1);
-    tensor *c = tensor_add(a, a);     /* a + a = 2a */
-    dnn_backward(c);
+    tensor *c = tensor_add(ctx.scratch, a, a);     /* a + a = 2a */
+    dnn_backward(ctx.scratch, c);
     check_grad(a, 2.0f, "da");        /* d(2a)/da = 2 */
     printf("OK\n");
 }
@@ -83,10 +86,10 @@ static void test_add_diamond(void) {
     tensor *a = scalar(1.0f, 1);
     tensor *b = scalar(2.0f, 1);
     tensor *c = scalar(3.0f, 1);
-    tensor *d = tensor_add(a, b);
-    tensor *e = tensor_add(a, c);
-    tensor *loss = tensor_add(d, e);
-    dnn_backward(loss);
+    tensor *d = tensor_add(ctx.scratch, a, b);
+    tensor *e = tensor_add(ctx.scratch, a, c);
+    tensor *loss = tensor_add(ctx.scratch, d, e);
+    dnn_backward(ctx.scratch, loss);
     check_grad(a, 2.0f, "da");
     check_grad(b, 1.0f, "db");
     check_grad(c, 1.0f, "dc");
@@ -96,15 +99,15 @@ static void test_add_diamond(void) {
 static void test_add_broadcast(void) {
     printf("  test_add_broadcast... ");
     /* a shape [3], b shape [1] → broadcast to [3] */
-    tensor *a = tensor_zeros(1, (int[]){3}, 1);
-    tensor *b = tensor_zeros(1, (int[]){1}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
+    tensor *b = tensor_zeros(ctx.params, 1, (int[]){1}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0] = 1.0f; ap[1] = 2.0f; ap[2] = 3.0f;
     float *bp = tensor_data_ptr(b);
     bp[0] = 10.0f;
 
-    tensor *c = tensor_add(a, b);
-    dnn_backward(c);
+    tensor *c = tensor_add(ctx.scratch, a, b);
+    dnn_backward(ctx.scratch, c);
 
     /* a: 3 outputs each receiving 1 grad = [1,1,1] */
     float exp_a[] = {1.0f, 1.0f, 1.0f};
@@ -119,9 +122,9 @@ static void test_no_grad(void) {
     tensor *a = scalar(10.0f, 1);
     tensor *b = scalar(20.0f, 1);
 
-    dnn_grad_ctx ctx = dnn_no_grad_enter();
-    tensor *c = tensor_add(a, b);
-    dnn_no_grad_exit(ctx);
+    dnn_grad_ctx gc = dnn_no_grad_enter();
+    tensor *c = tensor_add(ctx.scratch, a, b);
+    dnn_no_grad_exit(gc);
 
     /* inside no_grad: c should NOT have grad_fn */
     assert(c->grad_fn == NULL && "c has grad_fn despite no_grad");
@@ -130,11 +133,11 @@ static void test_no_grad(void) {
 
 static void test_add_self_via_grad_fn(void) {
     printf("  test_add_self_via_grad_fn... ");
-    /* Use c = tensor_add(a, a) but interpose a non-
+    /* Use c = tensor_add(ctx.scratch, a, a) but interpose a non-
      * trivial op so a == b check in add_backward fires */
     tensor *a = scalar(7.0f, 1);
-    tensor *c = tensor_add(a, a);
-    dnn_backward(c);
+    tensor *c = tensor_add(ctx.scratch, a, a);
+    dnn_backward(ctx.scratch, c);
     check_grad(a, 2.0f, "da");
     printf("OK\n");
 }
@@ -146,8 +149,8 @@ static void test_mul_simple(void) {
     /* c = a * b, d = a + c (to get non-unit gout) */
     tensor *a = scalar(3.0f, 1);
     tensor *b = scalar(4.0f, 1);
-    tensor *c = tensor_mul(a, b);  /* 12 */
-    dnn_backward(c);
+    tensor *c = tensor_mul(ctx.scratch, a, b);  /* 12 */
+    dnn_backward(ctx.scratch, c);
     check_grad(a, 4.0f, "da");    /* d(a*b)/da = b */
     check_grad(b, 3.0f, "db");    /* d(a*b)/db = a */
     printf("OK\n");
@@ -159,8 +162,8 @@ static void test_mul_chain(void) {
     tensor *a = scalar(2.0f, 1);
     tensor *b = scalar(3.0f, 1);
     tensor *c = scalar(4.0f, 1);
-    tensor *d = tensor_mul(tensor_mul(a, b), c);  /* 24 */
-    dnn_backward(d);
+    tensor *d = tensor_mul(ctx.scratch, tensor_mul(ctx.scratch, a, b), c);  /* 24 */
+    dnn_backward(ctx.scratch, d);
     check_grad(a, 12.0f, "da");   /* d(a*b*c)/da = b*c */
     check_grad(b, 8.0f,  "db");   /* d(a*b*c)/db = a*c */
     check_grad(c, 6.0f,  "dc");   /* d(a*b*c)/dc = a*b */
@@ -170,8 +173,8 @@ static void test_mul_chain(void) {
 static void test_mul_self(void) {
     printf("  test_mul_self... ");
     tensor *a = scalar(5.0f, 1);
-    tensor *c = tensor_mul(a, a);  /* a*a = 25 */
-    dnn_backward(c);
+    tensor *c = tensor_mul(ctx.scratch, a, a);  /* a*a = 25 */
+    dnn_backward(ctx.scratch, c);
     check_grad(a, 10.0f, "da");   /* d(a*a)/da = 2*a = 10 */
     printf("OK\n");
 }
@@ -179,15 +182,15 @@ static void test_mul_self(void) {
 static void test_mul_broadcast(void) {
     printf("  test_mul_broadcast... ");
     /* a shape [3], b shape [1] → broadcast to [3] */
-    tensor *a = tensor_zeros(1, (int[]){3}, 1);
-    tensor *b = tensor_zeros(1, (int[]){1}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
+    tensor *b = tensor_zeros(ctx.params, 1, (int[]){1}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0] = 2.0f; ap[1] = 3.0f; ap[2] = 4.0f;
     float *bp = tensor_data_ptr(b);
     bp[0] = 10.0f;
 
-    tensor *c = tensor_mul(a, b);
-    dnn_backward(c);
+    tensor *c = tensor_mul(ctx.scratch, a, b);
+    dnn_backward(ctx.scratch, c);
 
     /* da = b * gout = [10, 10, 10] */
     float exp_a[] = {10.0f, 10.0f, 10.0f};
@@ -203,9 +206,9 @@ static void test_mul_with_add(void) {
     tensor *a = scalar(2.0f, 1);
     tensor *b = scalar(3.0f, 1);
     tensor *c = scalar(4.0f, 1);
-    tensor *ab = tensor_mul(a, b);   /* 6 */
-    tensor *out = tensor_add(ab, c); /* 10 */
-    dnn_backward(out);
+    tensor *ab = tensor_mul(ctx.scratch, a, b);   /* 6 */
+    tensor *out = tensor_add(ctx.scratch, ab, c); /* 10 */
+    dnn_backward(ctx.scratch, out);
     check_grad(a, 3.0f, "da");      /* d(out)/da = b */
     check_grad(b, 2.0f, "db");      /* d(out)/db = a */
     check_grad(c, 1.0f, "dc");      /* d(out)/dc = 1 */
@@ -218,8 +221,8 @@ static void test_pow_simple(void) {
     printf("  test_pow_simple... ");
     /* c = a^2 */
     tensor *a = scalar(3.0f, 1);
-    tensor *c = tensor_pow(a, 2.0f);  /* 9 */
-    dnn_backward(c);
+    tensor *c = tensor_pow(ctx.scratch, a, 2.0f);  /* 9 */
+    dnn_backward(ctx.scratch, c);
     check_grad(a, 6.0f, "da");       /* d(a^2)/da = 2*a = 6 */
     printf("OK\n");
 }
@@ -228,8 +231,8 @@ static void test_pow_cube(void) {
     printf("  test_pow_cube... ");
     /* c = a^3 */
     tensor *a = scalar(5.0f, 1);
-    tensor *c = tensor_pow(a, 3.0f);  /* 125 */
-    dnn_backward(c);
+    tensor *c = tensor_pow(ctx.scratch, a, 3.0f);  /* 125 */
+    dnn_backward(ctx.scratch, c);
     check_grad(a, 75.0f, "da");      /* d(a^3)/da = 3*a^2 = 75 */
     printf("OK\n");
 }
@@ -238,8 +241,8 @@ static void test_pow_exp1(void) {
     printf("  test_pow_exp1... ");
     /* c = a^1 — derivative is 1 */
     tensor *a = scalar(42.0f, 1);
-    tensor *c = tensor_pow(a, 1.0f);
-    dnn_backward(c);
+    tensor *c = tensor_pow(ctx.scratch, a, 1.0f);
+    dnn_backward(ctx.scratch, c);
     check_grad(a, 1.0f, "da");
     printf("OK\n");
 }
@@ -248,8 +251,8 @@ static void test_pow_neg(void) {
     printf("  test_pow_neg... ");
     /* c = a^(-1) = 1/a */
     tensor *a = scalar(4.0f, 1);
-    tensor *c = tensor_pow(a, -1.0f);  /* 0.25 */
-    dnn_backward(c);
+    tensor *c = tensor_pow(ctx.scratch, a, -1.0f);  /* 0.25 */
+    dnn_backward(ctx.scratch, c);
     check_grad(a, -0.0625f, "da");    /* d(a^-1)/da = -1*a^-2 = -1/16 = -0.0625 */
     printf("OK\n");
 }
@@ -257,12 +260,12 @@ static void test_pow_neg(void) {
 static void test_pow_broadcast(void) {
     printf("  test_pow_broadcast... ");
     /* a shape [3], c = a^2 */
-    tensor *a = tensor_zeros(1, (int[]){3}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0] = 1.0f; ap[1] = 2.0f; ap[2] = 3.0f;
 
-    tensor *c = tensor_pow(a, 2.0f);
-    dnn_backward(c);
+    tensor *c = tensor_pow(ctx.scratch, a, 2.0f);
+    dnn_backward(ctx.scratch, c);
 
     /* da = 2*a = [2, 4, 6] */
     float exp_a[] = {2.0f, 4.0f, 6.0f};
@@ -275,20 +278,20 @@ static void test_pow_broadcast(void) {
 static void test_neg_simple(void) {
     printf("  test_neg_simple... ");
     tensor *a = scalar(5.0f, 1);
-    tensor *c = tensor_neg(a);  /* -5 */
-    dnn_backward(c);
+    tensor *c = tensor_neg(ctx.scratch, a);  /* -5 */
+    dnn_backward(ctx.scratch, c);
     check_grad(a, -1.0f, "da");  /* d(-a)/da = -1 */
     printf("OK\n");
 }
 
 static void test_neg_broadcast(void) {
     printf("  test_neg_broadcast... ");
-    tensor *a = tensor_zeros(1, (int[]){3}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0] = 1.0f; ap[1] = -2.0f; ap[2] = 3.0f;
 
-    tensor *c = tensor_neg(a);
-    dnn_backward(c);
+    tensor *c = tensor_neg(ctx.scratch, a);
+    dnn_backward(ctx.scratch, c);
 
     float exp_a[] = {-1.0f, -1.0f, -1.0f};
     check_grad_ary(a, exp_a, 3, "da");
@@ -301,8 +304,8 @@ static void test_sub_simple(void) {
     printf("  test_sub_simple... ");
     tensor *a = scalar(7.0f, 1);
     tensor *b = scalar(3.0f, 1);
-    tensor *c = tensor_sub(a, b);  /* 4 */
-    dnn_backward(c);
+    tensor *c = tensor_sub(ctx.scratch, a, b);  /* 4 */
+    dnn_backward(ctx.scratch, c);
     check_grad(a, 1.0f, "da");   /* d(a-b)/da = 1 */
     check_grad(b, -1.0f, "db");  /* d(a-b)/db = -1 */
     printf("OK\n");
@@ -312,23 +315,23 @@ static void test_sub_self(void) {
     printf("  test_sub_self... ");
     /* a - a = 0, gradient is 0 */
     tensor *a = scalar(10.0f, 1);
-    tensor *c = tensor_sub(a, a);
-    dnn_backward(c);
+    tensor *c = tensor_sub(ctx.scratch, a, a);
+    dnn_backward(ctx.scratch, c);
     check_grad(a, 0.0f, "da");
     printf("OK\n");
 }
 
 static void test_sub_broadcast(void) {
     printf("  test_sub_broadcast... ");
-    tensor *a = tensor_zeros(1, (int[]){3}, 1);
-    tensor *b = tensor_zeros(1, (int[]){1}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
+    tensor *b = tensor_zeros(ctx.params, 1, (int[]){1}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0] = 10.0f; ap[1] = 20.0f; ap[2] = 30.0f;
     float *bp = tensor_data_ptr(b);
     bp[0] = 5.0f;
 
-    tensor *c = tensor_sub(a, b);
-    dnn_backward(c);
+    tensor *c = tensor_sub(ctx.scratch, a, b);
+    dnn_backward(ctx.scratch, c);
 
     /* da = gout = [1,1,1] */
     float exp_a[] = {1.0f, 1.0f, 1.0f};
@@ -344,8 +347,8 @@ static void test_div_simple(void) {
     printf("  test_div_simple... ");
     tensor *a = scalar(10.0f, 1);
     tensor *b = scalar(2.0f, 1);
-    tensor *c = tensor_div(a, b);  /* 5 */
-    dnn_backward(c);
+    tensor *c = tensor_div(ctx.scratch, a, b);  /* 5 */
+    dnn_backward(ctx.scratch, c);
     check_grad(a, 0.5f, "da");     /* d(a/b)/da = 1/b = 0.5 */
     check_grad(b, -2.5f, "db");   /* d(a/b)/db = -a/b^2 = -10/4 = -2.5 */
     printf("OK\n");
@@ -355,23 +358,23 @@ static void test_div_self(void) {
     printf("  test_div_self... ");
     /* a/a = 1, gradient is 0 */
     tensor *a = scalar(7.0f, 1);
-    tensor *c = tensor_div(a, a);
-    dnn_backward(c);
+    tensor *c = tensor_div(ctx.scratch, a, a);
+    dnn_backward(ctx.scratch, c);
     check_grad(a, 0.0f, "da");
     printf("OK\n");
 }
 
 static void test_div_broadcast(void) {
     printf("  test_div_broadcast... ");
-    tensor *a = tensor_zeros(1, (int[]){3}, 1);
-    tensor *b = tensor_zeros(1, (int[]){1}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
+    tensor *b = tensor_zeros(ctx.params, 1, (int[]){1}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0] = 6.0f; ap[1] = 9.0f; ap[2] = 12.0f;
     float *bp = tensor_data_ptr(b);
     bp[0] = 3.0f;
 
-    tensor *c = tensor_div(a, b);
-    dnn_backward(c);
+    tensor *c = tensor_div(ctx.scratch, a, b);
+    dnn_backward(ctx.scratch, c);
 
     /* da = 1/b = [1/3, 1/3, 1/3] */
     float exp_a[] = {1.0f/3.0f, 1.0f/3.0f, 1.0f/3.0f};
@@ -386,8 +389,8 @@ static void test_div_neg_b(void) {
     /* a / (-b) to check division by negative */
     tensor *a = scalar(8.0f, 1);
     tensor *b = scalar(-2.0f, 1);
-    tensor *c = tensor_div(a, b);  /* -4 */
-    dnn_backward(c);
+    tensor *c = tensor_div(ctx.scratch, a, b);  /* -4 */
+    dnn_backward(ctx.scratch, c);
     check_grad(a, -0.5f, "da");    /* 1/b = 1/(-2) = -0.5 */
     check_grad(b, -2.0f, "db");    /* -a/b^2 = -8/4 = -2 */
     printf("OK\n");
@@ -398,15 +401,15 @@ static void test_div_neg_b(void) {
 static void test_sum_simple(void) {
     printf("  test_sum_simple... ");
     /* a shape [3], sum over dim=0 → scalar (shape [1]) */
-    tensor *a = tensor_zeros(1, (int[]){3}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0] = 1.0f; ap[1] = 2.0f; ap[2] = 3.0f;
 
-    tensor *c = tensor_sum(a, 0);
+    tensor *c = tensor_sum(ctx.scratch, a, 0);
     float *cp = tensor_data_ptr(c);
     assert(fabsf(cp[0] - 6.0f) < EPS && "sum forward wrong");
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
 
     /* da = gout broadcast = [1, 1, 1] */
     float exp_a[] = {1.0f, 1.0f, 1.0f};
@@ -417,17 +420,17 @@ static void test_sum_simple(void) {
 static void test_sum_2d_dim0(void) {
     printf("  test_sum_2d_dim0... ");
     /* a shape [2,3], sum over dim=0 → shape [1,3] */
-    tensor *a = tensor_zeros(2, (int[]){2, 3}, 1);
+    tensor *a = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 1);
     float *ap = tensor_data_ptr(a);
     for (int i = 0; i < 6; i++) ap[i] = (float)(i + 1);  /* [[1,2,3],[4,5,6]] */
 
-    tensor *c = tensor_sum(a, 0);
+    tensor *c = tensor_sum(ctx.scratch, a, 0);
     float *cp = tensor_data_ptr(c);
     assert(fabsf(cp[0] - 5.0f) < EPS);  /* 1+4 */
     assert(fabsf(cp[1] - 7.0f) < EPS);  /* 2+5 */
     assert(fabsf(cp[2] - 9.0f) < EPS);  /* 3+6 */
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
 
     /* dnn_backward sets grad of c to all-1s → gout = [1,1,1] broadcast to [2,3] */
     float exp_a[] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
@@ -438,16 +441,16 @@ static void test_sum_2d_dim0(void) {
 static void test_sum_2d_dim1(void) {
     printf("  test_sum_2d_dim1... ");
     /* a shape [2,3], sum over dim=1 → shape [2,1] */
-    tensor *a = tensor_zeros(2, (int[]){2, 3}, 1);
+    tensor *a = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 1);
     float *ap = tensor_data_ptr(a);
     for (int i = 0; i < 6; i++) ap[i] = (float)(i + 1);
 
-    tensor *c = tensor_sum(a, 1);
+    tensor *c = tensor_sum(ctx.scratch, a, 1);
     float *cp = tensor_data_ptr(c);
     assert(fabsf(cp[0] - 6.0f) < EPS);   /* 1+2+3 */
     assert(fabsf(cp[1] - 15.0f) < EPS);  /* 4+5+6 */
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
 
     /* gout = [1,1] (shape [2,1]), broadcast along dim 1 → all 1s */
     float exp_a[] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
@@ -458,14 +461,14 @@ static void test_sum_2d_dim1(void) {
 static void test_sum_chain(void) {
     printf("  test_sum_chain... ");
     /* sum then mul — gradient flows through both */
-    tensor *a = tensor_zeros(1, (int[]){3}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0] = 2.0f; ap[1] = 3.0f; ap[2] = 4.0f;
     tensor *b = scalar(10.0f, 1);
 
-    tensor *s = tensor_sum(a, 0);   /* 9, shape [1] */
-    tensor *c = tensor_mul(s, b);   /* 90 */
-    dnn_backward(c);
+    tensor *s = tensor_sum(ctx.scratch, a, 0);   /* 9, shape [1] */
+    tensor *c = tensor_mul(ctx.scratch, s, b);   /* 90 */
+    dnn_backward(ctx.scratch, c);
 
     /* da = b * ds/da = 10 * [1,1,1] = [10,10,10] */
     float exp_a[] = {10.0f, 10.0f, 10.0f};
@@ -478,15 +481,15 @@ static void test_sum_chain(void) {
 
 static void test_mean_simple(void) {
     printf("  test_mean_simple... ");
-    tensor *a = tensor_zeros(1, (int[]){3}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0] = 2.0f; ap[1] = 4.0f; ap[2] = 6.0f;
 
-    tensor *c = tensor_mean(a, 0);   /* shape [1], value 4 */
+    tensor *c = tensor_mean(ctx.scratch, a, 0);   /* shape [1], value 4 */
     float *cp = tensor_data_ptr(c);
     assert(fabsf(cp[0] - 4.0f) < EPS && "mean forward wrong");
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
 
     /* da = gout * 1/n = 1/3 for each element */
     float exp_a[] = {1.0f/3.0f, 1.0f/3.0f, 1.0f/3.0f};
@@ -497,18 +500,18 @@ static void test_mean_simple(void) {
 static void test_mean_2d_dim1(void) {
     printf("  test_mean_2d_dim1... ");
     /* a shape [2,3], mean over dim=1 → shape [2,1] */
-    tensor *a = tensor_zeros(2, (int[]){2, 3}, 1);
+    tensor *a = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0]=1; ap[1]=2; ap[2]=6;
     ap[3]=2; ap[4]=4; ap[5]=6;
     /* row 0 mean = 3, row 1 mean = 4 */
 
-    tensor *c = tensor_mean(a, 1);
+    tensor *c = tensor_mean(ctx.scratch, a, 1);
     float *cp = tensor_data_ptr(c);
     assert(fabsf(cp[0] - 3.0f) < EPS);
     assert(fabsf(cp[1] - 4.0f) < EPS);
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
 
     /* da = gout * 1/3 broadcast along dim 1 */
     float exp_a[] = {1.0f/3.0f, 1.0f/3.0f, 1.0f/3.0f, 1.0f/3.0f, 1.0f/3.0f, 1.0f/3.0f};
@@ -521,8 +524,8 @@ static void test_mean_2d_dim1(void) {
 static void test_relu_positive(void) {
     printf("  test_relu_positive... ");
     tensor *a = scalar(5.0f, 1);
-    tensor *c = tensor_relu(a);  /* 5 */
-    dnn_backward(c);
+    tensor *c = tensor_relu(ctx.scratch, a);  /* 5 */
+    dnn_backward(ctx.scratch, c);
     check_grad(a, 1.0f, "da");  /* drelu(5)/da = 1 */
     printf("OK\n");
 }
@@ -530,26 +533,26 @@ static void test_relu_positive(void) {
 static void test_relu_negative(void) {
     printf("  test_relu_negative... ");
     tensor *a = scalar(-3.0f, 1);
-    tensor *c = tensor_relu(a);  /* 0 */
-    dnn_backward(c);
+    tensor *c = tensor_relu(ctx.scratch, a);  /* 0 */
+    dnn_backward(ctx.scratch, c);
     check_grad(a, 0.0f, "da");  /* drelu(-3)/da = 0 */
     printf("OK\n");
 }
 
 static void test_relu_mixed(void) {
     printf("  test_relu_mixed... ");
-    tensor *a = tensor_zeros(1, (int[]){4}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){4}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0] = -1.0f; ap[1] = 0.0f; ap[2] = 2.0f; ap[3] = -5.0f;
 
-    tensor *c = tensor_relu(a);
+    tensor *c = tensor_relu(ctx.scratch, a);
     float *cp = tensor_data_ptr(c);
     assert(fabsf(cp[0] - 0.0f) < EPS);
     assert(fabsf(cp[1] - 0.0f) < EPS);
     assert(fabsf(cp[2] - 2.0f) < EPS);
     assert(fabsf(cp[3] - 0.0f) < EPS);
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
 
     /* grad = 1 for positive inputs, 0 otherwise */
     float exp_a[] = {0.0f, 0.0f, 1.0f, 0.0f};
@@ -562,9 +565,9 @@ static void test_relu_chain(void) {
     /* c = relu(a) + b, grad flows through both paths */
     tensor *a = scalar(-2.0f, 1);
     tensor *b = scalar(5.0f, 1);
-    tensor *ra = tensor_relu(a);  /* 0 */
-    tensor *c = tensor_add(ra, b);  /* 5 */
-    dnn_backward(c);
+    tensor *ra = tensor_relu(ctx.scratch, a);  /* 0 */
+    tensor *c = tensor_add(ctx.scratch, ra, b);  /* 5 */
+    dnn_backward(ctx.scratch, c);
     check_grad(a, 0.0f, "da");  /* relu(-2)=0, derivative 0 */
     check_grad(b, 1.0f, "db");
     printf("OK\n");
@@ -577,10 +580,10 @@ static void test_relu_chain(void) {
 static void test_sigmoid_simple(void) {
     printf("  test_sigmoid_simple... ");
     tensor *a = scalar(0.0f, 1);
-    tensor *c = tensor_sigmoid(a);
+    tensor *c = tensor_sigmoid(ctx.scratch, a);
     float *cp = tensor_data_ptr(c);
     assert(fabsf(cp[0] - 0.5f) < EPS && "sigmoid(0) = 0.5");
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
     /* dσ/dx at 0 = 0.5 * 0.5 = 0.25 */
     check_grad(a, 0.25f, "da");
     printf("OK\n");
@@ -589,11 +592,11 @@ static void test_sigmoid_simple(void) {
 static void test_sigmoid_positive(void) {
     printf("  test_sigmoid_positive... ");
     tensor *a = scalar(2.0f, 1);
-    tensor *c = tensor_sigmoid(a);
+    tensor *c = tensor_sigmoid(ctx.scratch, a);
     float *cp = tensor_data_ptr(c);
     float sig_ref = 1.0f / (1.0f + expf(-2.0f));
     assert(fabsf(cp[0] - sig_ref) < EPS && "sigmoid(2)");
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
     float expected_grad = sig_ref * (1.0f - sig_ref);
     check_grad(a, expected_grad, "da");
     printf("OK\n");
@@ -602,11 +605,11 @@ static void test_sigmoid_positive(void) {
 static void test_sigmoid_negative(void) {
     printf("  test_sigmoid_negative... ");
     tensor *a = scalar(-2.0f, 1);
-    tensor *c = tensor_sigmoid(a);
+    tensor *c = tensor_sigmoid(ctx.scratch, a);
     float *cp = tensor_data_ptr(c);
     float sig_ref = 1.0f / (1.0f + expf(2.0f));
     assert(fabsf(cp[0] - sig_ref) < EPS && "sigmoid(-2)");
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
     float expected_grad = sig_ref * (1.0f - sig_ref);
     check_grad(a, expected_grad, "da");
     printf("OK\n");
@@ -615,11 +618,11 @@ static void test_sigmoid_negative(void) {
 static void test_sigmoid_array(void) {
     printf("  test_sigmoid_array... ");
     float vals[] = {-3.0f, -1.0f, 0.0f, 2.0f, 4.0f};
-    tensor *a = tensor_zeros(1, (int[]){5}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){5}, 1);
     float *ad = tensor_data_ptr(a);
     for (int i = 0; i < 5; i++) ad[i] = vals[i];
 
-    tensor *c = tensor_sigmoid(a);
+    tensor *c = tensor_sigmoid(ctx.scratch, a);
     float *cd = tensor_data_ptr(c);
 
     /* check forward */
@@ -628,7 +631,7 @@ static void test_sigmoid_array(void) {
         assert(fabsf(cd[i] - expected) < EPS && "sigmoid array forward");
     }
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
     float *ag = tensor_grad(a);
     assert(ag && "sigmoid array grad not NULL");
 
@@ -646,9 +649,9 @@ static void test_sigmoid_chain(void) {
     /* c = sigmoid(a) + a
      * dc/da = σ(a)*(1-σ(a)) + 1 */
     tensor *a = scalar(1.0f, 1);
-    tensor *s = tensor_sigmoid(a);
-    tensor *c = tensor_add(s, a);
-    dnn_backward(c);
+    tensor *s = tensor_sigmoid(ctx.scratch, a);
+    tensor *c = tensor_add(ctx.scratch, s, a);
+    dnn_backward(ctx.scratch, c);
     float sig = 1.0f / (1.0f + expf(-1.0f));
     float expected_grad = sig * (1.0f - sig) + 1.0f;
     check_grad(a, expected_grad, "da");
@@ -658,7 +661,7 @@ static void test_sigmoid_chain(void) {
 static void test_sigmoid_no_grad(void) {
     printf("  test_sigmoid_no_grad... ");
     tensor *a = scalar(3.0f, 0);
-    tensor *c = tensor_sigmoid(a);
+    tensor *c = tensor_sigmoid(ctx.scratch, a);
     float *cp = tensor_data_ptr(c);
     float sig_ref = 1.0f / (1.0f + expf(-3.0f));
     assert(fabsf(cp[0] - sig_ref) < EPS && "sigmoid no-grad forward");
@@ -677,11 +680,11 @@ static void test_silu_scalar(void) {
                     1.08810413f, -0.08810411f, 0.73996121f, 0.26003882f };
     int n = 9;
 
-    tensor *a = tensor_zeros(1, (int[]){n}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){n}, 1);
     float *ad = tensor_data_ptr(a);
     for (int i = 0; i < n; i++) ad[i] = xs[i];
 
-    tensor *c = tensor_silu(a);
+    tensor *c = tensor_silu(ctx.scratch, a);
     float *cd = tensor_data_ptr(c);
     for (int i = 0; i < n; i++) {
         if (fabsf(cd[i] - ef[i]) > EPS) {
@@ -690,7 +693,7 @@ static void test_silu_scalar(void) {
         }
     }
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
     float *ag = tensor_grad(a);
     assert(ag && "silu scalar grad not NULL");
     for (int i = 0; i < n; i++) {
@@ -709,11 +712,11 @@ static void test_silu_array(void) {
     float exp_grad[] = {-0.08810411f, 0.07232948f, 0.50000000f, 1.09078431f, 1.05266464f};
     int n = 5;
 
-    tensor *a = tensor_zeros(1, (int[]){n}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){n}, 1);
     float *ad = tensor_data_ptr(a);
     for (int i = 0; i < n; i++) ad[i] = vals[i];
 
-    tensor *c = tensor_silu(a);
+    tensor *c = tensor_silu(ctx.scratch, a);
     float *cd = tensor_data_ptr(c);
 
     for (int i = 0; i < n; i++) {
@@ -723,7 +726,7 @@ static void test_silu_array(void) {
         }
     }
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
     float *ag = tensor_grad(a);
     assert(ag && "silu array grad not NULL");
 
@@ -741,9 +744,9 @@ static void test_silu_chain(void) {
     /* c = silu(a) + a
      * dc/da = silu'(a) + 1 */
     tensor *a = scalar(1.0f, 1);
-    tensor *s = tensor_silu(a);
-    tensor *c = tensor_add(s, a);
-    dnn_backward(c);
+    tensor *s = tensor_silu(ctx.scratch, a);
+    tensor *c = tensor_add(ctx.scratch, s, a);
+    dnn_backward(ctx.scratch, c);
     float silu_grad = 0.92767054f;  /* silu'(1) from ref */
     check_grad(a, silu_grad + 1.0f, "da");
     printf("OK\n");
@@ -752,7 +755,7 @@ static void test_silu_chain(void) {
 static void test_silu_no_grad(void) {
     printf("  test_silu_no_grad... ");
     tensor *a = scalar(3.0f, 0);
-    tensor *c = tensor_silu(a);
+    tensor *c = tensor_silu(ctx.scratch, a);
     float *cp = tensor_data_ptr(c);
     float ref = 3.0f / (1.0f + expf(-3.0f));  /* silu(3) */
     assert(fabsf(cp[0] - ref) < EPS && "silu no-grad forward");
@@ -768,14 +771,14 @@ static void test_swiglu_simple(void) {
     /* out = SiLU(gate) * up, both scalars */
     tensor *gate = scalar(2.0f, 1);
     tensor *up   = scalar(3.0f, 1);
-    tensor *out  = tensor_swiglu(gate, up);
+    tensor *out  = tensor_swiglu(ctx.scratch, gate, up);
     /* SiLU(2) = 2/(1+exp(-2)) ≈ 2/1.135335 = 1.761594, * 3 ≈ 5.284782 */
     float ref_silu = 2.0f / (1.0f + expf(-2.0f));
     float ref_out = ref_silu * 3.0f;
     float *op = tensor_data_ptr(out);
     assert(fabsf(op[0] - ref_out) < EPS && "swiglu scalar forward");
 
-    dnn_backward(out);
+    dnn_backward(ctx.scratch, out);
     /* SiLU'(2) = sig*(1 + x - x*sig) where sig=sigmoid(2) */
     float sig = 1.0f / (1.0f + expf(-2.0f));
     float silu_deriv = sig * (1.0f + 2.0f - 2.0f * sig);
@@ -789,14 +792,14 @@ static void test_swiglu_simple(void) {
 static void test_swiglu_array(void) {
     printf("  test_swiglu_array... ");
     /* both [3], no broadcast */
-    tensor *gate = tensor_zeros(1, (int[]){3}, 1);
-    tensor *up   = tensor_zeros(1, (int[]){3}, 1);
+    tensor *gate = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
+    tensor *up   = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
     float *gp = tensor_data_ptr(gate);
     float *up_p = tensor_data_ptr(up);
     gp[0] = 0.0f; gp[1] = 1.0f; gp[2] = -2.0f;
     up_p[0] = 2.0f; up_p[1] = 3.0f; up_p[2] = 4.0f;
 
-    tensor *out = tensor_swiglu(gate, up);
+    tensor *out = tensor_swiglu(ctx.scratch, gate, up);
     float *od = tensor_data_ptr(out);
 
     /* reference values computed via python */
@@ -810,7 +813,7 @@ static void test_swiglu_array(void) {
     for (int i = 0; i < 3; i++)
         assert(fabsf(od[i] - expected[i]) < EPS && "swiglu array forward");
 
-    dnn_backward(out);
+    dnn_backward(ctx.scratch, out);
 
     float *ag = tensor_grad(gate);
     float *bg = tensor_grad(up);
@@ -832,15 +835,15 @@ static void test_swiglu_array(void) {
 static void test_swiglu_broadcast_gate(void) {
     printf("  test_swiglu_broadcast_gate... ");
     /* gate [1], up [3] → broadcast to [3] */
-    tensor *gate = tensor_zeros(1, (int[]){1}, 1);
-    tensor *up   = tensor_zeros(1, (int[]){3}, 1);
+    tensor *gate = tensor_zeros(ctx.params, 1, (int[]){1}, 1);
+    tensor *up   = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
     float *gp = tensor_data_ptr(gate);
     float *up_p = tensor_data_ptr(up);
     gp[0] = 2.0f;
     up_p[0] = 1.0f; up_p[1] = 2.0f; up_p[2] = 3.0f;
 
-    tensor *out = tensor_swiglu(gate, up);
-    dnn_backward(out);
+    tensor *out = tensor_swiglu(ctx.scratch, gate, up);
+    dnn_backward(ctx.scratch, out);
 
     float sig = 1.0f / (1.0f + expf(-2.0f));
     float silu = 2.0f * sig;
@@ -857,15 +860,15 @@ static void test_swiglu_broadcast_gate(void) {
 static void test_swiglu_broadcast_up(void) {
     printf("  test_swiglu_broadcast_up... ");
     /* gate [3], up [1] → broadcast to [3] */
-    tensor *gate = tensor_zeros(1, (int[]){3}, 1);
-    tensor *up   = tensor_zeros(1, (int[]){1}, 1);
+    tensor *gate = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
+    tensor *up   = tensor_zeros(ctx.params, 1, (int[]){1}, 1);
     float *gp = tensor_data_ptr(gate);
     float *up_p = tensor_data_ptr(up);
     gp[0] = 0.0f; gp[1] = 1.0f; gp[2] = -1.0f;
     up_p[0] = 5.0f;
 
-    tensor *out = tensor_swiglu(gate, up);
-    dnn_backward(out);
+    tensor *out = tensor_swiglu(ctx.scratch, gate, up);
+    dnn_backward(ctx.scratch, out);
 
     float *ag = tensor_grad(gate);
     float *bg = tensor_grad(up);
@@ -893,9 +896,9 @@ static void test_swiglu_no_grad(void) {
     printf("  test_swiglu_no_grad... ");
     tensor *gate = scalar(2.0f, 0);
     tensor *up   = scalar(3.0f, 0);
-    dnn_grad_ctx ctx = dnn_no_grad_enter();
-    tensor *out = tensor_swiglu(gate, up);
-    dnn_no_grad_exit(ctx);
+    dnn_grad_ctx gc = dnn_no_grad_enter();
+    tensor *out = tensor_swiglu(ctx.scratch, gate, up);
+    dnn_no_grad_exit(gc);
     float ref = (2.0f / (1.0f + expf(-2.0f))) * 3.0f;
     float *op = tensor_data_ptr(out);
     assert(fabsf(op[0] - ref) < EPS && "swiglu no-grad forward");
@@ -908,9 +911,9 @@ static void test_swiglu_chain(void) {
     /* out = swiglu(gate, up) + gate, verify gradient flows */
     tensor *gate = scalar(1.5f, 1);
     tensor *up   = scalar(2.0f, 1);
-    tensor *s = tensor_swiglu(gate, up);
-    tensor *out = tensor_add(s, gate);
-    dnn_backward(out);
+    tensor *s = tensor_swiglu(ctx.scratch, gate, up);
+    tensor *out = tensor_add(ctx.scratch, s, gate);
+    dnn_backward(ctx.scratch, out);
     /* d_out/d_gate = SiLU'(gate)*up + 1 */
     float sig = 1.0f / (1.0f + expf(-1.5f));
     float silu_deriv = sig * (1.0f + 1.5f - 1.5f * sig);
@@ -926,20 +929,20 @@ static void test_swiglu_chain(void) {
 static void test_matmul_simple(void) {
     printf("  test_matmul_simple... ");
     /* A (2,3) @ B (3,2) = C (2,2) */
-    tensor *a = tensor_zeros(2, (int[]){2, 3}, 1);
-    tensor *b = tensor_zeros(2, (int[]){3, 2}, 1);
+    tensor *a = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 1);
+    tensor *b = tensor_zeros(ctx.params, 2, (int[]){3, 2}, 1);
     float *ap = tensor_data_ptr(a);
     float *bp = tensor_data_ptr(b);
     ap[0]=1; ap[1]=2; ap[2]=3; ap[3]=4; ap[4]=5; ap[5]=6;
     bp[0]=7; bp[1]=8; bp[2]=9; bp[3]=10; bp[4]=11; bp[5]=12;
 
-    tensor *c = tensor_matmul(a, b);
+    tensor *c = tensor_matmul(ctx.scratch, a, b);
     float *cp = tensor_data_ptr(c);
     assert(fabsf(cp[0] - 58.0f) < EPS);
     assert(fabsf(cp[1] - 64.0f) < EPS);
     assert(fabsf(cp[3] - 154.0f) < EPS);  /* cp[3] = (1,1) = 154 */
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
 
     /* da = gd @ B^T = [[1,1],[1,1]] @ B^T */
     float exp_a[] = {15.0f, 19.0f, 23.0f, 15.0f, 19.0f, 23.0f};
@@ -953,17 +956,17 @@ static void test_matmul_simple(void) {
 static void test_matmul_linear(void) {
     printf("  test_matmul_linear... ");
     /* y = x @ W + b — one step of linear layer */
-    tensor *x = tensor_zeros(2, (int[]){2, 3}, 1);
-    tensor *W = tensor_zeros(2, (int[]){3, 2}, 1);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 1);
+    tensor *W = tensor_zeros(ctx.params, 2, (int[]){3, 2}, 1);
     tensor *b = scalar(1.0f, 1);
     float *xp = tensor_data_ptr(x);
     float *Wp = tensor_data_ptr(W);
     xp[0]=1; xp[1]=2; xp[2]=3; xp[3]=4; xp[4]=5; xp[5]=6;
     Wp[0]=1; Wp[1]=0; Wp[2]=0; Wp[3]=1; Wp[4]=1; Wp[5]=0;
 
-    tensor *mm = tensor_matmul(x, W);  /* (2,2) */
-    tensor *y = tensor_add(mm, b);     /* broadcast b to (2,2) */
-    dnn_backward(y);
+    tensor *mm = tensor_matmul(ctx.scratch, x, W);  /* (2,2) */
+    tensor *y = tensor_add(ctx.scratch, mm, b);     /* broadcast b to (2,2) */
+    dnn_backward(ctx.scratch, y);
 
     /* y = x@W + b, dy/dx = W^T, dloss/dy = all-1s */
     float exp_x[] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
@@ -980,11 +983,11 @@ static void test_matmul_linear(void) {
 static void test_matmul_square_self(void) {
     printf("  test_matmul_square_self... ");
     /* A (2,2) @ A (2,2), A == B (same pointer) */
-    tensor *a = tensor_zeros(2, (int[]){2, 2}, 1);
+    tensor *a = tensor_zeros(ctx.params, 2, (int[]){2, 2}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0]=1; ap[1]=2; ap[2]=3; ap[3]=4;
 
-    tensor *c = tensor_matmul(a, a);
+    tensor *c = tensor_matmul(ctx.scratch, a, a);
     float *cp = tensor_data_ptr(c);
     /* A@A = [[7,10],[15,22]] */
     assert(fabsf(cp[0] - 7.0f) < EPS);
@@ -992,7 +995,7 @@ static void test_matmul_square_self(void) {
     assert(fabsf(cp[2] - 15.0f) < EPS);
     assert(fabsf(cp[3] - 22.0f) < EPS);
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
 
     /* da = dC@A^T + A^T@dC = [[3,7],[3,7]] + [[4,4],[6,6]] = [[7,11],[9,13]] */
     float exp_a[] = {7.0f, 11.0f, 9.0f, 13.0f};
@@ -1007,10 +1010,10 @@ static void test_mixed_diamond(void) {
     /* a mul(b) + a add(b) — a receives grad from two different op types */
     tensor *a = scalar(2.0f, 1);
     tensor *b = scalar(3.0f, 1);
-    tensor *c = tensor_mul(a, b);   /* 6 */
-    tensor *d = tensor_add(a, b);   /* 5, but unused in grad check — just for diamond */
-    tensor *e = tensor_add(c, d);   /* 11 */
-    dnn_backward(e);
+    tensor *c = tensor_mul(ctx.scratch, a, b);   /* 6 */
+    tensor *d = tensor_add(ctx.scratch, a, b);   /* 5, but unused in grad check — just for diamond */
+    tensor *e = tensor_add(ctx.scratch, c, d);   /* 11 */
+    dnn_backward(ctx.scratch, e);
     check_grad(a, 4.0f, "da");     /* da = d(c)/da + d(d)/da = b + 1 = 4 */
     check_grad(b, 3.0f, "db");     /* db = d(c)/db + d(d)/db = a + 1 = 3 */
     printf("OK\n");
@@ -1019,13 +1022,13 @@ static void test_mixed_diamond(void) {
 static void test_transpose_backward(void) {
     printf("  test_transpose_backward... ");
     /* a (2,3) → transpose(a,0,1) → sum(b,0) — b view has swapped strides */
-    tensor *a = tensor_zeros(2, (int[]){2, 3}, 1);
+    tensor *a = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 1);
     float *ap = tensor_data_ptr(a);
     for (int i = 0; i < 6; i++) ap[i] = (float)(i + 1);
 
-    tensor *b = tensor_transpose(a, 0, 1);  /* shape (3,2), strides (1,3) */
-    tensor *c = tensor_sum(b, 0);           /* shape (1,2) */
-    dnn_backward(c);
+    tensor *b = tensor_transpose(ctx.scratch, a, 0, 1);  /* shape (3,2), strides (1,3) */
+    tensor *c = tensor_sum(ctx.scratch, b, 0);           /* shape (1,2) */
+    dnn_backward(ctx.scratch, c);
 
     /* grad_output = [1,1], broadcast via sum_backward:
        each input element used once → grad all 1s */
@@ -1037,13 +1040,13 @@ static void test_transpose_backward(void) {
 static void test_slice_backward(void) {
     printf("  test_slice_backward... ");
     /* a (4) → slice at offset 1, len 2 → sum(b, 0) → grad only flows to sliced region */
-    tensor *a = tensor_zeros(1, (int[]){4}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){4}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0]=10; ap[1]=20; ap[2]=30; ap[3]=40;
 
-    tensor *b = tensor_slice(a, 0, 1, 2);  /* shape (2), offset 1, values [20,30] */
-    tensor *c = tensor_sum(b, 0);           /* shape (1), value 50 */
-    dnn_backward(c);
+    tensor *b = tensor_slice(ctx.scratch, a, 0, 1, 2);  /* shape (2), offset 1, values [20,30] */
+    tensor *c = tensor_sum(ctx.scratch, b, 0);           /* shape (1), value 50 */
+    dnn_backward(ctx.scratch, c);
 
     /* only sliced positions get gradient = 1 */
     float exp_a[] = {0.0f, 1.0f, 1.0f, 0.0f};
@@ -1055,9 +1058,9 @@ static void test_mul_diamond_self(void) {
     printf("  test_mul_diamond_self... ");
     /* a used in mul(a,a) AND add(a,...) — tests multi-path with a==b case in mul */
     tensor *a = scalar(3.0f, 1);
-    tensor *c = tensor_mul(a, a);       /* 9, grad contribution: d(a*a)/da = 6 */
-    tensor *d = tensor_add(a, c);       /* 12, grad contribution: d(a)/da = 1 */
-    dnn_backward(d);
+    tensor *c = tensor_mul(ctx.scratch, a, a);       /* 9, grad contribution: d(a*a)/da = 6 */
+    tensor *d = tensor_add(ctx.scratch, a, c);       /* 12, grad contribution: d(a)/da = 1 */
+    dnn_backward(ctx.scratch, d);
     check_grad(a, 7.0f, "da");         /* da = 1 + 2*3 = 7 */
     printf("OK\n");
 }
@@ -1080,11 +1083,11 @@ static void test_softmax_1d(void) {
     float y_ref[4];
     softmax_ref_1d(x, y_ref, 4);
 
-    tensor *a = tensor_zeros(1, (int[]){4}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){4}, 1);
     float *ap = tensor_data_ptr(a);
     for (int i = 0; i < 4; i++) ap[i] = x[i];
 
-    tensor *c = tensor_softmax(a, 0);
+    tensor *c = tensor_softmax(ctx.scratch, a, 0);
     float *cp = tensor_data_ptr(c);
 
     for (int i = 0; i < 4; i++)
@@ -1095,7 +1098,7 @@ static void test_softmax_1d(void) {
     for (int i = 0; i < 4; i++) sum += cp[i];
     assert(fabsf(sum - 1.0f) < EPS && "softmax 1d sum=1");
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
 
     /* analytical gradient check:
        dx_i = sm_i * (dg_i - sum_j(sm_j * dg_j))
@@ -1111,12 +1114,12 @@ static void test_softmax_1d(void) {
 static void test_softmax_2d_dim0(void) {
     printf("  test_softmax_2d_dim0... ");
     /* a shape [2,3], softmax over dim=0 */
-    tensor *a = tensor_zeros(2, (int[]){2, 3}, 1);
+    tensor *a = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0]=1; ap[1]=2; ap[2]=3;
     ap[3]=4; ap[4]=5; ap[5]=6;
 
-    tensor *c = tensor_softmax(a, 0);
+    tensor *c = tensor_softmax(ctx.scratch, a, 0);
     float *cp = tensor_data_ptr(c);
 
     /* each column (dim 0) should sum to 1 */
@@ -1130,7 +1133,7 @@ static void test_softmax_2d_dim0(void) {
     /* rows not constrained to sum to 1 (just a smoke check) */
     (void)(cp[0]+cp[1]+cp[2]);
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
     float *ag = tensor_grad(a);
     /* with unit gout, dx = sm_i * (1 - sum_j(sm_j)) = 0 for each column */
     for (int i = 0; i < 6; i++)
@@ -1142,12 +1145,12 @@ static void test_softmax_2d_dim0(void) {
 static void test_softmax_2d_dim1(void) {
     printf("  test_softmax_2d_dim1... ");
     /* a shape [2,3], softmax over dim=1 */
-    tensor *a = tensor_zeros(2, (int[]){2, 3}, 1);
+    tensor *a = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0]=1; ap[1]=2; ap[2]=3;
     ap[3]=4; ap[4]=5; ap[5]=6;
 
-    tensor *c = tensor_softmax(a, 1);
+    tensor *c = tensor_softmax(ctx.scratch, a, 1);
     float *cp = tensor_data_ptr(c);
 
     /* each row (dim 1) should sum to 1 */
@@ -1156,7 +1159,7 @@ static void test_softmax_2d_dim1(void) {
     assert(fabsf(row0 - 1.0f) < EPS && "softmax 2d dim1 row0");
     assert(fabsf(row1 - 1.0f) < EPS && "softmax 2d dim1 row1");
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
     float *ag = tensor_grad(a);
     /* with unit gout, dx = 0 */
     for (int i = 0; i < 6; i++)
@@ -1173,14 +1176,14 @@ static void test_softmax_chain(void) {
        dx_i = sm_i * (b - sum_j(sm_j * b)) = sm_i * (b - b * sum_j(sm_j)) = sm_i * (b - b) = 0
        Actually with broadcasting b, all sm_i get same grad b.
        So dx_i = sm_i * (b - b * 1) = 0 */
-    tensor *a = tensor_zeros(1, (int[]){3}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0] = 1.0f; ap[1] = 2.0f; ap[2] = 3.0f;
     tensor *b = scalar(3.0f, 1);
 
-    tensor *s = tensor_softmax(a, 0);
-    tensor *c = tensor_mul(s, b);
-    dnn_backward(c);
+    tensor *s = tensor_softmax(ctx.scratch, a, 0);
+    tensor *c = tensor_mul(ctx.scratch, s, b);
+    dnn_backward(ctx.scratch, c);
 
     float *ag = tensor_grad(a);
     for (int i = 0; i < 3; i++)
@@ -1192,11 +1195,11 @@ static void test_softmax_chain(void) {
 static void test_softmax_stability(void) {
     printf("  test_softmax_stability... ");
     /* large values should not overflow */
-    tensor *a = tensor_zeros(1, (int[]){4}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){4}, 1);
     float *ap = tensor_data_ptr(a);
     ap[0] = 100.0f; ap[1] = 101.0f; ap[2] = 102.0f; ap[3] = 103.0f;
 
-    tensor *c = tensor_softmax(a, 0);
+    tensor *c = tensor_softmax(ctx.scratch, a, 0);
     float *cp = tensor_data_ptr(c);
 
     float sum = 0.0f;
@@ -1208,7 +1211,7 @@ static void test_softmax_stability(void) {
 
     /* also very negative values */
     ap[0] = -1000.0f; ap[1] = -1001.0f; ap[2] = -1002.0f; ap[3] = -1003.0f;
-    tensor *d = tensor_softmax(a, 0);
+    tensor *d = tensor_softmax(ctx.scratch, a, 0);
     float *dp = tensor_data_ptr(d);
     sum = 0.0f;
     for (int i = 0; i < 4; i++) {
@@ -1223,11 +1226,11 @@ static void test_softmax_stability(void) {
 static void test_softmax_sum_to_one(void) {
     printf("  test_softmax_sum_to_one... ");
     /* 3D tensor, verify sum along dim=1 equals 1 */
-    tensor *a = tensor_zeros(3, (int[]){2, 3, 4}, 0);
+    tensor *a = tensor_zeros(ctx.params, 3, (int[]){2, 3, 4}, 0);
     float *ap = tensor_data_ptr(a);
     for (int i = 0; i < 24; i++) ap[i] = (float)(i - 10);
 
-    tensor *c = tensor_softmax(a, 1);
+    tensor *c = tensor_softmax(ctx.scratch, a, 1);
     float *cp = tensor_data_ptr(c);
 
     /* sum over dim=1 for each (d0,d2) pair */
@@ -1311,11 +1314,11 @@ static void test_causal_softmax_2d_forward(void) {
                         0.2523929763f, 0.3520702655f, 0.3955367581f, 0.0000000000f,
                         0.4962696763f, 0.2874331041f, 0.1229971731f, 0.0933000466f};
 
-    tensor *t = tensor_zeros(2, (int[]){N, N}, 0);
+    tensor *t = tensor_zeros(ctx.params, 2, (int[]){N, N}, 0);
     float *tp = tensor_data_ptr(t);
     for (int i = 0; i < N * N; i++) tp[i] = scores[i];
 
-    tensor *out = tensor_causal_softmax(t);
+    tensor *out = tensor_causal_softmax(ctx.scratch, t);
     float *op = tensor_data_ptr(out);
 
     for (int i = 0; i < N * N; i++) {
@@ -1347,12 +1350,12 @@ static void test_causal_softmax_4d_forward(void) {
                         0.2523929763f, 0.3520702655f, 0.3955367581f, 0.0000000000f,
                         0.4962696763f, 0.2874331041f, 0.1229971731f, 0.0933000466f};
 
-    tensor *t = tensor_zeros(4, (int[]){B, H, N, N}, 0);
+    tensor *t = tensor_zeros(ctx.params, 4, (int[]){B, H, N, N}, 0);
     float *tp = tensor_data_ptr(t);
     for (int i = 0; i < B * H * N * N; i++)
         tp[i] = scores[i % (N * N)];
 
-    tensor *out = tensor_causal_softmax(t);
+    tensor *out = tensor_causal_softmax(ctx.scratch, t);
     float *op = tensor_data_ptr(out);
 
     for (int b = 0; b < B; b++) {
@@ -1385,24 +1388,24 @@ static void test_causal_softmax_2d_backward(void) {
     float expected_grad[16];
     causal_softmax_grad_ref_2d(scores, grad_in, expected_grad, N);
 
-    tensor *t = tensor_zeros(2, (int[]){N, N}, 1);
+    tensor *t = tensor_zeros(ctx.params, 2, (int[]){N, N}, 1);
     float *tp = tensor_data_ptr(t);
     for (int i = 0; i < N * N; i++) tp[i] = scores[i];
 
     /* Forward + backward */
-    tensor *out = tensor_causal_softmax(t);
+    tensor *out = tensor_causal_softmax(ctx.scratch, t);
 
     /* Attach a gradient by summing with weights: loss = sum(out[i][j] * grad_in[i][j]) */
     /* We can do this by making a weighted sum using tensor_mul + tensor_sum */
     /* Simpler: just call dnn_backward on out, but we need non-unit grad */
     /* Create a weight tensor of grad_in values, multiply out by weights, sum */
-    tensor *weights = tensor_zeros(2, (int[]){N, N}, 0);
+    tensor *weights = tensor_zeros(ctx.params, 2, (int[]){N, N}, 0);
     float *wp = tensor_data_ptr(weights);
     for (int i = 0; i < N * N; i++) wp[i] = grad_in[i];
 
-    dnn_grad_ctx ctx = dnn_no_grad_enter();
-    tensor *loss = tensor_sum(tensor_mul(out, weights), -1);  /* scalar */
-    dnn_no_grad_exit(ctx);
+    dnn_grad_ctx gc = dnn_no_grad_enter();
+    tensor *loss = tensor_sum(ctx.scratch, tensor_mul(ctx.scratch, out, weights), -1);  /* scalar */
+    dnn_no_grad_exit(gc);
 
     /* Use mul+sum to inject non-unit upstream gradient into causal_softmax backward.
      * loss = sum(out * weights) where out = causal_softmax(t).
@@ -1411,13 +1414,13 @@ static void test_causal_softmax_2d_backward(void) {
      * out has requires_grad=1 (from causal_softmax autograd tape).
      * tensor_mul creates grad_fn because out requires_grad.
      * tensor_sum creates grad_fn because mul output requires_grad.
-     * dnn_backward(loss_scalar) propagates: loss_scalar → sum1 → sum0 → mul → causal_softmax → t
+     * dnn_backward(ctx.scratch, loss_scalar) propagates: loss_scalar → sum1 → sum0 → mul → causal_softmax → t
      */
-    tensor *weighted = tensor_mul(out, weights);
-    tensor *sum0 = tensor_sum(weighted, 1);   /* (N,N) → (N,) */
-    tensor *loss_s = tensor_sum(sum0, 0);     /* (N,) → (1,) */
+    tensor *weighted = tensor_mul(ctx.scratch, out, weights);
+    tensor *sum0 = tensor_sum(ctx.scratch, weighted, 1);   /* (N,N) → (N,) */
+    tensor *loss_s = tensor_sum(ctx.scratch, sum0, 0);     /* (N,) → (1,) */
 
-    dnn_backward(loss_s);
+    dnn_backward(ctx.scratch, loss_s);
 
     float *ag = tensor_grad(t);
     assert(ag && "causal softmax grad not null");
@@ -1432,20 +1435,20 @@ static void test_causal_softmax_2d_backward(void) {
 
 static void test_cross_entropy_simple(void) {
     /* 2 classes, logits [1.0, 2.0], target=1 */
-    tensor *logits = tensor_zeros(1, (int[]){2}, 1);
+    tensor *logits = tensor_zeros(ctx.params, 1, (int[]){2}, 1);
     float *lp = tensor_data_ptr(logits);
     lp[0] = 1.0f; lp[1] = 2.0f;
 
-    tensor *target = tensor_zeros(1, (int[]){1}, 0);
+    tensor *target = tensor_zeros(ctx.params, 1, (int[]){1}, 0);
     ((int*)tensor_data_ptr(target))[0] = 1;
 
-    tensor *loss = tensor_cross_entropy(logits, target, 0);
+    tensor *loss = tensor_cross_entropy(ctx.scratch, logits, target, 0);
     float *loss_p = tensor_data_ptr(loss);
 
     float expected = ce_ref_2d(lp, 1, 2);
     assert(fabsf(loss_p[0] - expected) < EPS && "ce simple forward");
 
-    dnn_backward(loss);
+    dnn_backward(ctx.scratch, loss);
     float *lg = tensor_grad(logits);
     assert(lg && "ce simple grad not null");
 
@@ -1460,17 +1463,17 @@ static void test_cross_entropy_simple(void) {
 static void test_cross_entropy_batch(void) {
     printf("  test_cross_entropy_batch... ");
     /* batch of 3, 4 classes, targets [0, 2, 1] */
-    tensor *logits = tensor_zeros(2, (int[]){3, 4}, 1);
+    tensor *logits = tensor_zeros(ctx.params, 2, (int[]){3, 4}, 1);
     float *lp = tensor_data_ptr(logits);
     lp[0]=2.0f;  lp[1]=1.0f;  lp[2]=0.5f; lp[3]=0.1f;   /* sample 0 */
     lp[4]=0.5f;  lp[5]=2.0f;  lp[6]=3.0f; lp[7]=1.0f;   /* sample 1 */
     lp[8]=1.0f;  lp[9]=3.0f;  lp[10]=2.0f;lp[11]=0.5f;  /* sample 2 */
 
-    tensor *target = tensor_zeros(1, (int[]){3}, 0);
+    tensor *target = tensor_zeros(ctx.params, 1, (int[]){3}, 0);
     int *td = (int*)tensor_data_ptr(target);
     td[0] = 0; td[1] = 2; td[2] = 1;
 
-    tensor *loss = tensor_cross_entropy(logits, target, 1);
+    tensor *loss = tensor_cross_entropy(ctx.scratch, logits, target, 1);
     float *loss_p = tensor_data_ptr(loss);
 
     /* compute expected: mean of per-sample losses */
@@ -1480,7 +1483,7 @@ static void test_cross_entropy_batch(void) {
     float expected = (l0 + l1 + l2) / 3.0f;
     assert(fabsf(loss_p[0] - expected) < EPS && "ce batch forward");
 
-    dnn_backward(loss);
+    dnn_backward(ctx.scratch, loss);
     float *lg = tensor_grad(logits);
     assert(lg && "ce batch grad not null");
 
@@ -1495,17 +1498,17 @@ static void test_cross_entropy_batch(void) {
 static void test_cross_entropy_grad(void) {
     printf("  test_cross_entropy_grad... ");
     /* 3 classes, batch of 2, verify all gradient components */
-    tensor *logits = tensor_zeros(2, (int[]){2, 3}, 1);
+    tensor *logits = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 1);
     float *lp = tensor_data_ptr(logits);
     lp[0]=1.0f; lp[1]=2.0f; lp[2]=3.0f;
     lp[3]=4.0f; lp[4]=5.0f; lp[5]=6.0f;
 
-    tensor *target = tensor_zeros(1, (int[]){2}, 0);
+    tensor *target = tensor_zeros(ctx.params, 1, (int[]){2}, 0);
     int *td = (int*)tensor_data_ptr(target);
     td[0] = 1; td[1] = 0;
 
-    tensor *loss = tensor_cross_entropy(logits, target, 1);
-    dnn_backward(loss);
+    tensor *loss = tensor_cross_entropy(ctx.scratch, logits, target, 1);
+    dnn_backward(ctx.scratch, loss);
     float *lg = tensor_grad(logits);
 
     /* sample 0: target=1 */
@@ -1535,20 +1538,20 @@ static void test_cross_entropy_grad(void) {
 static void test_cross_entropy_stability(void) {
     printf("  test_cross_entropy_stability... ");
     /* large logits should not overflow */
-    tensor *logits = tensor_zeros(1, (int[]){3}, 1);
+    tensor *logits = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
     float *lp = tensor_data_ptr(logits);
     lp[0] = 1000.0f; lp[1] = 1001.0f; lp[2] = 1002.0f;
 
-    tensor *target = tensor_zeros(1, (int[]){1}, 0);
+    tensor *target = tensor_zeros(ctx.params, 1, (int[]){1}, 0);
     ((int*)tensor_data_ptr(target))[0] = 2;
 
-    tensor *loss = tensor_cross_entropy(logits, target, 0);
+    tensor *loss = tensor_cross_entropy(ctx.scratch, logits, target, 0);
     float *loss_p = tensor_data_ptr(loss);
     assert(isfinite(loss_p[0]) && "ce stability");
 
     /* also very negative */
     lp[0] = -1000.0f; lp[1] = -1001.0f; lp[2] = -1002.0f;
-    tensor *loss2 = tensor_cross_entropy(logits, target, 0);
+    tensor *loss2 = tensor_cross_entropy(ctx.scratch, logits, target, 0);
     float *loss_p2 = tensor_data_ptr(loss2);
     assert(isfinite(loss_p2[0]) && "ce stability neg");
     printf("OK\n");
@@ -1557,17 +1560,17 @@ static void test_cross_entropy_stability(void) {
 static void test_cross_entropy_chain(void) {
     printf("  test_cross_entropy_chain... ");
     /* cross_entropy * scalar → backward */
-    tensor *logits = tensor_zeros(1, (int[]){4}, 1);
+    tensor *logits = tensor_zeros(ctx.params, 1, (int[]){4}, 1);
     float *lp = tensor_data_ptr(logits);
     lp[0]=1; lp[1]=2; lp[2]=3; lp[3]=4;
 
-    tensor *target = tensor_zeros(1, (int[]){1}, 0);
+    tensor *target = tensor_zeros(ctx.params, 1, (int[]){1}, 0);
     ((int*)tensor_data_ptr(target))[0] = 0;
 
-    tensor *loss = tensor_cross_entropy(logits, target, 0);
+    tensor *loss = tensor_cross_entropy(ctx.scratch, logits, target, 0);
     tensor *scale = scalar(2.0f, 0);
-    tensor *scaled = tensor_mul(loss, scale);
-    dnn_backward(scaled);
+    tensor *scaled = tensor_mul(ctx.scratch, loss, scale);
+    dnn_backward(ctx.scratch, scaled);
 
     float *lg = tensor_grad(logits);
     assert(lg && "ce chain grad");
@@ -1588,15 +1591,15 @@ static void test_cross_entropy_chain(void) {
 static void test_3d_multi_op(void) {
     printf("  test_3d_multi_op... ");
     /* 3D tensor (2,3,4) → sum(dim=1) → pow(2) → relu → sum(dim=0) → loss */
-    tensor *t = tensor_zeros(3, (int[]){2, 3, 4}, 1);
+    tensor *t = tensor_zeros(ctx.params, 3, (int[]){2, 3, 4}, 1);
     float *tp = tensor_data_ptr(t);
     for (int i = 0; i < 24; i++) tp[i] = (float)(i + 1);
 
-    tensor *s = tensor_sum(t, 1);        /* (2,1,4) */
-    tensor *p = tensor_pow(s, 2.0f);     /* (2,1,4) */
-    tensor *r = tensor_relu(p);          /* (2,1,4) */
-    tensor *loss = tensor_sum(r, 0);     /* (1,1,4) */
-    dnn_backward(loss);
+    tensor *s = tensor_sum(ctx.scratch, t, 1);        /* (2,1,4) */
+    tensor *p = tensor_pow(ctx.scratch, s, 2.0f);     /* (2,1,4) */
+    tensor *r = tensor_relu(ctx.scratch, p);          /* (2,1,4) */
+    tensor *loss = tensor_sum(ctx.scratch, r, 0);     /* (1,1,4) */
+    dnn_backward(ctx.scratch, loss);
 
     /* expected grad (see manual trace in conversation) */
     float exp_t[] = {
@@ -1616,15 +1619,15 @@ static void test_3d_multi_op(void) {
 static void test_ln_forward_stats(void) {
     printf("  test_ln_forward_stats... ");
     /* x shape (3, 4), γ=1, β=0, ensure output has mean~0, std~1 along last dim */
-    tensor *x = tensor_zeros(2, (int[]){3, 4}, 1);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){3, 4}, 1);
     float *xp = tensor_data_ptr(x);
     for (int i = 0; i < 12; i++) xp[i] = (float)(i + 1);
 
-    tensor *weight = tensor_zeros(1, (int[]){4}, 1);
+    tensor *weight = tensor_zeros(ctx.params, 1, (int[]){4}, 1);
     float *wp = tensor_data_ptr(weight);
     for (int j = 0; j < 4; j++) wp[j] = 1.0f;
 
-    tensor *out = tensor_layer_norm(x, weight, NULL, 1e-5f);
+    tensor *out = tensor_layer_norm(ctx.scratch, x, weight, NULL, 1e-5f);
     float *od = tensor_data_ptr(out);
 
     /* each row should have mean≈0, std≈1 */
@@ -1645,20 +1648,20 @@ static void test_ln_forward_stats(void) {
 static void test_ln_backward_grads(void) {
     printf("  test_ln_backward_grads... ");
     /* x shape (2, 3), weight and bias learnable, loss = sum(out) */
-    tensor *x = tensor_zeros(2, (int[]){2, 3}, 1);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 1);
     float *xp = tensor_data_ptr(x);
     xp[0]=1; xp[1]=2; xp[2]=3;
     xp[3]=4; xp[4]=5; xp[5]=6;
 
-    tensor *w = tensor_zeros(1, (int[]){3}, 1);
+    tensor *w = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
     float *wp = tensor_data_ptr(w);
     wp[0]=1; wp[1]=1; wp[2]=1;
 
-    tensor *b = tensor_zeros(1, (int[]){3}, 1);
+    tensor *b = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
 
-    tensor *out = tensor_layer_norm(x, w, b, 1e-5f);
-    tensor *loss = tensor_sum(out, 0);  /* scalar */
-    dnn_backward(loss);
+    tensor *out = tensor_layer_norm(ctx.scratch, x, w, b, 1e-5f);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);  /* scalar */
+    dnn_backward(ctx.scratch, loss);
 
     /* grads on all params should be non-NULL */
     assert(tensor_grad(x) != NULL);
@@ -1674,17 +1677,17 @@ static void test_ln_backward_grads(void) {
 
 static void test_ln_no_bias(void) {
     printf("  test_ln_no_bias... ");
-    tensor *x = tensor_zeros(1, (int[]){4}, 1);
+    tensor *x = tensor_zeros(ctx.params, 1, (int[]){4}, 1);
     float *xp = tensor_data_ptr(x);
     xp[0]=1; xp[1]=2; xp[2]=3; xp[3]=4;
 
-    tensor *w = tensor_zeros(1, (int[]){4}, 1);
+    tensor *w = tensor_zeros(ctx.params, 1, (int[]){4}, 1);
     float *wp = tensor_data_ptr(w);
     wp[0]=1; wp[1]=1; wp[2]=1; wp[3]=1;
 
-    tensor *out = tensor_layer_norm(x, w, NULL, 1e-5f);
-    tensor *loss = tensor_sum(out, 0);
-    dnn_backward(loss);
+    tensor *out = tensor_layer_norm(ctx.scratch, x, w, NULL, 1e-5f);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);
+    dnn_backward(ctx.scratch, loss);
 
     assert(tensor_grad(x) != NULL);
     assert(tensor_grad(w) != NULL);
@@ -1697,15 +1700,15 @@ static void test_conv_tiny(void) {
     printf("  test_conv_tiny... ");
     /* x=(1,1,2,2), w=(1,1,2,2), b=(1,), stride=1, pad=0
        out=[[[[5]]]], dx=[[[[1,0],[0,1]]]], dw=[[[[1,2],[3,4]]]], db=[1] */
-    tensor *x = tensor_zeros(4, (int[]){1,1,2,2}, 1);
+    tensor *x = tensor_zeros(ctx.params, 4, (int[]){1,1,2,2}, 1);
     float *xp = tensor_data_ptr(x); xp[0]=1; xp[1]=2; xp[2]=3; xp[3]=4;
-    tensor *w = tensor_zeros(4, (int[]){1,1,2,2}, 1);
+    tensor *w = tensor_zeros(ctx.params, 4, (int[]){1,1,2,2}, 1);
     float *wp = tensor_data_ptr(w); wp[0]=1; wp[1]=0; wp[2]=0; wp[3]=1;
-    tensor *b = tensor_zeros(1, (int[]){1}, 1);
+    tensor *b = tensor_zeros(ctx.params, 1, (int[]){1}, 1);
 
-    tensor *out = tensor_conv2d(x, w, b, 1, 0);
-    tensor *loss = tensor_sum(out, 0);
-    dnn_backward(loss);
+    tensor *out = tensor_conv2d(ctx.scratch, x, w, b, 1, 0);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);
+    dnn_backward(ctx.scratch, loss);
 
     float *od = tensor_data_ptr(out);
     if (fabsf(od[0] - 5.0f) > EPS) {
@@ -1728,13 +1731,13 @@ static void test_conv_backward_grads(void) {
     printf("  test_conv_backward_grads... ");
     /* 1x1 kernel, (N=2, C=3, H=4, W=4, out_C=2), stride=1, pad=0 */
     srand(0);
-    tensor *x = tensor_randn(4, (int[]){2,3,4,4}, 1);
-    tensor *w = tensor_randn(4, (int[]){2,3,1,1}, 1);
-    tensor *b = tensor_randn(1, (int[]){2}, 1);
+    tensor *x = tensor_randn(ctx.params, 4, (int[]){2,3,4,4}, 1);
+    tensor *w = tensor_randn(ctx.params, 4, (int[]){2,3,1,1}, 1);
+    tensor *b = tensor_randn(ctx.params, 1, (int[]){2}, 1);
 
-    tensor *out = tensor_conv2d(x, w, b, 1, 0);
-    tensor *loss = tensor_sum(out, 0);
-    dnn_backward(loss);
+    tensor *out = tensor_conv2d(ctx.scratch, x, w, b, 1, 0);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);
+    dnn_backward(ctx.scratch, loss);
 
     assert(tensor_grad(x) != NULL && "dx non-null");
     assert(tensor_grad(w) != NULL && "dw non-null");
@@ -1745,12 +1748,12 @@ static void test_conv_backward_grads(void) {
 static void test_conv_no_bias(void) {
     printf("  test_conv_no_bias... ");
     srand(1);
-    tensor *x = tensor_randn(4, (int[]){1,2,3,3}, 1);
-    tensor *w = tensor_randn(4, (int[]){2,2,1,1}, 1);
+    tensor *x = tensor_randn(ctx.params, 4, (int[]){1,2,3,3}, 1);
+    tensor *w = tensor_randn(ctx.params, 4, (int[]){2,2,1,1}, 1);
 
-    tensor *out = tensor_conv2d(x, w, NULL, 1, 0);
-    tensor *loss = tensor_sum(out, 0);
-    dnn_backward(loss);
+    tensor *out = tensor_conv2d(ctx.scratch, x, w, NULL, 1, 0);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);
+    dnn_backward(ctx.scratch, loss);
 
     assert(tensor_grad(x) != NULL && "dx non-null");
     assert(tensor_grad(w) != NULL && "dw non-null");
@@ -1761,16 +1764,16 @@ static void test_conv_stride_pad(void) {
     printf("  test_conv_stride_pad... ");
     /* x=(1,1,4,4), w=(1,1,2,2), stride=2, pad=0 (from ref test 2)
        out = [[[[7,11],[23,27]]]] */
-    tensor *x = tensor_zeros(4, (int[]){1,1,4,4}, 1);
+    tensor *x = tensor_zeros(ctx.params, 4, (int[]){1,1,4,4}, 1);
     float *xp = tensor_data_ptr(x);
     for (int i = 0; i < 16; i++) xp[i] = (float)(i + 1);
-    tensor *w = tensor_zeros(4, (int[]){1,1,2,2}, 1);
+    tensor *w = tensor_zeros(ctx.params, 4, (int[]){1,1,2,2}, 1);
     float *wp = tensor_data_ptr(w); wp[0]=1; wp[1]=0; wp[2]=0; wp[3]=1;
-    tensor *b = tensor_zeros(1, (int[]){1}, 1);
+    tensor *b = tensor_zeros(ctx.params, 1, (int[]){1}, 1);
 
-    tensor *out = tensor_conv2d(x, w, b, 2, 0);
-    tensor *loss = tensor_sum(out, 0);
-    dnn_backward(loss);
+    tensor *out = tensor_conv2d(ctx.scratch, x, w, b, 2, 0);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);
+    dnn_backward(ctx.scratch, loss);
 
     float *od = tensor_data_ptr(out);
     float exp_out[] = {7.0f, 11.0f, 23.0f, 27.0f};
@@ -1795,18 +1798,18 @@ static void test_conv_stride_pad(void) {
 
 static void test_winograd_simple(void) {
     printf("  test_winograd_simple... ");
-    tensor *x = tensor_zeros(4, (int[]){1,1,4,4}, 1);
+    tensor *x = tensor_zeros(ctx.params, 4, (int[]){1,1,4,4}, 1);
     float *xp = tensor_data_ptr(x);
     for (int i = 0; i < 16; i++) xp[i] = (float)i;
-    tensor *w = tensor_zeros(4, (int[]){1,1,3,3}, 1);
+    tensor *w = tensor_zeros(ctx.params, 4, (int[]){1,1,3,3}, 1);
     float *wp = tensor_data_ptr(w);
     wp[0]=1; wp[1]=0; wp[2]=0;
     wp[3]=0; wp[4]=0; wp[5]=0;
     wp[6]=0; wp[7]=0; wp[8]=1;
 
-    tensor *out = tensor_conv2d(x, w, NULL, 1, 1);
-    tensor *loss = tensor_sum(out, 0);
-    dnn_backward(loss);
+    tensor *out = tensor_conv2d(ctx.scratch, x, w, NULL, 1, 1);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);
+    dnn_backward(ctx.scratch, loss);
 
     float *od = tensor_data_ptr(out);
     float exp_out[] = {5.0f, 6.0f, 7.0f, 0.0f, 9.0f, 10.0f, 12.0f, 2.0f,
@@ -1828,13 +1831,13 @@ static void test_winograd_simple(void) {
 static void test_winograd_multi_channel(void) {
     printf("  test_winograd_multi_channel... ");
     srand(0);
-    tensor *x = tensor_randn(4, (int[]){1,2,4,4}, 1);
-    tensor *w = tensor_randn(4, (int[]){3,2,3,3}, 1);
-    tensor *b = tensor_randn(1, (int[]){3}, 1);
+    tensor *x = tensor_randn(ctx.params, 4, (int[]){1,2,4,4}, 1);
+    tensor *w = tensor_randn(ctx.params, 4, (int[]){3,2,3,3}, 1);
+    tensor *b = tensor_randn(ctx.params, 1, (int[]){3}, 1);
 
-    tensor *out = tensor_conv2d(x, w, b, 1, 1);
-    tensor *loss = tensor_sum(out, 0);
-    dnn_backward(loss);
+    tensor *out = tensor_conv2d(ctx.scratch, x, w, b, 1, 1);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);
+    dnn_backward(ctx.scratch, loss);
 
     assert(tensor_grad(x) != NULL && "dx non-null");
     assert(tensor_grad(w) != NULL && "dw non-null");
@@ -1847,12 +1850,12 @@ static void test_winograd_multi_channel(void) {
 static void test_winograd_no_bias(void) {
     printf("  test_winograd_no_bias... ");
     srand(1);
-    tensor *x = tensor_randn(4, (int[]){2,1,6,6}, 1);
-    tensor *w = tensor_randn(4, (int[]){2,1,3,3}, 1);
+    tensor *x = tensor_randn(ctx.params, 4, (int[]){2,1,6,6}, 1);
+    tensor *w = tensor_randn(ctx.params, 4, (int[]){2,1,3,3}, 1);
 
-    tensor *out = tensor_conv2d(x, w, NULL, 1, 1);
-    tensor *loss = tensor_sum(out, 0);
-    dnn_backward(loss);
+    tensor *out = tensor_conv2d(ctx.scratch, x, w, NULL, 1, 1);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);
+    dnn_backward(ctx.scratch, loss);
 
     assert(tensor_grad(x) != NULL && "dx non-null");
     assert(tensor_grad(w) != NULL && "dw non-null");
@@ -1862,20 +1865,20 @@ static void test_winograd_no_bias(void) {
 static void test_ln_exact_pytorch(void) {
     printf("  test_ln_exact_pytorch... ");
     /* exact setup from ref_layer_norm.py backward test */
-    tensor *x = tensor_zeros(2, (int[]){2, 3}, 1);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 1);
     float *xp = tensor_data_ptr(x);
     xp[0]=1; xp[1]=2; xp[2]=3;
     xp[3]=4; xp[4]=5; xp[5]=6;
 
-    tensor *w = tensor_zeros(1, (int[]){3}, 1);
+    tensor *w = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
     float *wp = tensor_data_ptr(w);
     wp[0]=1; wp[1]=1; wp[2]=1;
 
-    tensor *b = tensor_zeros(1, (int[]){3}, 1);
+    tensor *b = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
 
-    tensor *out = tensor_layer_norm(x, w, b, 1e-5f);
-    tensor *loss = tensor_sum(out, 0);
-    dnn_backward(loss);
+    tensor *out = tensor_layer_norm(ctx.scratch, x, w, b, 1e-5f);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);
+    dnn_backward(ctx.scratch, loss);
 
     /* Isolated precision test (test_ln_precision.c) shows 0.00e+00 error.
        Expected values computed from the analytical formula: */
@@ -1893,353 +1896,350 @@ static void test_ln_exact_pytorch(void) {
 int main(void) {
     printf("test_autograd:\n");
 
-    mem_pool params  = mem_pool_create(512 * 1024);
-    mem_pool scratch = mem_pool_create(512 * 1024);
-    mem_pool_set_defaults(&params, &scratch, NULL);
+    dnn_ctx_init(&ctx, 512 * 1024, 512 * 1024, 8*1024*1024);
 
     test_add_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_add_chain();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_add_multi_use();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_add_diamond();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_add_broadcast();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_no_grad();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_add_self_via_grad_fn();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_mul_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_mul_chain();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_mul_self();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_mul_broadcast();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_mul_with_add();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_pow_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_pow_cube();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_pow_exp1();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_pow_neg();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_pow_broadcast();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_neg_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_neg_broadcast();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_sub_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_sub_self();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_sub_broadcast();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_div_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_div_self();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_div_broadcast();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_div_neg_b();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_sum_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_sum_2d_dim0();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_sum_2d_dim1();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_sum_chain();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_mean_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_mean_2d_dim1();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_relu_positive();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_relu_negative();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_relu_mixed();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_relu_chain();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_sigmoid_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_sigmoid_positive();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_sigmoid_negative();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_sigmoid_array();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_sigmoid_chain();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_sigmoid_no_grad();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_silu_scalar();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_silu_array();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_silu_chain();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_silu_no_grad();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_swiglu_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_swiglu_array();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_swiglu_broadcast_gate();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_swiglu_broadcast_up();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_swiglu_no_grad();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_swiglu_chain();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_matmul_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_matmul_linear();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_matmul_square_self();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_mixed_diamond();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_transpose_backward();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_slice_backward();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_mul_diamond_self();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_3d_multi_op();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_softmax_1d();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_softmax_2d_dim0();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_softmax_2d_dim1();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_softmax_chain();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_softmax_stability();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_softmax_sum_to_one();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_causal_softmax_2d_forward();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_causal_softmax_4d_forward();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_causal_softmax_2d_backward();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_cross_entropy_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_cross_entropy_batch();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_cross_entropy_grad();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_cross_entropy_stability();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_cross_entropy_chain();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_ln_forward_stats();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_ln_backward_grads();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_ln_no_bias();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_ln_exact_pytorch();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_conv_tiny();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_conv_backward_grads();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_conv_no_bias();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_conv_stride_pad();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_winograd_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_winograd_multi_channel();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_winograd_no_bias();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
-
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     printf("  ALL PASS\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

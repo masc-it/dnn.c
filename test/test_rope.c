@@ -1,10 +1,13 @@
 #include "dnn.h"
+#include "context.h"
 #include "pool_int.h"
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+
+static dnn_ctx ctx;
 
 #define EPS 1e-5f
 
@@ -51,13 +54,13 @@ static float *_tf(tensor *t) { return (float*)t->data + t->offset; }
 static void test_identity(void) {
     printf("  test_identity... ");
     int shape[4] = {1, 1, 1, 2};
-    tensor *x = tensor_zeros(4, shape, 0);
+    tensor *x = tensor_zeros(ctx.params, 4, shape, 0);
     _tf(x)[0] = 3.0f; _tf(x)[1] = 4.0f;
     int fshape[2] = {1, 1};
-    tensor *cos_t = tensor_zeros(2, fshape, 0);
-    tensor *sin_t = tensor_zeros(2, fshape, 0);
+    tensor *cos_t = tensor_zeros(ctx.params, 2, fshape, 0);
+    tensor *sin_t = tensor_zeros(ctx.params, 2, fshape, 0);
     _tf(cos_t)[0] = 1.0f; _tf(sin_t)[0] = 0.0f;
-    tensor *out = tensor_rope(x, cos_t, sin_t);
+    tensor *out = tensor_rope(ctx.scratch, x, cos_t, sin_t);
     assert(_float_eq(_tf(out)[0], 3.0f));
     assert(_float_eq(_tf(out)[1], 4.0f));
     printf("OK\n");
@@ -66,13 +69,13 @@ static void test_identity(void) {
 static void test_rotate_90(void) {
     printf("  test_rotate_90... ");
     int shape[4] = {1, 1, 1, 2};
-    tensor *x = tensor_zeros(4, shape, 0);
+    tensor *x = tensor_zeros(ctx.params, 4, shape, 0);
     _tf(x)[0] = 1.0f; _tf(x)[1] = 0.0f;
     int fshape[2] = {1, 1};
-    tensor *cos_t = tensor_zeros(2, fshape, 0);
-    tensor *sin_t = tensor_zeros(2, fshape, 0);
+    tensor *cos_t = tensor_zeros(ctx.params, 2, fshape, 0);
+    tensor *sin_t = tensor_zeros(ctx.params, 2, fshape, 0);
     _tf(cos_t)[0] = 0.0f; _tf(sin_t)[0] = 1.0f;
-    tensor *out = tensor_rope(x, cos_t, sin_t);
+    tensor *out = tensor_rope(ctx.scratch, x, cos_t, sin_t);
     assert(_float_eq(_tf(out)[0], 0.0f));
     assert(_float_eq(_tf(out)[1], 1.0f));
     printf("OK\n");
@@ -82,13 +85,13 @@ static void test_rotate_45(void) {
     printf("  test_rotate_45... ");
     float s2 = sqrtf(2.0f) / 2.0f;
     int shape[4] = {1, 1, 1, 2};
-    tensor *x = tensor_zeros(4, shape, 0);
+    tensor *x = tensor_zeros(ctx.params, 4, shape, 0);
     _tf(x)[0] = 1.0f; _tf(x)[1] = 0.0f;
     int fshape[2] = {1, 1};
-    tensor *cos_t = tensor_zeros(2, fshape, 0);
-    tensor *sin_t = tensor_zeros(2, fshape, 0);
+    tensor *cos_t = tensor_zeros(ctx.params, 2, fshape, 0);
+    tensor *sin_t = tensor_zeros(ctx.params, 2, fshape, 0);
     _tf(cos_t)[0] = s2; _tf(sin_t)[0] = s2;
-    tensor *out = tensor_rope(x, cos_t, sin_t);
+    tensor *out = tensor_rope(ctx.scratch, x, cos_t, sin_t);
     assert(_float_eq(_tf(out)[0], s2));
     assert(_float_eq(_tf(out)[1], s2));
     printf("OK\n");
@@ -98,17 +101,17 @@ static void test_multi_pos_multi_pair(void) {
     printf("  test_multi_pos_multi_pair... ");
     int N = 3, d = 4;
     int shape[4] = {1, 1, N, d};
-    tensor *x = tensor_zeros(4, shape, 0);
+    tensor *x = tensor_zeros(ctx.params, 4, shape, 0);
     for (int n = 0; n < N; n++)
         for (int k = 0; k < d/2; k++) {
             _tf(x)[n * d + 2*k]     = (float)(n * 10 + k);
             _tf(x)[n * d + 2*k + 1] = (float)(n * 10 + k + 100);
         }
     int fshape[2] = {N, d/2};
-    tensor *cos_t = tensor_zeros(2, fshape, 0);
-    tensor *sin_t = tensor_zeros(2, fshape, 0);
+    tensor *cos_t = tensor_zeros(ctx.params, 2, fshape, 0);
+    tensor *sin_t = tensor_zeros(ctx.params, 2, fshape, 0);
     for (int i = 0; i < N * d/2; i++) { _tf(cos_t)[i] = 1.0f; _tf(sin_t)[i] = 0.0f; }
-    tensor *out = tensor_rope(x, cos_t, sin_t);
+    tensor *out = tensor_rope(ctx.scratch, x, cos_t, sin_t);
     for (int n = 0; n < N; n++)
         for (int k = 0; k < d/2; k++) {
             assert(_float_eq(_tf(out)[n * d + 2*k],     (float)(n * 10 + k)));
@@ -120,13 +123,13 @@ static void test_multi_pos_multi_pair(void) {
 static void test_3d_input(void) {
     printf("  test_3d_input... ");
     int B = 2, N = 3, d = 4;
-    tensor *x = tensor_zeros(3, (int[]){B, N, d}, 0);
+    tensor *x = tensor_zeros(ctx.params, 3, (int[]){B, N, d}, 0);
     for (int i = 0; i < B * N * d; i++) _tf(x)[i] = (float)i;
     int fshape[2] = {N, d/2};
-    tensor *cos_t = tensor_zeros(2, fshape, 0);
-    tensor *sin_t = tensor_zeros(2, fshape, 0);
+    tensor *cos_t = tensor_zeros(ctx.params, 2, fshape, 0);
+    tensor *sin_t = tensor_zeros(ctx.params, 2, fshape, 0);
     for (int i = 0; i < N * d/2; i++) { _tf(cos_t)[i] = 1.0f; _tf(sin_t)[i] = 0.0f; }
-    tensor *out = tensor_rope(x, cos_t, sin_t);
+    tensor *out = tensor_rope(ctx.scratch, x, cos_t, sin_t);
     for (int i = 0; i < B * N * d; i++) assert(_float_eq(_tf(out)[i], (float)i));
     printf("OK\n");
 }
@@ -143,13 +146,13 @@ static void test_gold_data(void) {
         free(in_data); free(cos_data); free(sin_data); free(out_data); return;
     }
     int B = 2, H = 3, N = 5, d = 8;
-    tensor *x = tensor_zeros(4, (int[]){B, H, N, d}, 0);
+    tensor *x = tensor_zeros(ctx.params, 4, (int[]){B, H, N, d}, 0);
     memcpy(_tf(x), in_data, n_in * sizeof(float));
-    tensor *cos_t = tensor_zeros(2, (int[]){N, d/2}, 0);
-    tensor *sin_t = tensor_zeros(2, (int[]){N, d/2}, 0);
+    tensor *cos_t = tensor_zeros(ctx.params, 2, (int[]){N, d/2}, 0);
+    tensor *sin_t = tensor_zeros(ctx.params, 2, (int[]){N, d/2}, 0);
     memcpy(_tf(cos_t), cos_data, n_cos * sizeof(float));
     memcpy(_tf(sin_t), sin_data, n_sin * sizeof(float));
-    tensor *out = tensor_rope(x, cos_t, sin_t);
+    tensor *out = tensor_rope(ctx.scratch, x, cos_t, sin_t);
     int ok = _check_tensor(_tf(out), out_data, n_out, "rope_fwd");
     printf("%s\n", ok ? "PASS" : "FAIL");
     free(in_data); free(cos_data); free(sin_data); free(out_data);
@@ -174,15 +177,15 @@ static void test_backward_gold(void) {
         free(in_data); free(cos_data); free(sin_data); free(grad_data); free(dx_data); return;
     }
     int B = 2, H = 3, N = 5, d = 8;
-    tensor *x = tensor_zeros(4, (int[]){B, H, N, d}, 1);
+    tensor *x = tensor_zeros(ctx.params, 4, (int[]){B, H, N, d}, 1);
     memcpy(_tf(x), in_data, n_in * sizeof(float));
-    tensor *cos_t = tensor_zeros(2, (int[]){N, d/2}, 0);
-    tensor *sin_t = tensor_zeros(2, (int[]){N, d/2}, 0);
+    tensor *cos_t = tensor_zeros(ctx.params, 2, (int[]){N, d/2}, 0);
+    tensor *sin_t = tensor_zeros(ctx.params, 2, (int[]){N, d/2}, 0);
     memcpy(_tf(cos_t), cos_data, n_cos * sizeof(float));
     memcpy(_tf(sin_t), sin_data, n_sin * sizeof(float));
-    tensor *out = tensor_rope(x, cos_t, sin_t);
+    tensor *out = tensor_rope(ctx.scratch, x, cos_t, sin_t);
     assert(out->grad_fn);
-    out->grad = _mem_pool_alloc(_mem_pool_scratch(), tensor_numel(out) * sizeof(float), NULL);
+    out->grad = _mem_pool_alloc(ctx.scratch, tensor_numel(out) * sizeof(float), NULL);
     memcpy(out->grad, grad_data, n_grad * sizeof(float));
     tensor gv;
     memset(&gv, 0, sizeof(gv));
@@ -203,11 +206,11 @@ static void test_backward_gold(void) {
 static void test_backward_autograd(void) {
     printf("  test_backward_autograd... ");
     int B = 1, H = 1, N = 2, d = 4;
-    tensor *x = tensor_zeros(4, (int[]){B, H, N, d}, 1);
+    tensor *x = tensor_zeros(ctx.params, 4, (int[]){B, H, N, d}, 1);
     for (int i = 0; i < B * H * N * d; i++) _tf(x)[i] = (float)(i + 1);
     int fshape[2] = {N, d/2};
-    tensor *cos_t = tensor_zeros(2, fshape, 0);
-    tensor *sin_t = tensor_zeros(2, fshape, 0);
+    tensor *cos_t = tensor_zeros(ctx.params, 2, fshape, 0);
+    tensor *sin_t = tensor_zeros(ctx.params, 2, fshape, 0);
     for (int n = 0; n < N; n++)
         for (int k = 0; k < d/2; k++) {
             float angle = (float)(n + 1) * 1.0f;
@@ -215,10 +218,10 @@ static void test_backward_autograd(void) {
             _tf(sin_t)[n * (d/2) + k] = sinf(angle);
         }
     /* Build graph */
-    tensor *out = tensor_rope(x, cos_t, sin_t);
-    tensor *flat = tensor_flatten(out);
-    tensor *loss = tensor_sum(flat, 0); /* [8] → scalar */
-    dnn_backward(loss);
+    tensor *out = tensor_rope(ctx.scratch, x, cos_t, sin_t);
+    tensor *flat = tensor_flatten(ctx.scratch, out);
+    tensor *loss = tensor_sum(ctx.scratch, flat, 0); /* [8] → scalar */
+    dnn_backward(ctx.scratch, loss);
     float *g = tensor_grad(x);
     assert(g != NULL);
     for (int i = 0; i < B * H * N * d; i++) assert(isfinite(g[i]));
@@ -235,7 +238,7 @@ static void test_backward_autograd(void) {
 static void test_freqs_init(void) {
     printf("  test_freqs_init... ");
     tensor *cos_t, *sin_t;
-    tensor_rope_freqs_init(&cos_t, &sin_t, 8, 10, 10000.0f);
+    tensor_rope_freqs_init(ctx.scratch, &cos_t, &sin_t, 8, 10, 10000.0f);
     assert(cos_t->shape[0] == 10 && cos_t->shape[1] == 4);
     assert(sin_t->shape[0] == 10 && sin_t->shape[1] == 4);
     for (int k = 0; k < 4; k++) {
@@ -256,7 +259,7 @@ static void test_freqs_init(void) {
 static void test_freqs_init_custom_base(void) {
     printf("  test_freqs_init_custom_base... ");
     tensor *cos_t, *sin_t;
-    tensor_rope_freqs_init(&cos_t, &sin_t, 4, 5, 500.0f);
+    tensor_rope_freqs_init(ctx.scratch, &cos_t, &sin_t, 4, 5, 500.0f);
     float theta0 = powf(500.0f, 0.0f);
     float theta1 = powf(500.0f, -2.0f / 4.0f);
     for (int n = 0; n < 5; n++) {
@@ -273,10 +276,8 @@ static void test_freqs_init_custom_base(void) {
  * ══════════════════════════════════════════════════════════════════ */
 
 int main(void) {
-    mem_pool params  = mem_pool_create(64 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 64 * 1024 * 1024, 64 * 1024 * 1024, 1 * 1024 * 1024);
 
     printf("=== RoPE tests ===\n\n");
 
@@ -298,8 +299,8 @@ int main(void) {
 
     printf("\n=== All tests done ===\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+    dnn_ctx_destroy(&ctx);
+
+
     return 0;
 }

@@ -1,7 +1,10 @@
 #include "dnn.h"
+#include "context.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+
+static dnn_ctx ctx;
 
 static double now_us(void) {
     struct timespec ts;
@@ -15,15 +18,17 @@ static double time_matmul(int M, int K, int N, int warmup, int trials) {
         mem_pool p = mem_pool_create(64*1024*1024);
         mem_pool s = mem_pool_create(64*1024*1024);
         mem_pool_set_defaults(&p, &s, NULL);
-        tensor *a = tensor_randn(2, (int[]){M, K}, 1);
-        tensor *b = tensor_randn(2, (int[]){K, N}, 1);
+        tensor *a = tensor_randn(ctx.params, 2, (int[]){M, K}, 1);
+        tensor *b = tensor_randn(ctx.params, 2, (int[]){K, N}, 1);
         double t0 = now_us();
-        tensor *c = tensor_matmul(a, b);
-        tensor *l = tensor_sum(c, 0);
-        dnn_backward(l);
+        tensor *c = tensor_matmul(ctx.scratch, a, b);
+        tensor *l = tensor_sum(ctx.scratch, c, 0);
+        dnn_backward(ctx.scratch, l);
         double dt = now_us() - t0;
-        mem_pool_destroy(&p);
-        mem_pool_destroy(&s);
+        dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&p);
+        dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&s);
         if (tr >= 0) t[tr] = dt;
     }
     for (int i=0;i<trials;i++) for(int j=i+1;j<trials;j++) if(t[i]>t[j]){double tmp=t[i];t[i]=t[j];t[j]=tmp;}

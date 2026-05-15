@@ -1,8 +1,11 @@
 #include "dnn.h"
+#include "context.h"
 #include <stdio.h>
 #include <assert.h>
 #include <math.h>
 #include <string.h>
+
+static dnn_ctx ctx;
 
 #define EPS 1e-5f
 
@@ -33,7 +36,7 @@ static void check_shape(tensor *t, int ndim, const int *exp, const char *label) 
 
 static void test_create(void) {
     printf("  test_create... ");
-    kv_cache *kvc = kv_cache_create(2, 4, 512, 64);
+    kv_cache *kvc = kv_cache_create(ctx.params, 2, 4, 512, 64);
 
     assert(kvc->seq_len == 0);
     assert(kvc->max_seq == 512);
@@ -57,11 +60,11 @@ static void test_create(void) {
 
 static void test_append_one_token(void) {
     printf("  test_append_one_token... ");
-    kv_cache *kvc = kv_cache_create(1, 2, 16, 4);
+    kv_cache *kvc = kv_cache_create(ctx.params, 1, 2, 16, 4);
 
     /* Create K_new: [1, 2, 1, 4] with known values */
-    tensor *K_new = tensor_zeros_data(4, (int[]){1, 2, 1, 4});
-    tensor *V_new = tensor_zeros_data(4, (int[]){1, 2, 1, 4});
+    tensor *K_new = tensor_zeros_data(ctx.data, 4, (int[]){1, 2, 1, 4});
+    tensor *V_new = tensor_zeros_data(ctx.data, 4, (int[]){1, 2, 1, 4});
     float *kd = (float*)K_new->data;
     float *vd = (float*)V_new->data;
     /* head 0: K=[1,2,3,4], V=[5,6,7,8] */
@@ -96,8 +99,8 @@ static void test_append_one_token(void) {
     assert(fabsf(tget(kvc->v_cache, 0, 1, 0, 3) - 16.0f) < EPS);
 
     /* Verify get_K/V returns correct shape */
-    tensor *K_view = kv_cache_get_K(kvc);
-    tensor *V_view = kv_cache_get_V(kvc);
+    tensor *K_view = kv_cache_get_K(ctx.scratch, kvc);
+    tensor *V_view = kv_cache_get_V(ctx.scratch, kvc);
     check_shape(K_view, 4, (int[]){1, 2, 1, 4}, "K_view");
     check_shape(V_view, 4, (int[]){1, 2, 1, 4}, "V_view");
 
@@ -106,14 +109,14 @@ static void test_append_one_token(void) {
 
 static void test_append_multiple_tokens(void) {
     printf("  test_append_multiple_tokens... ");
-    kv_cache *kvc = kv_cache_create(1, 1, 8, 3);
+    kv_cache *kvc = kv_cache_create(ctx.params, 1, 1, 8, 3);
 
     /* Append 2 tokens: [1,1,1], [2,2,2] */
-    tensor *K1 = tensor_zeros_data(4, (int[]){1, 1, 2, 3});
+    tensor *K1 = tensor_zeros_data(ctx.data, 4, (int[]){1, 1, 2, 3});
     float *k1d = (float*)K1->data;
     k1d[0]=1; k1d[1]=1; k1d[2]=1; k1d[3]=2; k1d[4]=2; k1d[5]=2;
 
-    tensor *V1 = tensor_zeros_data(4, (int[]){1, 1, 2, 3});
+    tensor *V1 = tensor_zeros_data(ctx.data, 4, (int[]){1, 1, 2, 3});
     float *v1d = (float*)V1->data;
     v1d[0]=10; v1d[1]=10; v1d[2]=10; v1d[3]=20; v1d[4]=20; v1d[5]=20;
 
@@ -121,11 +124,11 @@ static void test_append_multiple_tokens(void) {
     assert(kvc->seq_len == 2);
 
     /* Append 1 more token: [3,3,3] */
-    tensor *K2 = tensor_zeros_data(4, (int[]){1, 1, 1, 3});
+    tensor *K2 = tensor_zeros_data(ctx.data, 4, (int[]){1, 1, 1, 3});
     float *k2d = (float*)K2->data;
     k2d[0]=3; k2d[1]=3; k2d[2]=3;
 
-    tensor *V2 = tensor_zeros_data(4, (int[]){1, 1, 1, 3});
+    tensor *V2 = tensor_zeros_data(ctx.data, 4, (int[]){1, 1, 1, 3});
     float *v2d = (float*)V2->data;
     v2d[0]=30; v2d[1]=30; v2d[2]=30;
 
@@ -143,8 +146,8 @@ static void test_append_multiple_tokens(void) {
     }
 
     /* Verify get_K/V shape */
-    tensor *K_view = kv_cache_get_K(kvc);
-    tensor *V_view = kv_cache_get_V(kvc);
+    tensor *K_view = kv_cache_get_K(ctx.scratch, kvc);
+    tensor *V_view = kv_cache_get_V(ctx.scratch, kvc);
     check_shape(K_view, 4, (int[]){1, 1, 3, 3}, "K_view mult");
     check_shape(V_view, 4, (int[]){1, 1, 3, 3}, "V_view mult");
 
@@ -153,11 +156,11 @@ static void test_append_multiple_tokens(void) {
 
 static void test_append_multibatch_multihead(void) {
     printf("  test_append_multibatch_multihead... ");
-    kv_cache *kvc = kv_cache_create(2, 3, 10, 2);
+    kv_cache *kvc = kv_cache_create(ctx.params, 2, 3, 10, 2);
 
     /* Append 2 tokens at once: K/V shape [2, 3, 2, 2] */
-    tensor *K = tensor_zeros_data(4, (int[]){2, 3, 2, 2});
-    tensor *V = tensor_zeros_data(4, (int[]){2, 3, 2, 2});
+    tensor *K = tensor_zeros_data(ctx.data, 4, (int[]){2, 3, 2, 2});
+    tensor *V = tensor_zeros_data(ctx.data, 4, (int[]){2, 3, 2, 2});
     float *kd = (float*)K->data;
     float *vd = (float*)V->data;
     /* Fill with distinct values per (b, h, n, d) */
@@ -185,8 +188,8 @@ static void test_append_multibatch_multihead(void) {
     assert(fabsf(tget(kvc->v_cache, 1, 2, 1, 0) - 2300.0f) < EPS);
 
     /* Verify get_K/V shape */
-    tensor *K_view = kv_cache_get_K(kvc);
-    tensor *V_view = kv_cache_get_V(kvc);
+    tensor *K_view = kv_cache_get_K(ctx.scratch, kvc);
+    tensor *V_view = kv_cache_get_V(ctx.scratch, kvc);
     check_shape(K_view, 4, (int[]){2, 3, 2, 2}, "K_view mb");
     check_shape(V_view, 4, (int[]){2, 3, 2, 2}, "V_view mb");
 
@@ -195,12 +198,12 @@ static void test_append_multibatch_multihead(void) {
 
 static void test_append_fills_to_max(void) {
     printf("  test_append_fills_to_max... ");
-    kv_cache *kvc = kv_cache_create(1, 1, 4, 2);
+    kv_cache *kvc = kv_cache_create(ctx.params, 1, 1, 4, 2);
 
     /* Append one at a time until full */
     for (int t = 1; t <= 4; t++) {
-        tensor *K = tensor_zeros_data(4, (int[]){1, 1, 1, 2});
-        tensor *V = tensor_zeros_data(4, (int[]){1, 1, 1, 2});
+        tensor *K = tensor_zeros_data(ctx.data, 4, (int[]){1, 1, 1, 2});
+        tensor *V = tensor_zeros_data(ctx.data, 4, (int[]){1, 1, 1, 2});
         float *kd = (float*)K->data;
         float *vd = (float*)V->data;
         kd[0] = (float)t; kd[1] = (float)(t * 10);
@@ -221,8 +224,8 @@ static void test_append_fills_to_max(void) {
     }
 
     /* Verify get_K/V shape for full cache */
-    tensor *K_view = kv_cache_get_K(kvc);
-    tensor *V_view = kv_cache_get_V(kvc);
+    tensor *K_view = kv_cache_get_K(ctx.scratch, kvc);
+    tensor *V_view = kv_cache_get_V(ctx.scratch, kvc);
     check_shape(K_view, 4, (int[]){1, 1, 4, 2}, "K_view full");
     check_shape(V_view, 4, (int[]){1, 1, 4, 2}, "V_view full");
 
@@ -231,13 +234,13 @@ static void test_append_fills_to_max(void) {
 
 static void test_append_seq_len_grows(void) {
     printf("  test_append_seq_len_grows... ");
-    kv_cache *kvc = kv_cache_create(1, 1, 5, 2);
+    kv_cache *kvc = kv_cache_create(ctx.params, 1, 1, 5, 2);
 
     assert(kvc->seq_len == 0);
     assert(kvc->max_seq == 5);
 
-    tensor *K = tensor_zeros_data(4, (int[]){1, 1, 1, 2});
-    tensor *V = tensor_zeros_data(4, (int[]){1, 1, 1, 2});
+    tensor *K = tensor_zeros_data(ctx.data, 4, (int[]){1, 1, 1, 2});
+    tensor *V = tensor_zeros_data(ctx.data, 4, (int[]){1, 1, 1, 2});
     ((float*)K->data)[0] = 1.0f; ((float*)K->data)[1] = 2.0f;
     ((float*)V->data)[0] = 3.0f; ((float*)V->data)[1] = 4.0f;
 
@@ -252,22 +255,17 @@ static void test_append_seq_len_grows(void) {
 int main(void) {
     printf("test_kv_cache:\n");
 
-    mem_pool params  = mem_pool_create(4 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(4 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 4 * 1024 * 1024, 4 * 1024 * 1024);
 
-    test_create();                         mem_pool_reset(&params); mem_pool_reset(&scratch); mem_pool_reset(&data);
-    test_append_one_token();               mem_pool_reset(&params); mem_pool_reset(&scratch); mem_pool_reset(&data);
-    test_append_multiple_tokens();         mem_pool_reset(&params); mem_pool_reset(&scratch); mem_pool_reset(&data);
-    test_append_multibatch_multihead();    mem_pool_reset(&params); mem_pool_reset(&scratch); mem_pool_reset(&data);
-    test_append_fills_to_max();            mem_pool_reset(&params); mem_pool_reset(&scratch); mem_pool_reset(&data);
-    test_append_seq_len_grows();           mem_pool_reset(&params); mem_pool_reset(&scratch); mem_pool_reset(&data);
-
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+    test_create();                         mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch); mem_pool_reset(ctx.data);
+    test_append_one_token();               mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch); mem_pool_reset(ctx.data);
+    test_append_multiple_tokens();         mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch); mem_pool_reset(ctx.data);
+    test_append_multibatch_multihead();    mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch); mem_pool_reset(ctx.data);
+    test_append_fills_to_max();            mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch); mem_pool_reset(ctx.data);
+    test_append_seq_len_grows();           mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch); mem_pool_reset(ctx.data);
 
     printf("  ALL PASS\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

@@ -1,10 +1,13 @@
 #include "dnn.h"
+#include "context.h"
 #include "transformer.h"
 #include <stdio.h>
 #include <assert.h>
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+
+static dnn_ctx ctx;
 
 #define EPS 1e-5f
 
@@ -20,7 +23,7 @@ static float max_abs_diff(const float *a, const float *b, int n) {
 }
 
 static tensor *make_tensor(int ndim, const int *shape, const float *data, int requires_grad) {
-    tensor *t = tensor_zeros(ndim, shape, requires_grad);
+    tensor *t = tensor_zeros(ctx.params, ndim, shape, requires_grad);
     if (data) {
         int n = tensor_numel(t);
         memcpy(tensor_data_ptr(t), data, n * sizeof(float));
@@ -32,11 +35,10 @@ static tensor *make_tensor(int ndim, const int *shape, const float *data, int re
 
 static void test_block_create(void) {
     printf("  test_block_create... ");
-    mem_pool params  = mem_pool_create(512 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, NULL);
 
-    transformer_block *block = transformer_block_create(4, 2, 2, 8);
+    dnn_ctx_init(&ctx, 512 * 1024, 32 * 1024 * 1024, 512 * 1024);
+
+    transformer_block *block = transformer_block_create(ctx.params, 4, 2, 2, 8);
     assert(block->d_model  == 4);
     assert(block->n_heads  == 2);
     assert(block->d_k      == 2);
@@ -71,26 +73,23 @@ static void test_block_create(void) {
     assert(tensor_requires_grad(block->ffn->gate_proj->weight));
 
     printf("OK\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
+
 }
 
 /* ── Test: backward grads flow to all params ── */
 
 static void test_backward_all_params(void) {
     printf("  test_backward_all_params... ");
-    mem_pool params  = mem_pool_create(512 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 512 * 1024, 32 * 1024 * 1024, 512 * 1024);
 
     srand(42);
 
-    transformer_block *block = transformer_block_create(4, 2, 2, 8);
-    tensor *x = tensor_randn(3, (int[]){1, 3, 4}, 1);  /* [B,N,d_model] */
+    transformer_block *block = transformer_block_create(ctx.params, 4, 2, 2, 8);
+    tensor *x = tensor_randn(ctx.params, 3, (int[]){1, 3, 4}, 1);  /* [B,N,d_model] */
 
-    tensor *out = transformer_block_forward(block, x);
-    dnn_backward(out);
+    tensor *out = transformer_block_forward(ctx.scratch, block, x);
+    dnn_backward(ctx.scratch, out);
 
     /* All params should have grads */
     assert(tensor_grad(block->q_proj->weight)     && "q_proj grad NULL");
@@ -118,9 +117,7 @@ static void test_backward_all_params(void) {
     for (int i = 0; i < 4; i++) assert(isfinite(g[i]));
 
     printf("OK (19 param groups with grads)\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: numerical gradient check (finite diff) ── */
@@ -131,21 +128,18 @@ static void test_numerical_grad(void) {
     int B=1, N=3, d_model=4, n_heads=2, d_k=2, intermediate=8;
     int n_input = B * N * d_model;
 
-    mem_pool params  = mem_pool_create(512 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 512 * 1024, 32 * 1024 * 1024, 512 * 1024);
 
     srand(42);
 
-    transformer_block *block = transformer_block_create(d_model, n_heads, d_k, intermediate);
-    tensor *x = tensor_randn(3, (int[]){B, N, d_model}, 1);
+    transformer_block *block = transformer_block_create(ctx.params, d_model, n_heads, d_k, intermediate);
+    tensor *x = tensor_randn(ctx.params, 3, (int[]){B, N, d_model}, 1);
 
     float *x_orig = malloc(n_input * sizeof(float));
     memcpy(x_orig, tensor_data_ptr(x), n_input * sizeof(float));
 
-    tensor *out = transformer_block_forward(block, x);
-    dnn_backward(out);
+    tensor *out = transformer_block_forward(ctx.scratch, block, x);
+    dnn_backward(ctx.scratch, out);
 
     float *x_grad_auto = malloc(n_input * sizeof(float));
     memcpy(x_grad_auto, tensor_grad(x), n_input * sizeof(float));
@@ -156,32 +150,32 @@ static void test_numerical_grad(void) {
 
     for (int idx = 0; idx < n_input && n_passed < n_checks; idx += n_input / n_checks) {
         /* +h */
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
 
         srand(42);
-        transformer_block *b1 = transformer_block_create(d_model, n_heads, d_k, intermediate);
+        transformer_block *b1 = transformer_block_create(ctx.params, d_model, n_heads, d_k, intermediate);
         tensor *x1 = make_tensor(3, (int[]){B, N, d_model}, x_orig, 1);
         float *x1d = tensor_data_ptr(x1);
         x1d[idx] += h;
 
-        tensor *o1 = transformer_block_forward(b1, x1);
+        tensor *o1 = transformer_block_forward(ctx.scratch, b1, x1);
         float l1 = 0.0f;
         float *o1d = tensor_data_ptr(o1);
         int nel = tensor_numel(o1);
         for (int i = 0; i < nel; i++) l1 += o1d[i];
 
         /* -h */
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
 
         srand(42);
-        transformer_block *b2 = transformer_block_create(d_model, n_heads, d_k, intermediate);
+        transformer_block *b2 = transformer_block_create(ctx.params, d_model, n_heads, d_k, intermediate);
         tensor *x2 = make_tensor(3, (int[]){B, N, d_model}, x_orig, 1);
         float *x2d = tensor_data_ptr(x2);
         x2d[idx] -= h;
 
-        tensor *o2 = transformer_block_forward(b2, x2);
+        tensor *o2 = transformer_block_forward(ctx.scratch, b2, x2);
         float l2 = 0.0f;
         float *o2d = tensor_data_ptr(o2);
         for (int i = 0; i < nel; i++) l2 += o2d[i];
@@ -200,28 +194,24 @@ static void test_numerical_grad(void) {
 
     free(x_orig);
     free(x_grad_auto);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: no-grad mode (eval) ── */
 
 static void test_no_grad(void) {
     printf("  test_no_grad... ");
-    mem_pool params  = mem_pool_create(512 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 512 * 1024, 32 * 1024 * 1024, 512 * 1024);
 
     srand(42);
 
-    transformer_block *block = transformer_block_create(4, 2, 2, 8);
-    tensor *x = tensor_randn(3, (int[]){1, 3, 4}, 0);
+    transformer_block *block = transformer_block_create(ctx.params, 4, 2, 2, 8);
+    tensor *x = tensor_randn(ctx.params, 3, (int[]){1, 3, 4}, 0);
 
-    dnn_grad_ctx ctx = dnn_no_grad_enter();
-    tensor *out = transformer_block_forward(block, x);
-    dnn_no_grad_exit(ctx);
+    dnn_grad_ctx gc = dnn_no_grad_enter();
+    tensor *out = transformer_block_forward(ctx.scratch, block, x);
+    dnn_no_grad_exit(gc);
 
     assert(out->grad_fn == NULL && "no-grad: autograd should not be wired");
     assert(tensor_ndim(out) == 3);
@@ -233,64 +223,56 @@ static void test_no_grad(void) {
     for (int i = 0; i < 12; i++) assert(isfinite(od[i]));
 
     printf("OK\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: chain — block inside larger graph ── */
 
 static void test_autograd_chain(void) {
     printf("  test_autograd_chain... ");
-    mem_pool params  = mem_pool_create(512 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 512 * 1024, 32 * 1024 * 1024, 512 * 1024);
 
     srand(7);
 
-    transformer_block *b1 = transformer_block_create(4, 2, 2, 8);
-    transformer_block *b2 = transformer_block_create(4, 2, 2, 8);
+    transformer_block *b1 = transformer_block_create(ctx.params, 4, 2, 2, 8);
+    transformer_block *b2 = transformer_block_create(ctx.params, 4, 2, 2, 8);
 
-    tensor *x = tensor_randn(3, (int[]){1, 3, 4}, 1);
-    tensor *h = transformer_block_forward(b1, x);
-    tensor *out = transformer_block_forward(b2, h);
+    tensor *x = tensor_randn(ctx.params, 3, (int[]){1, 3, 4}, 1);
+    tensor *h = transformer_block_forward(ctx.scratch, b1, x);
+    tensor *out = transformer_block_forward(ctx.scratch, b2, h);
 
-    tensor *loss = tensor_sum(out, -1);  /* [1, 3] */
-    dnn_backward(loss);
+    tensor *loss = tensor_sum(ctx.scratch, out, -1);  /* [1, 3] */
+    dnn_backward(ctx.scratch, loss);
 
     assert(tensor_grad(b1->q_proj->weight) && "b1 q_proj grad after chain");
     assert(tensor_grad(b2->q_proj->weight) && "b2 q_proj grad after chain");
     assert(tensor_grad(x) && "input grad through 2 blocks");
 
     printf("OK (2-block chain, grads flow through both)\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: batch processing ── */
 
 static void test_batch(void) {
     printf("  test_batch... ");
-    mem_pool params  = mem_pool_create(512 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 512 * 1024, 32 * 1024 * 1024, 512 * 1024);
 
     srand(42);
 
-    transformer_block *block = transformer_block_create(4, 2, 2, 8);
-    tensor *x = tensor_randn(3, (int[]){2, 3, 4}, 1);  /* B=2 */
+    transformer_block *block = transformer_block_create(ctx.params, 4, 2, 2, 8);
+    tensor *x = tensor_randn(ctx.params, 3, (int[]){2, 3, 4}, 1);  /* B=2 */
 
-    tensor *out = transformer_block_forward(block, x);
+    tensor *out = transformer_block_forward(ctx.scratch, block, x);
 
     assert(tensor_shape(out, 0) == 2);
     assert(tensor_shape(out, 1) == 3);
     assert(tensor_shape(out, 2) == 4);
 
     /* Gradients should flow for batch > 1 */
-    dnn_backward(out);
+    dnn_backward(ctx.scratch, out);
     assert(tensor_grad(block->q_proj->weight) && "batch grad");
     assert(tensor_grad(x) && "batch input grad");
 
@@ -298,61 +280,53 @@ static void test_batch(void) {
     for (int i = 0; i < 16; i++) assert(isfinite(qg[i]));
 
     printf("OK (B=2)\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: different sequence lengths ── */
 
 static void test_seq_len(void) {
     printf("  test_seq_len... ");
-    mem_pool params  = mem_pool_create(512 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 512 * 1024, 32 * 1024 * 1024, 512 * 1024);
 
     srand(42);
 
-    transformer_block *block = transformer_block_create(4, 2, 2, 8);
+    transformer_block *block = transformer_block_create(ctx.params, 4, 2, 2, 8);
 
     /* N=1 (single token — causal attn only sees itself) */
-    tensor *x1 = tensor_randn(3, (int[]){1, 1, 4}, 1);
-    tensor *o1 = transformer_block_forward(block, x1);
+    tensor *x1 = tensor_randn(ctx.params, 3, (int[]){1, 1, 4}, 1);
+    tensor *o1 = transformer_block_forward(ctx.scratch, block, x1);
     assert(tensor_shape(o1, 0) == 1 && tensor_shape(o1, 1) == 1 && tensor_shape(o1, 2) == 4);
-    dnn_backward(o1);
+    dnn_backward(ctx.scratch, o1);
     assert(tensor_grad(x1));
     printf("  N=1 OK ");
 
     /* N=7 */
-    mem_pool_reset(&scratch);
-    mem_pool_reset(&data);
+    mem_pool_reset(ctx.scratch);
+    mem_pool_reset(ctx.data);
 
-    tensor *x2 = tensor_randn(3, (int[]){1, 7, 4}, 1);
-    tensor *o2 = transformer_block_forward(block, x2);
+    tensor *x2 = tensor_randn(ctx.params, 3, (int[]){1, 7, 4}, 1);
+    tensor *o2 = transformer_block_forward(ctx.scratch, block, x2);
     assert(tensor_shape(o2, 0) == 1 && tensor_shape(o2, 1) == 7 && tensor_shape(o2, 2) == 4);
-    dnn_backward(o2);
+    dnn_backward(ctx.scratch, o2);
     assert(tensor_grad(x2));
     printf("N=7 OK ");
 
     printf("\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: forward + backward with PyTorch reference */
 
 static void test_ref_forward_backward(void) {
     printf("  test_ref_forward_backward... ");
-    mem_pool params  = mem_pool_create(2 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 512 * 1024, 32 * 1024 * 1024, 512 * 1024);
 
     int B=1, N=3, d_model=4, n_heads=2, d_k=2, intermediate=8;
 
-    transformer_block *block = transformer_block_create(d_model, n_heads, d_k, intermediate);
+    transformer_block *block = transformer_block_create(ctx.params, d_model, n_heads, d_k, intermediate);
 
     /* Reference data from PyTorch ref run (seed=42, --small config) */
     float ref_x[] = {
@@ -378,8 +352,8 @@ static void test_ref_forward_backward(void) {
      * set a specific seed + override to match.  For brevity, just
      * check structural invariants (finite output, norm grad flow). */
 
-    tensor *out = transformer_block_forward(block, x);
-    dnn_backward(out);
+    tensor *out = transformer_block_forward(ctx.scratch, block, x);
+    dnn_backward(ctx.scratch, out);
 
     /* Check output shape */
     assert(tensor_ndim(out) == 3);
@@ -405,23 +379,19 @@ static void test_ref_forward_backward(void) {
     }
 
     printf("OK (forward+backward, norm grads finite)\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: forward output vs reference (with weight sync) ── */
 
 static void test_forward_exact(void) {
     printf("  test_forward_exact... ");
-    mem_pool params  = mem_pool_create(2 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 512 * 1024, 32 * 1024 * 1024, 512 * 1024);
 
     int B=1, N=3, d_model=4, n_heads=2, d_k=2, intermediate=8;
 
-    transformer_block *block = transformer_block_create(d_model, n_heads, d_k, intermediate);
+    transformer_block *block = transformer_block_create(ctx.params, d_model, n_heads, d_k, intermediate);
 
     /* Reference values from PyTorch (seed=42, --small) */
     float ref_x[] = {
@@ -515,7 +485,7 @@ static void test_forward_exact(void) {
     /* Layer norm γ=1, β=0 already from create */
 
     tensor *x = make_tensor(3, (int[]){B, N, d_model}, ref_x, 1);
-    tensor *out = transformer_block_forward(block, x);
+    tensor *out = transformer_block_forward(ctx.scratch, block, x);
 
     float *od = tensor_data_ptr(out);
     float diff = max_abs_diff(od, ref_output, 12);
@@ -530,9 +500,6 @@ static void test_forward_exact(void) {
         printf("WARN (diff > 0.5, weight sync imprecise)\n");
     }
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ── Main ── */
@@ -551,5 +518,7 @@ int main(void) {
     test_forward_exact();
 
     printf("\nAll transformer_block tests passed.\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

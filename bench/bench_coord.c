@@ -12,6 +12,8 @@
 #include <time.h>
 #include <math.h>
 
+static dnn_ctx ctx;
+
 #define DNN_MAX_DIMS 8
 
 static double now_us(void) {
@@ -161,5 +163,7 @@ int main(void) {
     printf("\n# coord costs 2-5x over flat loop.\n");
     printf("# pragma omp simd doesn't help (can't vectorize through %/coord inner loop).\n");
     printf("# Fix: add fast-path in each op when no broadcasting.\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

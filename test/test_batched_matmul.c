@@ -1,9 +1,12 @@
 #include "dnn.h"
+#include "context.h"
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+
+static dnn_ctx ctx;
 
 #define EPS 1e-4f
 
@@ -19,7 +22,7 @@ static float max_abs_diff(const float *a, const float *b, int n) {
 }
 
 static tensor *make_tensor(int ndim, const int *shape, const float *data, int requires_grad) {
-    tensor *t = tensor_zeros(ndim, shape, requires_grad);
+    tensor *t = tensor_zeros(ctx.params, ndim, shape, requires_grad);
     if (data) {
         int n = tensor_numel(t);
         memcpy(tensor_data_ptr(t), data, n * sizeof(float));
@@ -50,20 +53,17 @@ static void test_3d_batched(void) {
     printf("  test_3d_batched... ");
     int B = 3, M = 2, K = 4, N = 5;
 
-    mem_pool params  = mem_pool_create(256 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
-    tensor *a = tensor_randn(3, (int[]){B, M, K}, 1);
-    tensor *b = tensor_randn(3, (int[]){B, K, N}, 1);
+    tensor *a = tensor_randn(ctx.params, 3, (int[]){B, M, K}, 1);
+    tensor *b = tensor_randn(ctx.params, 3, (int[]){B, K, N}, 1);
 
-    tensor *c = tensor_matmul(a, b);
+    tensor *c = tensor_matmul(ctx.scratch, a, b);
     assert(c->ndim == 3);
     assert(c->shape[0] == B && c->shape[1] == M && c->shape[2] == N);
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
     float *ag = tensor_grad(a);
     float *bg = tensor_grad(b);
     assert(ag && bg && "grads not null");
@@ -80,9 +80,6 @@ static void test_3d_batched(void) {
 
     printf("OK  [B=%d,M=%d,K=%d,N=%d]\n", B, M, K, N);
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -93,20 +90,17 @@ static void test_3d_broadcast_b(void) {
     printf("  test_3d_broadcast_b... ");
     int B = 2, M = 3, K = 4, N = 5;
 
-    mem_pool params  = mem_pool_create(256 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
-    tensor *a = tensor_randn(3, (int[]){B, M, K}, 1);
-    tensor *b = tensor_randn(2, (int[]){K, N}, 1);
+    tensor *a = tensor_randn(ctx.params, 3, (int[]){B, M, K}, 1);
+    tensor *b = tensor_randn(ctx.params, 2, (int[]){K, N}, 1);
 
-    tensor *c = tensor_matmul(a, b);
+    tensor *c = tensor_matmul(ctx.scratch, a, b);
     assert(c->ndim == 3);
     assert(c->shape[0] == B && c->shape[1] == M && c->shape[2] == N);
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
     float *ag = tensor_grad(a);
     float *bg = tensor_grad(b);
     assert(ag && bg && "grads not null");
@@ -121,9 +115,6 @@ static void test_3d_broadcast_b(void) {
 
     printf("OK\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -134,20 +125,17 @@ static void test_3d_broadcast_a(void) {
     printf("  test_3d_broadcast_a... ");
     int B = 3, M = 2, K = 4, N = 5;
 
-    mem_pool params  = mem_pool_create(256 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
-    tensor *a = tensor_randn(2, (int[]){M, K}, 1);
-    tensor *b = tensor_randn(3, (int[]){B, K, N}, 1);
+    tensor *a = tensor_randn(ctx.params, 2, (int[]){M, K}, 1);
+    tensor *b = tensor_randn(ctx.params, 3, (int[]){B, K, N}, 1);
 
-    tensor *c = tensor_matmul(a, b);
+    tensor *c = tensor_matmul(ctx.scratch, a, b);
     assert(c->ndim == 3);
     assert(c->shape[0] == B && c->shape[1] == M && c->shape[2] == N);
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
     float *ag = tensor_grad(a);
     float *bg = tensor_grad(b);
     assert(ag && bg && "grads not null");
@@ -159,9 +147,6 @@ static void test_3d_broadcast_a(void) {
 
     printf("OK\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -172,21 +157,18 @@ static void test_4d_broadcast(void) {
     printf("  test_4d_broadcast... ");
     int B1 = 2, B2 = 3, M = 4, K = 5, N = 6;
 
-    mem_pool params  = mem_pool_create(256 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
-    tensor *a = tensor_randn(4, (int[]){B1, B2, M, K}, 1);
-    tensor *b = tensor_randn(4, (int[]){1, B2, K, N}, 1);
+    tensor *a = tensor_randn(ctx.params, 4, (int[]){B1, B2, M, K}, 1);
+    tensor *b = tensor_randn(ctx.params, 4, (int[]){1, B2, K, N}, 1);
 
-    tensor *c = tensor_matmul(a, b);
+    tensor *c = tensor_matmul(ctx.scratch, a, b);
     assert(c->ndim == 4);
     assert(c->shape[0] == B1 && c->shape[1] == B2);
     assert(c->shape[2] == M && c->shape[3] == N);
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
     float *ag = tensor_grad(a);
     float *bg = tensor_grad(b);
     assert(ag && bg && "grads not null");
@@ -198,9 +180,6 @@ static void test_4d_broadcast(void) {
 
     printf("OK  [B1=%d,B2=%d,M=%d,K=%d,N=%d]\n", B1, B2, M, K, N);
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -211,21 +190,18 @@ static void test_4d_broadcast_a(void) {
     printf("  test_4d_broadcast_a... ");
     int B1 = 2, B2 = 3, M = 4, K = 5, N = 6;
 
-    mem_pool params  = mem_pool_create(256 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
-    tensor *a = tensor_randn(4, (int[]){1, B2, M, K}, 1);
-    tensor *b = tensor_randn(4, (int[]){B1, B2, K, N}, 1);
+    tensor *a = tensor_randn(ctx.params, 4, (int[]){1, B2, M, K}, 1);
+    tensor *b = tensor_randn(ctx.params, 4, (int[]){B1, B2, K, N}, 1);
 
-    tensor *c = tensor_matmul(a, b);
+    tensor *c = tensor_matmul(ctx.scratch, a, b);
     assert(c->ndim == 4);
     assert(c->shape[0] == B1 && c->shape[1] == B2);
     assert(c->shape[2] == M && c->shape[3] == N);
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
     float *ag = tensor_grad(a);
     float *bg = tensor_grad(b);
     assert(ag && bg && "grads not null");
@@ -237,9 +213,6 @@ static void test_4d_broadcast_a(void) {
 
     printf("OK\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -250,19 +223,16 @@ static void test_self_matmul(void) {
     printf("  test_self_matmul... ");
     int B = 2, M = 3;
 
-    mem_pool params  = mem_pool_create(256 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
-    tensor *a = tensor_randn(3, (int[]){B, M, M}, 1);
+    tensor *a = tensor_randn(ctx.params, 3, (int[]){B, M, M}, 1);
 
-    tensor *c = tensor_matmul(a, a);
+    tensor *c = tensor_matmul(ctx.scratch, a, a);
     assert(c->ndim == 3);
     assert(c->shape[0] == B && c->shape[1] == M && c->shape[2] == M);
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
     float *ag = tensor_grad(a);
     assert(ag && "self-matmul grad not null");
     for (int i = 0; i < tensor_numel(a); i++) {
@@ -272,9 +242,6 @@ static void test_self_matmul(void) {
 
     printf("OK\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -286,38 +253,35 @@ static void test_single_batch_vs_2d(void) {
     printf("  test_single_batch_vs_2d... ");
     int M = 3, K = 4, N = 2;
 
-    mem_pool params  = mem_pool_create(256 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
     /* 3D batched version */
-    tensor *a3 = tensor_randn(3, (int[]){1, M, K}, 1);
-    tensor *b3 = tensor_randn(3, (int[]){1, K, N}, 1);
-    tensor *c3 = tensor_matmul(a3, b3);
+    tensor *a3 = tensor_randn(ctx.params, 3, (int[]){1, M, K}, 1);
+    tensor *b3 = tensor_randn(ctx.params, 3, (int[]){1, K, N}, 1);
+    tensor *c3 = tensor_matmul(ctx.scratch, a3, b3);
 
     /* Save forward output */
     int n_out = tensor_numel(c3);
     float *c3_data = malloc(n_out * sizeof(float));
     memcpy(c3_data, tensor_data_ptr(c3), n_out * sizeof(float));
 
-    dnn_backward(c3);
+    dnn_backward(ctx.scratch, c3);
     float *a3_grad = malloc(tensor_numel(a3) * sizeof(float));
     float *b3_grad = malloc(tensor_numel(b3) * sizeof(float));
     memcpy(a3_grad, tensor_grad(a3), tensor_numel(a3) * sizeof(float));
     memcpy(b3_grad, tensor_grad(b3), tensor_numel(b3) * sizeof(float));
 
     /* Reset and do 2D version */
-    mem_pool_reset(&scratch);
-    mem_pool_reset(&data);
+    mem_pool_reset(ctx.scratch);
+    mem_pool_reset(ctx.data);
 
     srand(42);
-    tensor *a2 = tensor_randn(2, (int[]){M, K}, 1);
-    tensor *b2 = tensor_randn(2, (int[]){K, N}, 1);
-    tensor *c2 = tensor_matmul(a2, b2);
+    tensor *a2 = tensor_randn(ctx.params, 2, (int[]){M, K}, 1);
+    tensor *b2 = tensor_randn(ctx.params, 2, (int[]){K, N}, 1);
+    tensor *c2 = tensor_matmul(ctx.scratch, a2, b2);
 
-    dnn_backward(c2);
+    dnn_backward(ctx.scratch, c2);
 
     /* Compare forward: 3D [1,M,N] vs 2D [M,N] */
     float *c2_data = tensor_data_ptr(c2);
@@ -338,9 +302,6 @@ static void test_single_batch_vs_2d(void) {
 
     printf("OK  (fwd=%.2e da=%.2e db=%.2e)\n", fd, da_diff, db_diff);
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -378,31 +339,25 @@ static void test_reference_values(void) {
                       -0.10309237f, -0.10309237f,
                       1.27101445f, 1.27101445f};
 
-    mem_pool params  = mem_pool_create(256 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);  /* ensure reproducible, though data overwritten */
     tensor *a = make_tensor(3, (int[]){B, M, K}, a_data, 1);
     tensor *b = make_tensor(3, (int[]){B, K, N}, b_data, 1);
 
-    tensor *c = tensor_matmul(a, b);
+    tensor *c = tensor_matmul(ctx.scratch, a, b);
     float *cd = tensor_data_ptr(c);
 
     float cf = max_abs_diff(cd, exp_c, B * M * N);
     assert(cf < EPS && "forward ref mismatch");
     printf("  forward: OK (%.2e) ", cf);
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
 
     check_grad_ary(a, exp_da, B * M * K, "da", __LINE__);
     check_grad_ary(b, exp_db, B * K * N, "db", __LINE__);
     printf("backward: OK\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -413,18 +368,15 @@ static void test_no_grad(void) {
     printf("  test_no_grad... ");
     int B = 2, M = 3, K = 4, N = 5;
 
-    mem_pool params  = mem_pool_create(256 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
-    tensor *a = tensor_randn(3, (int[]){B, M, K}, 1);
-    tensor *b = tensor_randn(3, (int[]){B, K, N}, 1);
+    tensor *a = tensor_randn(ctx.params, 3, (int[]){B, M, K}, 1);
+    tensor *b = tensor_randn(ctx.params, 3, (int[]){B, K, N}, 1);
 
-    dnn_grad_ctx ctx = dnn_no_grad_enter();
-    tensor *c = tensor_matmul(a, b);
-    dnn_no_grad_exit(ctx);
+    dnn_grad_ctx gc = dnn_no_grad_enter();
+    tensor *c = tensor_matmul(ctx.scratch, a, b);
+    dnn_no_grad_exit(gc);
 
     assert(c->grad_fn == NULL && "c has grad_fn despite no_grad");
     assert(c->ndim == 3);
@@ -435,9 +387,6 @@ static void test_no_grad(void) {
 
     printf("OK\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -448,14 +397,11 @@ static void test_numerical_grad(void) {
     printf("  test_numerical_grad...\n");
     int B = 1, M = 2, K = 3, N = 2;
 
-    mem_pool params  = mem_pool_create(512 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
-    tensor *a = tensor_randn(3, (int[]){B, M, K}, 1);
-    tensor *b = tensor_randn(3, (int[]){B, K, N}, 1);
+    tensor *a = tensor_randn(ctx.params, 3, (int[]){B, M, K}, 1);
+    tensor *b = tensor_randn(ctx.params, 3, (int[]){B, K, N}, 1);
 
     int na = tensor_numel(a);
     int nb = tensor_numel(b);
@@ -465,8 +411,8 @@ static void test_numerical_grad(void) {
     memcpy(b_orig, tensor_data_ptr(b), nb * sizeof(float));
 
     /* Autograd gradients */
-    tensor *c = tensor_matmul(a, b);
-    dnn_backward(c);
+    tensor *c = tensor_matmul(ctx.scratch, a, b);
+    dnn_backward(ctx.scratch, c);
     float *a_grad_auto = malloc(na * sizeof(float));
     float *b_grad_auto = malloc(nb * sizeof(float));
     memcpy(a_grad_auto, tensor_grad(a), na * sizeof(float));
@@ -478,8 +424,8 @@ static void test_numerical_grad(void) {
 
     /* Check a[0,0,0] */
     {
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
         srand(42);
         tensor *a_p = make_tensor(3, (int[]){B, M, K}, a_orig, 1);
         tensor *b_p = make_tensor(3, (int[]){B, K, N}, b_orig, 1);
@@ -487,19 +433,19 @@ static void test_numerical_grad(void) {
         float *ap = tensor_data_ptr(a_p);
         float orig = ap[0];
         ap[0] = orig + h;
-        tensor *c_p = tensor_matmul(a_p, b_p);
+        tensor *c_p = tensor_matmul(ctx.scratch, a_p, b_p);
         float loss_p = 0;
         float *cp = tensor_data_ptr(c_p);
         for (int i = 0; i < tensor_numel(c_p); i++) loss_p += cp[i];
 
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
         srand(42);
         tensor *a_n = make_tensor(3, (int[]){B, M, K}, a_orig, 1);
         tensor *b_n = make_tensor(3, (int[]){B, K, N}, b_orig, 1);
         ap = tensor_data_ptr(a_n);
         ap[0] = orig - h;
-        tensor *c_n = tensor_matmul(a_n, b_n);
+        tensor *c_n = tensor_matmul(ctx.scratch, a_n, b_n);
         float loss_n = 0;
         float *cn = tensor_data_ptr(c_n);
         for (int i = 0; i < tensor_numel(c_n); i++) loss_n += cn[i];
@@ -514,8 +460,8 @@ static void test_numerical_grad(void) {
 
     /* Check b[0,0,0] */
     {
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
         srand(42);
         tensor *a_p = make_tensor(3, (int[]){B, M, K}, a_orig, 1);
         tensor *b_p = make_tensor(3, (int[]){B, K, N}, b_orig, 1);
@@ -523,19 +469,19 @@ static void test_numerical_grad(void) {
         float *bp = tensor_data_ptr(b_p);
         float orig = bp[0];
         bp[0] = orig + h;
-        tensor *c_p = tensor_matmul(a_p, b_p);
+        tensor *c_p = tensor_matmul(ctx.scratch, a_p, b_p);
         float loss_p = 0;
         float *cp = tensor_data_ptr(c_p);
         for (int i = 0; i < tensor_numel(c_p); i++) loss_p += cp[i];
 
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
         srand(42);
         tensor *a_n = make_tensor(3, (int[]){B, M, K}, a_orig, 1);
         tensor *b_n = make_tensor(3, (int[]){B, K, N}, b_orig, 1);
         bp = tensor_data_ptr(b_n);
         bp[0] = orig - h;
-        tensor *c_n = tensor_matmul(a_n, b_n);
+        tensor *c_n = tensor_matmul(ctx.scratch, a_n, b_n);
         float loss_n = 0;
         float *cn = tensor_data_ptr(c_n);
         for (int i = 0; i < tensor_numel(c_n); i++) loss_n += cn[i];
@@ -553,9 +499,6 @@ static void test_numerical_grad(void) {
     free(a_orig); free(b_orig);
     free(a_grad_auto); free(b_grad_auto);
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -566,10 +509,7 @@ static void test_2d_still_works(void) {
     printf("  test_2d_still_works... ");
     int M = 2, K = 3, N = 2;
 
-    mem_pool params  = mem_pool_create(256 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     float a_data[] = {1, 2, 3, 4, 5, 6};
     float b_data[] = {7, 8, 9, 10, 11, 12};
@@ -577,14 +517,14 @@ static void test_2d_still_works(void) {
     tensor *a = make_tensor(2, (int[]){M, K}, a_data, 1);
     tensor *b = make_tensor(2, (int[]){K, N}, b_data, 1);
 
-    tensor *c = tensor_matmul(a, b);
+    tensor *c = tensor_matmul(ctx.scratch, a, b);
     float *cd = tensor_data_ptr(c);
     assert(fabsf(cd[0] - 58.0f) < EPS);
     assert(fabsf(cd[1] - 64.0f) < EPS);
     assert(fabsf(cd[2] - 139.0f) < EPS);
     assert(fabsf(cd[3] - 154.0f) < EPS);
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
 
     float exp_a[] = {15.0f, 19.0f, 23.0f, 15.0f, 19.0f, 23.0f};
     float exp_b[] = {5.0f, 5.0f, 7.0f, 7.0f, 9.0f, 9.0f};
@@ -593,9 +533,6 @@ static void test_2d_still_works(void) {
 
     printf("OK\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -606,30 +543,24 @@ static void test_2d_self_still_works(void) {
     printf("  test_2d_self_still_works... ");
     int M = 2;
 
-    mem_pool params  = mem_pool_create(256 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     float a_data[] = {1, 2, 3, 4};
 
     tensor *a = make_tensor(2, (int[]){M, M}, a_data, 1);
-    tensor *c = tensor_matmul(a, a);
+    tensor *c = tensor_matmul(ctx.scratch, a, a);
     float *cd = tensor_data_ptr(c);
     assert(fabsf(cd[0] - 7.0f) < EPS);
     assert(fabsf(cd[1] - 10.0f) < EPS);
     assert(fabsf(cd[2] - 15.0f) < EPS);
     assert(fabsf(cd[3] - 22.0f) < EPS);
 
-    dnn_backward(c);
+    dnn_backward(ctx.scratch, c);
     float exp_a[] = {7.0f, 11.0f, 9.0f, 13.0f};
     check_grad_ary(a, exp_a, M * M, "da", __LINE__);
 
     printf("OK\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -640,17 +571,14 @@ static void test_larger_batch(void) {
     printf("  test_larger_batch... ");
     int B = 7, M = 8, K = 16, N = 10;
 
-    mem_pool params  = mem_pool_create(512 * 1024);
-    mem_pool scratch = mem_pool_create(8 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
-    tensor *a = tensor_randn(3, (int[]){B, M, K}, 1);
-    tensor *b = tensor_randn(3, (int[]){B, K, N}, 1);
+    tensor *a = tensor_randn(ctx.params, 3, (int[]){B, M, K}, 1);
+    tensor *b = tensor_randn(ctx.params, 3, (int[]){B, K, N}, 1);
 
-    tensor *c = tensor_matmul(a, b);
-    dnn_backward(c);
+    tensor *c = tensor_matmul(ctx.scratch, a, b);
+    dnn_backward(ctx.scratch, c);
 
     float *cd = tensor_data_ptr(c);
     for (int i = 0; i < tensor_numel(c); i++)
@@ -665,9 +593,6 @@ static void test_larger_batch(void) {
 
     printf("OK  [%d,%d,%d,%d]\n", B, M, K, N);
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -692,5 +617,7 @@ int main(void) {
     test_larger_batch();
 
     printf("\nAll batched matmul tests passed.\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

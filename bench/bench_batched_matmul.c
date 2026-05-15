@@ -1,8 +1,11 @@
 #include "dnn.h"
+#include "context.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 #include <string.h>
+
+static dnn_ctx ctx;
 
 static double now_us(void) {
     struct timespec ts;
@@ -18,21 +21,18 @@ static double now_us(void) {
 static double time_batched(int B, int M, int K, int N, int warmup, int trials) {
     double *t = malloc(trials * sizeof(double));
     for (int tr = -warmup; tr < trials; tr++) {
-        mem_pool params  = mem_pool_create(512 * 1024 * 1024);
-        mem_pool scratch = mem_pool_create(2LL * 1024 * 1024 * 1024);
-        mem_pool_set_defaults(&params, &scratch, NULL);
 
-        tensor *a = tensor_randn(3, (int[]){B, M, K}, 1);
-        tensor *b = tensor_randn(3, (int[]){B, K, N}, 1);
+    dnn_ctx_init(&ctx, 512 * 1024 * 1024, 512 * 1024 * 1024, 512 * 1024 * 1024);
+
+        tensor *a = tensor_randn(ctx.params, 3, (int[]){B, M, K}, 1);
+        tensor *b = tensor_randn(ctx.params, 3, (int[]){B, K, N}, 1);
 
         double t0 = now_us();
-        tensor *c = tensor_matmul(a, b);
-        tensor *l = tensor_sum(c, 0);
-        dnn_backward(l);
+        tensor *c = tensor_matmul(ctx.scratch, a, b);
+        tensor *l = tensor_sum(ctx.scratch, c, 0);
+        dnn_backward(ctx.scratch, l);
         double dt = now_us() - t0;
 
-        mem_pool_destroy(&params);
-        mem_pool_destroy(&scratch);
         if (tr >= 0) t[tr] = dt;
     }
     /* median */
@@ -48,21 +48,18 @@ static double time_batched(int B, int M, int K, int N, int warmup, int trials) {
 static double time_broadcast_a(int B, int M, int K, int N, int warmup, int trials) {
     double *t = malloc(trials * sizeof(double));
     for (int tr = -warmup; tr < trials; tr++) {
-        mem_pool params  = mem_pool_create(512 * 1024 * 1024);
-        mem_pool scratch = mem_pool_create(2LL * 1024 * 1024 * 1024);
-        mem_pool_set_defaults(&params, &scratch, NULL);
 
-        tensor *a = tensor_randn(2, (int[]){M, K}, 1);
-        tensor *b = tensor_randn(3, (int[]){B, K, N}, 1);
+    dnn_ctx_init(&ctx, 512 * 1024 * 1024, 512 * 1024 * 1024, 512 * 1024 * 1024);
+
+        tensor *a = tensor_randn(ctx.params, 2, (int[]){M, K}, 1);
+        tensor *b = tensor_randn(ctx.params, 3, (int[]){B, K, N}, 1);
 
         double t0 = now_us();
-        tensor *c = tensor_matmul(a, b);
-        tensor *l = tensor_sum(c, 0);
-        dnn_backward(l);
+        tensor *c = tensor_matmul(ctx.scratch, a, b);
+        tensor *l = tensor_sum(ctx.scratch, c, 0);
+        dnn_backward(ctx.scratch, l);
         double dt = now_us() - t0;
 
-        mem_pool_destroy(&params);
-        mem_pool_destroy(&scratch);
         if (tr >= 0) t[tr] = dt;
     }
     for (int i = 0; i < trials; i++)
@@ -77,21 +74,18 @@ static double time_broadcast_a(int B, int M, int K, int N, int warmup, int trial
 static double time_4d(int B1, int B2, int M, int K, int N, int warmup, int trials) {
     double *t = malloc(trials * sizeof(double));
     for (int tr = -warmup; tr < trials; tr++) {
-        mem_pool params  = mem_pool_create(512 * 1024 * 1024);
-        mem_pool scratch = mem_pool_create(2LL * 1024 * 1024 * 1024);
-        mem_pool_set_defaults(&params, &scratch, NULL);
 
-        tensor *a = tensor_randn(4, (int[]){B1, B2, M, K}, 1);
-        tensor *b = tensor_randn(4, (int[]){B1, B2, K, N}, 1);
+    dnn_ctx_init(&ctx, 512 * 1024 * 1024, 512 * 1024 * 1024, 512 * 1024 * 1024);
+
+        tensor *a = tensor_randn(ctx.params, 4, (int[]){B1, B2, M, K}, 1);
+        tensor *b = tensor_randn(ctx.params, 4, (int[]){B1, B2, K, N}, 1);
 
         double t0 = now_us();
-        tensor *c = tensor_matmul(a, b);
-        tensor *l = tensor_sum(c, 0);
-        dnn_backward(l);
+        tensor *c = tensor_matmul(ctx.scratch, a, b);
+        tensor *l = tensor_sum(ctx.scratch, c, 0);
+        dnn_backward(ctx.scratch, l);
         double dt = now_us() - t0;
 
-        mem_pool_destroy(&params);
-        mem_pool_destroy(&scratch);
         if (tr >= 0) t[tr] = dt;
     }
     for (int i = 0; i < trials; i++)
@@ -106,21 +100,18 @@ static double time_4d(int B1, int B2, int M, int K, int N, int warmup, int trial
 static double time_2d(int M, int K, int N, int warmup, int trials) {
     double *t = malloc(trials * sizeof(double));
     for (int tr = -warmup; tr < trials; tr++) {
-        mem_pool params  = mem_pool_create(512 * 1024 * 1024);
-        mem_pool scratch = mem_pool_create(2LL * 1024 * 1024 * 1024);
-        mem_pool_set_defaults(&params, &scratch, NULL);
 
-        tensor *a = tensor_randn(2, (int[]){M, K}, 1);
-        tensor *b = tensor_randn(2, (int[]){K, N}, 1);
+    dnn_ctx_init(&ctx, 512 * 1024 * 1024, 512 * 1024 * 1024, 512 * 1024 * 1024);
+
+        tensor *a = tensor_randn(ctx.params, 2, (int[]){M, K}, 1);
+        tensor *b = tensor_randn(ctx.params, 2, (int[]){K, N}, 1);
 
         double t0 = now_us();
-        tensor *c = tensor_matmul(a, b);
-        tensor *l = tensor_sum(c, 0);
-        dnn_backward(l);
+        tensor *c = tensor_matmul(ctx.scratch, a, b);
+        tensor *l = tensor_sum(ctx.scratch, c, 0);
+        dnn_backward(ctx.scratch, l);
         double dt = now_us() - t0;
 
-        mem_pool_destroy(&params);
-        mem_pool_destroy(&scratch);
         if (tr >= 0) t[tr] = dt;
     }
     for (int i = 0; i < trials; i++)
@@ -209,6 +200,9 @@ int main(void) {
         printf("4d B1=%d B2=%d M%d K%d N%d  %10.0f  %10.2f  %7.1fG\n",
                B1, B2, M, K, N, us, flops / (us * 1e3), flops / 1e9);
     }
+
+    dnn_ctx_destroy(&ctx);
+
 
     return 0;
 }

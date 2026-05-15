@@ -1,4 +1,5 @@
 #include "dnn.h"
+#include "context.h"
 #include "transformer.h"
 #include "optim.h"
 #include <stdio.h>
@@ -7,6 +8,8 @@
 #include <string.h>
 #include <stdlib.h>
 
+static dnn_ctx ctx;
+
 #define EPS 1e-5f
 
 /* ── Helpers ── */
@@ -14,7 +17,7 @@
 static tensor *make_int_tensor(int ndim, const int *shape, const int *data) {
     int n = 1;
     for (int i = 0; i < ndim; i++) n *= shape[i];
-    tensor *t = tensor_zeros_data(ndim, shape);
+    tensor *t = tensor_zeros_data(ctx.data, ndim, shape);
     if (data) memcpy(t->data, data, n * sizeof(int));
     return t;
 }
@@ -54,7 +57,7 @@ static tensor **collect_params(decoder_lm *lm, int *n_out) {
     }
 
     *n_out = n;
-    tensor **arr = mem_params_alloc(n * sizeof(tensor*), NULL);
+    tensor **arr = _mem_pool_alloc(ctx.params, n * sizeof(tensor*), NULL);
     memcpy(arr, all, n * sizeof(tensor*));
     return arr;
 }
@@ -63,55 +66,49 @@ static tensor **collect_params(decoder_lm *lm, int *n_out) {
 
 static void test_train_step_basic(void) {
     printf("  test_train_step_basic... ");
-    mem_pool params  = mem_pool_create(4 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 64 * 1024 * 1024, 1 * 1024 * 1024);
 
     int B=2, N=4, vocab=8, d_model=4, n_layers=2, n_heads=2, d_k=2, intermediate=8;
 
     srand(42);
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     int n_params;
     tensor **all_params = collect_params(lm, &n_params);
-    adamw_opt *opt = adamw_create(all_params, n_params, 0.001f,
+    adamw_opt *opt = adamw_create(ctx.params, all_params, n_params, 0.001f,
                                    0.9f, 0.999f, 1e-8f, 0.01f);
 
     int ids[] = {3, 6, 7, 0, 4, 3, 4, 7};
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ids);
 
-    tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 0.0f, NULL);
+    tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
 
     float loss_val = tensor_data_ptr(loss)[0];
     assert(isfinite(loss_val) && "loss non-finite");
     assert(loss_val > 0.0f && "loss should be positive");
 
     printf("OK (loss=%.6f)\n", loss_val);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: gradients flow to all parameter groups ── */
 
 static void test_gradients_flow(void) {
     printf("  test_gradients_flow...\n");
-    mem_pool params  = mem_pool_create(4 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 64 * 1024 * 1024, 1 * 1024 * 1024);
 
     int B=2, N=4, vocab=8, d_model=4, n_layers=2, n_heads=2, d_k=2, intermediate=8;
 
     srand(42);
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     int n_params;
     tensor **all_params = collect_params(lm, &n_params);
-    adamw_opt *opt = adamw_create(all_params, n_params, 0.001f,
+    adamw_opt *opt = adamw_create(ctx.params, all_params, n_params, 0.001f,
                                    0.9f, 0.999f, 1e-8f, 0.01f);
 
     int ids[] = {3, 6, 7, 0, 4, 3, 4, 7};
@@ -120,7 +117,7 @@ static void test_gradients_flow(void) {
     /* Before step, no grads exist */
     assert(tensor_grad(lm->embedding_table) == NULL);
 
-    tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 0.0f, NULL);
+    tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
 
     /* After step, all params have finite grads */
     float loss_val = tensor_data_ptr(loss)[0];
@@ -164,24 +161,20 @@ static void test_gradients_flow(void) {
     assert(tensor_grad(b1->ffn->down_proj->weight) != NULL);
 
     printf("  gradients_flow: OK\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: parameters change after training step ── */
 
 static void test_params_update(void) {
     printf("  test_params_update... ");
-    mem_pool params  = mem_pool_create(4 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 64 * 1024 * 1024, 1 * 1024 * 1024);
 
     int B=2, N=4, vocab=8, d_model=4, n_layers=2, n_heads=2, d_k=2, intermediate=8;
 
     srand(42);
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     /* Snapshot initial embeddings */
@@ -191,13 +184,13 @@ static void test_params_update(void) {
 
     int n_params;
     tensor **all_params = collect_params(lm, &n_params);
-    adamw_opt *opt = adamw_create(all_params, n_params, 0.001f,
+    adamw_opt *opt = adamw_create(ctx.params, all_params, n_params, 0.001f,
                                    0.9f, 0.999f, 1e-8f, 0.01f);
 
     int ids[] = {3, 6, 7, 0, 4, 3, 4, 7};
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ids);
 
-    decoder_lm_train_step(lm, input_ids, opt, 0.0f, NULL);
+    decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
 
     /* Embedding table should have changed */
     float *emb_final = tensor_data_ptr(lm->embedding_table);
@@ -210,29 +203,25 @@ static void test_params_update(void) {
     printf("OK (embedding max change=%.6f)\n", max_diff);
 
     free(emb_init);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: loss decreases over multiple steps ── */
 
 static void test_loss_decreases(void) {
     printf("  test_loss_decreases...\n");
-    mem_pool params  = mem_pool_create(4 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 64 * 1024 * 1024, 1 * 1024 * 1024);
 
     int B=2, N=4, vocab=8, d_model=4, n_layers=2, n_heads=2, d_k=2, intermediate=8;
 
     srand(42);
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     int n_params;
     tensor **all_params = collect_params(lm, &n_params);
-    adamw_opt *opt = adamw_create(all_params, n_params, 0.001f,
+    adamw_opt *opt = adamw_create(ctx.params, all_params, n_params, 0.001f,
                                    0.9f, 0.999f, 1e-8f, 0.01f);
 
     int ids[] = {3, 6, 7, 0, 4, 3, 4, 7};
@@ -241,13 +230,13 @@ static void test_loss_decreases(void) {
     int n_steps = 3;
     float losses[16];
     for (int step = 0; step < n_steps; step++) {
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
 
         /* Rebuild input_ids (data pool was reset) */
         input_ids = make_int_tensor(2, (int[]){B, N}, ids);
 
-        tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 0.0f, NULL);
+        tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
         losses[step] = tensor_data_ptr(loss)[0];
         printf("    step %d: loss=%.6f\n", step, losses[step]);
         assert(isfinite(losses[step]));
@@ -261,19 +250,15 @@ static void test_loss_decreases(void) {
 
     printf("  loss_decreases: OK (%.6f -> %.6f -> %.6f)\n",
            losses[0], losses[1], losses[2]);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: reference values vs PyTorch (seed+config matched) ── */
 
 static void test_ref_values(void) {
     printf("  test_ref_values... \n");
-    mem_pool params  = mem_pool_create(4 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 64 * 1024 * 1024, 1 * 1024 * 1024);
 
     int B=2, N=4, vocab=8, d_model=4, n_layers=2, n_heads=2, d_k=2, intermediate=8;
 
@@ -282,22 +267,22 @@ static void test_ref_values(void) {
     int   ref_input_ids[] = {3, 6, 7, 0, 4, 3, 4, 7};
 
     srand(42);
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     int n_params;
     tensor **all_params = collect_params(lm, &n_params);
-    adamw_opt *opt = adamw_create(all_params, n_params, 0.001f,
+    adamw_opt *opt = adamw_create(ctx.params, all_params, n_params, 0.001f,
                                    0.9f, 0.999f, 1e-8f, 0.01f);
 
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ref_input_ids);
 
     for (int step = 0; step < 3; step++) {
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
         input_ids = make_int_tensor(2, (int[]){B, N}, ref_input_ids);
 
-        tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 0.0f, NULL);
+        tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
         float c_loss = tensor_data_ptr(loss)[0];
         float diff = fabsf(c_loss - ref_losses[step]);
 
@@ -309,19 +294,15 @@ static void test_ref_values(void) {
     }
 
     printf("  ref_values: OK\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: different batch and sequence sizes ── */
 
 static void test_various_shapes(void) {
     printf("  test_various_shapes...\n");
-    mem_pool params  = mem_pool_create(8 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 64 * 1024 * 1024, 1 * 1024 * 1024);
 
     int vocab=8, d_model=4, n_layers=1, n_heads=2, d_k=2, intermediate=8;
 
@@ -337,12 +318,12 @@ static void test_various_shapes(void) {
     for (int ci = 0; ci < n_configs; ci++) {
         int B = configs[ci].B, N = configs[ci].N;
 
-        decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+        decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                             d_k, intermediate);
 
         int n_params;
         tensor **all_params = collect_params(lm, &n_params);
-        adamw_opt *opt = adamw_create(all_params, n_params, 0.001f,
+        adamw_opt *opt = adamw_create(ctx.params, all_params, n_params, 0.001f,
                                        0.9f, 0.999f, 1e-8f, 0.01f);
 
         int *ids = malloc(B * N * sizeof(int));
@@ -350,22 +331,20 @@ static void test_various_shapes(void) {
 
         tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ids);
 
-        tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 0.0f, NULL);
+        tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
         float lv = tensor_data_ptr(loss)[0];
         assert(isfinite(lv) && lv > 0.0f);
 
         printf("    B=%d N=%d loss=%.6f OK\n", B, N, lv);
 
         free(ids);
-        mem_pool_reset(&params);
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.params);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
     }
 
     printf("  various_shapes: OK\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Main ── */
@@ -381,5 +360,7 @@ int main(void) {
     test_various_shapes();
 
     printf("\nAll decoder_lm training tests passed.\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

@@ -1,9 +1,12 @@
 #include "dnn.h"
+#include "context.h"
 #include "nn.h"
 #include <stdio.h>
 #include <assert.h>
 #include <math.h>
 #include <string.h>
+
+static dnn_ctx ctx;
 
 #define EPS 1e-5f
 
@@ -34,7 +37,7 @@ static void check_data_ary(tensor *t, const float *exp, int n, const char *label
 
 static void test_linear_create_shapes(void) {
     printf("  test_linear_create_shapes... ");
-    linear *l = linear_create(4, 3);
+    linear *l = linear_create(ctx.params, 4, 3);
     assert(l->in_features  == 4);
     assert(l->out_features == 3);
     assert(tensor_ndim(l->weight) == 2);
@@ -52,18 +55,18 @@ static void test_linear_create_shapes(void) {
 static void test_linear_forward_single(void) {
     printf("  test_linear_forward_single... ");
     /* single sample: input (1, 3), weight (3, 2), bias (2) */
-    linear *l = linear_create(3, 2);
+    linear *l = linear_create(ctx.params, 3, 2);
     /* set weight & bias to known values */
     float *wp = tensor_data_ptr(l->weight);
     wp[0]=1; wp[1]=2; wp[2]=3; wp[3]=4; wp[4]=5; wp[5]=6;
     float *bp = tensor_data_ptr(l->bias);
     bp[0]=10; bp[1]=20;
 
-    tensor *x = tensor_zeros(2, (int[]){1, 3}, 0);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){1, 3}, 0);
     float *xp = tensor_data_ptr(x);
     xp[0]=2; xp[1]=3; xp[2]=4;
 
-    tensor *y = linear_forward(l, x);
+    tensor *y = linear_forward(ctx.scratch, l, x);
     /* y = x@W + b = [2*1+3*3+4*5, 2*2+3*4+4*6] + [10,20]
              = [2+9+20, 4+12+24] + [10,20] = [31, 40] + [10,20] = [41, 60] */
     float exp[] = {41.0f, 60.0f};
@@ -74,18 +77,18 @@ static void test_linear_forward_single(void) {
 static void test_linear_forward_batch(void) {
     printf("  test_linear_forward_batch... ");
     /* batch (2, 3), weight (3, 2), bias (2) */
-    linear *l = linear_create(3, 2);
+    linear *l = linear_create(ctx.params, 3, 2);
     float *wp = tensor_data_ptr(l->weight);
     wp[0]=1; wp[1]=2; wp[2]=3; wp[3]=4; wp[4]=5; wp[5]=6;
     float *bp = tensor_data_ptr(l->bias);
     bp[0]=10; bp[1]=20;
 
-    tensor *x = tensor_zeros(2, (int[]){2, 3}, 0);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 0);
     float *xp = tensor_data_ptr(x);
     xp[0]=1; xp[1]=2; xp[2]=3;  /* row 0 */
     xp[3]=4; xp[4]=5; xp[5]=6;  /* row 1 */
 
-    tensor *y = linear_forward(l, x);
+    tensor *y = linear_forward(ctx.scratch, l, x);
     /* row 0: [1*1+2*3+3*5, 1*2+2*4+3*6] + [10,20] = [1+6+15, 2+8+18]+[10,20] = [22,28]+[10,20] = [32,48] */
     /* row 1: [4*1+5*3+6*5, 4*2+5*4+6*6] + [10,20] = [4+15+30, 8+20+36]+[10,20] = [49,64]+[10,20] = [59,84] */
     float exp[] = {32.0f, 48.0f, 59.0f, 84.0f};
@@ -98,19 +101,19 @@ static void test_linear_forward_batch(void) {
 static void test_linear_backward_simple(void) {
     printf("  test_linear_backward_simple... ");
     /* y = x@W + b, with known values, verify grads */
-    linear *l = linear_create(2, 2);
+    linear *l = linear_create(ctx.params, 2, 2);
     float *wp = tensor_data_ptr(l->weight);
     wp[0]=1; wp[1]=2; wp[2]=3; wp[3]=4;
     float *bp = tensor_data_ptr(l->bias);
     bp[0]=0; bp[1]=0;
 
-    tensor *x = tensor_zeros(2, (int[]){1, 2}, 0);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){1, 2}, 0);
     float *xp = tensor_data_ptr(x);
     xp[0]=5; xp[1]=6;
     /* requires_grad for params already set; input has requires_grad=0 */
 
-    tensor *y = linear_forward(l, x);
-    dnn_backward(y);
+    tensor *y = linear_forward(ctx.scratch, l, x);
+    dnn_backward(ctx.scratch, y);
 
     /* dy/dW = X^T @ dloss/dy = [5,6]^T @ [1,1] = [[5,5],[6,6]] */
     float exp_W[] = {5.0f, 5.0f, 6.0f, 6.0f};
@@ -124,21 +127,21 @@ static void test_linear_backward_simple(void) {
 
 static void test_linear_backward_batch(void) {
     printf("  test_linear_backward_batch... ");
-    linear *l = linear_create(2, 3);
+    linear *l = linear_create(ctx.params, 2, 3);
     float *wp = tensor_data_ptr(l->weight);
     wp[0]=1; wp[1]=2; wp[2]=3; wp[3]=4; wp[4]=5; wp[5]=6;
     float *bp = tensor_data_ptr(l->bias);
     bp[0]=0; bp[1]=0; bp[2]=0;
 
     /* batch (3, 2) */
-    tensor *x = tensor_zeros(2, (int[]){3, 2}, 0);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){3, 2}, 0);
     float *xp = tensor_data_ptr(x);
     xp[0]=1; xp[1]=2;
     xp[2]=3; xp[3]=4;
     xp[4]=5; xp[5]=6;
 
-    tensor *y = linear_forward(l, x);
-    dnn_backward(y);
+    tensor *y = linear_forward(ctx.scratch, l, x);
+    dnn_backward(ctx.scratch, y);
 
     /* dW = X^T @ dloss/dy = X^T @ ones(3,3) */
     /* X^T = [[1,3,5],[2,4,6]], sum rows: dW = [[1+3+5, 1+3+5, 1+3+5],[2+4+6,2+4+6,2+4+6]] = [[9,9,9],[12,12,12]] */
@@ -154,16 +157,16 @@ static void test_linear_backward_batch(void) {
 static void test_linear_backward_input_grad(void) {
     printf("  test_linear_backward_input_grad... ");
     /* verify gradient flows back to input when requires_grad=1 */
-    linear *l = linear_create(2, 2);
+    linear *l = linear_create(ctx.params, 2, 2);
     float *wp = tensor_data_ptr(l->weight);
     wp[0]=1; wp[1]=0; wp[2]=0; wp[3]=1;
 
-    tensor *x = tensor_zeros(2, (int[]){1, 2}, 1);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){1, 2}, 1);
     float *xp = tensor_data_ptr(x);
     xp[0]=3; xp[1]=4;
 
-    tensor *y = linear_forward(l, x);
-    dnn_backward(y);
+    tensor *y = linear_forward(ctx.scratch, l, x);
+    dnn_backward(ctx.scratch, y);
 
     /* dy/dx = W^T = [[1,0],[0,1]] = identity, dloss/dy = [1,1] */
     /* dx = dloss/dy @ W^T = [1,1] @ I = [1,1] */
@@ -175,8 +178,8 @@ static void test_linear_backward_input_grad(void) {
 static void test_linear_chain(void) {
     printf("  test_linear_chain... ");
     /* two linear layers: y = (x @ W1 + b1) @ W2 + b2 */
-    linear *l1 = linear_create(2, 3);
-    linear *l2 = linear_create(3, 1);
+    linear *l1 = linear_create(ctx.params, 2, 3);
+    linear *l2 = linear_create(ctx.params, 3, 1);
 
     /* set known weights */
     float *w1p = tensor_data_ptr(l1->weight);
@@ -189,13 +192,13 @@ static void test_linear_chain(void) {
     float *b2p = tensor_data_ptr(l2->bias);
     b2p[0]=0;
 
-    tensor *x = tensor_zeros(2, (int[]){1, 2}, 0);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){1, 2}, 0);
     float *xp = tensor_data_ptr(x);
     xp[0]=1; xp[1]=2;
 
-    tensor *h = linear_forward(l1, x);   /* (1, 3) */
-    tensor *y = linear_forward(l2, h);   /* (1, 1) */
-    dnn_backward(y);
+    tensor *h = linear_forward(ctx.scratch, l1, x);   /* (1, 3) */
+    tensor *y = linear_forward(ctx.scratch, l2, h);   /* (1, 1) */
+    dnn_backward(ctx.scratch, y);
 
     /* verify forward intermediate:
      * W1 shape [2,3] row-major: [[1,2,3],[4,5,6]]
@@ -227,18 +230,18 @@ static void test_linear_no_bias(void) {
     printf("  test_linear_no_bias... ");
     /* verify linear layer still works — though our API always creates bias,
      * we can check that gradient computation still functions correctly */
-    linear *l = linear_create(3, 2);
+    linear *l = linear_create(ctx.params, 3, 2);
     float *wp = tensor_data_ptr(l->weight);
     wp[0]=1; wp[1]=2; wp[2]=3; wp[3]=4; wp[4]=5; wp[5]=6;
     /* zero out bias so it has no effect */
     float *bp = tensor_data_ptr(l->bias);
     bp[0]=0; bp[1]=0;
 
-    tensor *x = tensor_zeros(2, (int[]){1, 3}, 0);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){1, 3}, 0);
     float *xp = tensor_data_ptr(x);
     xp[0]=2; xp[1]=3; xp[2]=4;
 
-    tensor *y = linear_forward(l, x);
+    tensor *y = linear_forward(ctx.scratch, l, x);
     /* y = x@W + 0 = [31, 40] */
     float exp[] = {31.0f, 40.0f};
     check_data_ary(y, exp, 2, "y");
@@ -249,7 +252,7 @@ static void test_linear_no_bias(void) {
 
 static void test_swiglu_ffn_create_shapes(void) {
     printf("  test_swiglu_ffn_create_shapes... ");
-    swiglu_ffn *ffn = swiglu_ffn_create(4, 8);
+    swiglu_ffn *ffn = swiglu_ffn_create(ctx.params, 4, 8);
     assert(ffn->d_model == 4);
     assert(ffn->intermediate_size == 8);
     assert(ffn->gate_proj->in_features  == 4);
@@ -264,7 +267,7 @@ static void test_swiglu_ffn_create_shapes(void) {
 static void test_swiglu_ffn_forward(void) {
     printf("  test_swiglu_ffn_forward... ");
     /* d_model=2, intermediate_size=3, batch=1 */
-    swiglu_ffn *ffn = swiglu_ffn_create(2, 3);
+    swiglu_ffn *ffn = swiglu_ffn_create(ctx.params, 2, 3);
     /* Set weights to known values
      * gate_proj weight [2,3], bias [3]
      * up_proj   weight [2,3], bias [3]
@@ -284,11 +287,11 @@ static void test_swiglu_ffn_forward(void) {
     float *bd = tensor_data_ptr(ffn->down_proj->bias);
     bd[0]=0; bd[1]=0;
 
-    tensor *x = tensor_zeros(2, (int[]){1, 2}, 0);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){1, 2}, 0);
     float *xp = tensor_data_ptr(x);
     xp[0]=1; xp[1]=2;
 
-    tensor *y = swiglu_ffn_forward(ffn, x);
+    tensor *y = swiglu_ffn_forward(ctx.scratch, ffn, x);
     /* Check output shape: (1, 2) */
     assert(tensor_ndim(y) == 2);
     assert(tensor_shape(y, 0) == 1);
@@ -308,7 +311,7 @@ static void test_swiglu_ffn_forward(void) {
 
 static void test_swiglu_ffn_backward(void) {
     printf("  test_swiglu_ffn_backward... ");
-    swiglu_ffn *ffn = swiglu_ffn_create(2, 3);
+    swiglu_ffn *ffn = swiglu_ffn_create(ctx.params, 2, 3);
     /* identity-like weights for predictable gradient */
     float *wg = tensor_data_ptr(ffn->gate_proj->weight);
     wg[0]=1; wg[1]=0; wg[2]=0; wg[3]=0; wg[4]=1; wg[5]=0;
@@ -325,12 +328,12 @@ static void test_swiglu_ffn_backward(void) {
     float *bd = tensor_data_ptr(ffn->down_proj->bias);
     bd[0]=0; bd[1]=0;
 
-    tensor *x = tensor_zeros(2, (int[]){1, 2}, 0);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){1, 2}, 0);
     float *xp = tensor_data_ptr(x);
     xp[0]=2; xp[1]=3;
 
-    tensor *y = swiglu_ffn_forward(ffn, x);
-    dnn_backward(y);
+    tensor *y = swiglu_ffn_forward(ctx.scratch, ffn, x);
+    dnn_backward(ctx.scratch, y);
 
     /* All 6 parameter tensors should have non-zero gradients */
     assert(tensor_grad(ffn->gate_proj->weight) && "gate_proj dW");
@@ -344,7 +347,7 @@ static void test_swiglu_ffn_backward(void) {
 
 static void test_swiglu_ffn_input_grad(void) {
     printf("  test_swiglu_ffn_input_grad... ");
-    swiglu_ffn *ffn = swiglu_ffn_create(2, 3);
+    swiglu_ffn *ffn = swiglu_ffn_create(ctx.params, 2, 3);
     float *wg = tensor_data_ptr(ffn->gate_proj->weight);
     wg[0]=1; wg[1]=0; wg[2]=0; wg[3]=0; wg[4]=1; wg[5]=0;
     float *bg = tensor_data_ptr(ffn->gate_proj->bias);
@@ -360,12 +363,12 @@ static void test_swiglu_ffn_input_grad(void) {
     float *bd = tensor_data_ptr(ffn->down_proj->bias);
     bd[0]=0; bd[1]=0;
 
-    tensor *x = tensor_zeros(2, (int[]){1, 2}, 1);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){1, 2}, 1);
     float *xp = tensor_data_ptr(x);
     xp[0]=2; xp[1]=3;
 
-    tensor *y = swiglu_ffn_forward(ffn, x);
-    dnn_backward(y);
+    tensor *y = swiglu_ffn_forward(ctx.scratch, ffn, x);
+    dnn_backward(ctx.scratch, y);
 
     /* gradient should flow back to input */
     assert(tensor_grad(x) && "dx should be computed");
@@ -376,7 +379,7 @@ static void test_swiglu_ffn_input_grad(void) {
 
 static void test_swiglu_ffn_batch(void) {
     printf("  test_swiglu_ffn_batch... ");
-    swiglu_ffn *ffn = swiglu_ffn_create(2, 3);
+    swiglu_ffn *ffn = swiglu_ffn_create(ctx.params, 2, 3);
     float *wg = tensor_data_ptr(ffn->gate_proj->weight);
     wg[0]=1; wg[1]=2; wg[2]=3; wg[3]=4; wg[4]=5; wg[5]=6;
     float *bg = tensor_data_ptr(ffn->gate_proj->bias);
@@ -393,12 +396,12 @@ static void test_swiglu_ffn_batch(void) {
     bd[0]=0; bd[1]=0;
 
     /* batch of 2 */
-    tensor *x = tensor_zeros(2, (int[]){2, 2}, 0);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){2, 2}, 0);
     float *xp = tensor_data_ptr(x);
     xp[0]=1; xp[1]=2;  /* row 0 */
     xp[2]=3; xp[3]=4;  /* row 1 */
 
-    tensor *y = swiglu_ffn_forward(ffn, x);
+    tensor *y = swiglu_ffn_forward(ctx.scratch, ffn, x);
     assert(tensor_shape(y, 0) == 2);
     assert(tensor_shape(y, 1) == 2);
 
@@ -415,21 +418,21 @@ static void test_swiglu_ffn_batch(void) {
 
 static void test_linear_relu(void) {
     printf("  test_linear_relu... ");
-    linear *l = linear_create(2, 3);
+    linear *l = linear_create(ctx.params, 2, 3);
     float *wp = tensor_data_ptr(l->weight);
     wp[0]= 1; wp[1]=-1; wp[2]= 1;
     wp[3]=-1; wp[4]= 1; wp[5]=-1;
     float *bp = tensor_data_ptr(l->bias);
     bp[0]=0; bp[1]=0; bp[2]=0;
 
-    tensor *x = tensor_zeros(2, (int[]){1, 2}, 0);
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){1, 2}, 0);
     float *xp = tensor_data_ptr(x);
     xp[0]= 5; xp[1]=-3;
 
-    tensor *h = linear_forward(l, x);      /* (1, 3) */
-    tensor *r = tensor_relu(h);
-    tensor *s = tensor_sum(r, 0);          /* scalar (1,1) */
-    dnn_backward(s);
+    tensor *h = linear_forward(ctx.scratch, l, x);      /* (1, 3) */
+    tensor *r = tensor_relu(ctx.scratch, h);
+    tensor *s = tensor_sum(ctx.scratch, r, 0);          /* scalar (1,1) */
+    dnn_backward(ctx.scratch, s);
 
     /* h = [5*1+(-3)*(-1), 5*(-1)+(-3)*1, 5*1+(-3)*(-1)] = [8, -8, 8] */
     /* relu: [8, 0, 8] */
@@ -448,69 +451,66 @@ static void test_linear_relu(void) {
 int main(void) {
     printf("test_nn:\n");
 
-    mem_pool params  = mem_pool_create(128 * 1024);
-    mem_pool scratch = mem_pool_create(128 * 1024);
-    mem_pool_set_defaults(&params, &scratch, NULL);
+    dnn_ctx_init(&ctx, 128 * 1024, 128 * 1024, 8*1024*1024);
 
     test_linear_create_shapes();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_linear_forward_single();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_linear_forward_batch();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_linear_backward_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_linear_backward_batch();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_linear_backward_input_grad();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_linear_chain();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_linear_no_bias();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_linear_relu();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_swiglu_ffn_create_shapes();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_swiglu_ffn_forward();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_swiglu_ffn_backward();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_swiglu_ffn_input_grad();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_swiglu_ffn_batch();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
-
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     printf("  ALL PASS\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

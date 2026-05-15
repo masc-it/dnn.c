@@ -1,4 +1,5 @@
 #include "dnn.h"
+#include "context.h"
 #include "mnist.h"
 #include "tensor_int.h"
 #include "pool_int.h"
@@ -7,6 +8,8 @@
 #include <string.h>
 #include <math.h>
 #include <time.h>
+
+static dnn_ctx ctx;
 
 static double now_ms(void) {
     struct timespec ts;
@@ -24,13 +27,15 @@ static int check_rel(const char *label, float got, float expected, float tol) {
             return 1;
         }
     }
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }
 
 /* conv2d output → scalar loss via repeated sum */
 static tensor *loss_sum_all(tensor *t) {
     for (int d = tensor_ndim(t) - 1; d >= 0; d--)
-        t = tensor_sum(t, d);
+        t = tensor_sum(ctx.scratch, t, d);
     return t;
 }
 
@@ -49,17 +54,17 @@ static int test_conv_vs_python(void) {
         float b_data[] = {0};
         float expected_out[] = {7, 11, 23, 27};
 
-        tensor *x = _tensor_scratch_create(4, (int[]){1,1,4,4}, 0);
+        tensor *x = tensor_scratch(ctx.scratch, 4, (int[]){1,1,4,4}, 0);
         memcpy(x->data, x_data, 16*sizeof(float));
         tensor_set_requires_grad(x, 1);
 
-        tensor *w = tensor_zeros(4, (int[]){1,1,2,2}, 1);
+        tensor *w = tensor_zeros(ctx.params, 4, (int[]){1,1,2,2}, 1);
         memcpy(w->data, w_data, 4*sizeof(float));
 
-        tensor *b = tensor_zeros(1, (int[]){1}, 1);
+        tensor *b = tensor_zeros(ctx.params, 1, (int[]){1}, 1);
         memcpy(b->data, b_data, 1*sizeof(float));
 
-        tensor *y = tensor_conv2d(x, w, b, 2, 0);
+        tensor *y = tensor_conv2d(ctx.scratch, x, w, b, 2, 0);
         int N = tensor_shape(y,0), C = tensor_shape(y,1);
         int H = tensor_shape(y,2), WT = tensor_shape(y,3);
         printf("  test2: x(1,1,4,4) → out(%d,%d,%d,%d)\n", N, C, H, WT);
@@ -72,7 +77,7 @@ static int test_conv_vs_python(void) {
             fail += check_rel("out", yd[i], expected_out[i], 1e-5f);
 
         tensor *loss = loss_sum_all(y);
-        dnn_backward(loss);
+        dnn_backward(ctx.scratch, loss);
 
         float *xg = tensor_grad(x);
         if (xg) {
@@ -91,7 +96,7 @@ static int test_conv_vs_python(void) {
         float *bg = tensor_grad(b);
         if (bg) fail += check_rel("db", bg[0], 4.0f, 1e-5f);
 
-        mem_pool_reset(_mem_pool_scratch());
+        mem_pool_reset(ctx.scratch);
     }
 
     /* ── test 4 from ref_conv2d.py: 2x2 kernel, stride 1, manual verify ── */
@@ -100,23 +105,23 @@ static int test_conv_vs_python(void) {
         float w_data[] = {1,0, 0,1};
         float b_data[] = {0};
 
-        tensor *x = _tensor_scratch_create(4, (int[]){1,1,2,2}, 0);
+        tensor *x = tensor_scratch(ctx.scratch, 4, (int[]){1,1,2,2}, 0);
         memcpy(x->data, x_data, 4*sizeof(float));
         tensor_set_requires_grad(x, 1);
 
-        tensor *w = tensor_zeros(4, (int[]){1,1,2,2}, 1);
+        tensor *w = tensor_zeros(ctx.params, 4, (int[]){1,1,2,2}, 1);
         memcpy(w->data, w_data, 4*sizeof(float));
 
-        tensor *b = tensor_zeros(1, (int[]){1}, 1);
+        tensor *b = tensor_zeros(ctx.params, 1, (int[]){1}, 1);
         memcpy(b->data, b_data, 1*sizeof(float));
 
-        tensor *y = tensor_conv2d(x, w, b, 1, 0);
+        tensor *y = tensor_conv2d(ctx.scratch, x, w, b, 1, 0);
         float *yd = tensor_data_ptr(y);
         printf("  test4: out = %.1f (expected 5.0)\n", yd[0]);
         fail += check_rel("out", yd[0], 5.0f, 1e-5f);
 
         tensor *loss = loss_sum_all(y);
-        dnn_backward(loss);
+        dnn_backward(ctx.scratch, loss);
 
         float *wg = tensor_grad(w);
         if (wg) {
@@ -129,17 +134,17 @@ static int test_conv_vs_python(void) {
         float *bg = tensor_grad(b);
         if (bg) fail += check_rel("db", bg[0], 1.0f, 1e-5f);
 
-        mem_pool_reset(_mem_pool_scratch());
+        mem_pool_reset(ctx.scratch);
     }
 
     /* ── shape test: 3x3 kernel, pad=1, stride=1 (same spatial) ── */
     {
-        tensor *x = _tensor_scratch_create(4, (int[]){2,3,4,4}, 0);
+        tensor *x = tensor_scratch(ctx.scratch, 4, (int[]){2,3,4,4}, 0);
         tensor_set_requires_grad(x, 1);
-        tensor *w = tensor_zeros(4, (int[]){2,3,3,3}, 1);
-        tensor *b = tensor_zeros(1, (int[]){2}, 1);
+        tensor *w = tensor_zeros(ctx.params, 4, (int[]){2,3,3,3}, 1);
+        tensor *b = tensor_zeros(ctx.params, 1, (int[]){2}, 1);
 
-        tensor *y = tensor_conv2d(x, w, b, 1, 1);
+        tensor *y = tensor_conv2d(ctx.scratch, x, w, b, 1, 1);
         int N = tensor_shape(y,0), C = tensor_shape(y,1);
         int H = tensor_shape(y,2), WT = tensor_shape(y,3);
         printf("  same-pad: out(%d,%d,%d,%d)  expected (2,2,4,4)\n", N, C, H, WT);
@@ -148,10 +153,10 @@ static int test_conv_vs_python(void) {
         }
 
         tensor *loss = loss_sum_all(y);
-        dnn_backward(loss);
+        dnn_backward(ctx.scratch, loss);
         printf("  grads all allocated OK\n");
 
-        mem_pool_reset(_mem_pool_scratch());
+        mem_pool_reset(ctx.scratch);
     }
 
     if (!fail) printf("  ALL PASS\n");
@@ -166,21 +171,21 @@ static int test_cnn_model(void) {
     int fail = 0;
     printf("\n── test_cnn_model ──\n");
 
-    mem_pool_reset(_mem_pool_params());
-    mem_pool_reset(_mem_pool_scratch());
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
-    mnist_model_cnn *m = mnist_model_create_cnn();
+    mnist_model_cnn *m = mnist_model_create_cnn(ctx.params);
     if (!m) { printf("  FAIL: model creation\n"); return 1; }
     printf("  model created OK\n");
 
     int N = 64;
-    tensor *x = _tensor_scratch_create(2, (int[]){N, 784}, 0);
+    tensor *x = tensor_scratch(ctx.scratch, 2, (int[]){N, 784}, 0);
     float *xd = (float*)x->data;
     for (int i = 0; i < N * 784; i++)
         xd[i] = ((float)rand() / RAND_MAX) * 2.0f - 1.0f;
 
     double t0 = now_ms();
-    tensor *logits = mnist_model_forward_cnn(m, x);
+    tensor *logits = mnist_model_forward_cnn(ctx.scratch, m, x);
     double t1 = now_ms();
 
     int nd = tensor_ndim(logits);
@@ -196,17 +201,17 @@ static int test_cnn_model(void) {
     }
 
     /* backward: fake labels + cross-entropy */
-    tensor *y = _tensor_scratch_create(1, (int[]){N}, 0);
+    tensor *y = tensor_scratch(ctx.scratch, 1, (int[]){N}, 0);
     int *yd = (int*)y->data;
     for (int i = 0; i < N; i++) yd[i] = rand() % 10;
 
     double t2 = now_ms();
-    tensor *loss = tensor_cross_entropy(logits, y, 1);
+    tensor *loss = tensor_cross_entropy(ctx.scratch, logits, y, 1);
     double t3 = now_ms();
     printf("  cross_entropy: %.2f ms\n", t3 - t2);
 
     double t4 = now_ms();
-    dnn_backward(loss);
+    dnn_backward(ctx.scratch, loss);
     double t5 = now_ms();
     printf("  backward: %.2f ms\n", t5 - t4);
     printf("  total fwd+bwd: %.2f ms\n", t5 - t0);
@@ -223,35 +228,35 @@ static int test_cnn_model(void) {
     if (grads_ok) printf("  all 10 param grads present\n");
 
     /* check forward pass shapes per layer by re-running in no-grad */
-    dnn_grad_ctx ctx = dnn_no_grad_enter();
+    dnn_grad_ctx gc = dnn_no_grad_enter();
     /* We'll rebuild manually to inspect intermediates */
-    tensor *h = tensor_reshape((tensor*)x, 4, (int[]){N, 1, 28, 28});
+    tensor *h = tensor_reshape(ctx.scratch, (tensor*)x, 4, (int[]){N, 1, 28, 28});
     printf("  after reshape: (%d,%d,%d,%d)\n",
            tensor_shape(h,0),tensor_shape(h,1),tensor_shape(h,2),tensor_shape(h,3));
 
-    h = tensor_conv2d(h, m->conv1_w, m->conv1_b, 1, 1);
+    h = tensor_conv2d(ctx.scratch, h, m->conv1_w, m->conv1_b, 1, 1);
     printf("  after conv1: (%d,%d,%d,%d)\n",
            tensor_shape(h,0),tensor_shape(h,1),tensor_shape(h,2),tensor_shape(h,3));
 
-    h = tensor_relu(h);
-    h = tensor_conv2d(h, m->conv2_w, m->conv2_b, 2, 1);
+    h = tensor_relu(ctx.scratch, h);
+    h = tensor_conv2d(ctx.scratch, h, m->conv2_w, m->conv2_b, 2, 1);
     printf("  after conv2: (%d,%d,%d,%d)\n",
            tensor_shape(h,0),tensor_shape(h,1),tensor_shape(h,2),tensor_shape(h,3));
 
-    h = tensor_relu(h);
-    h = tensor_conv2d(h, m->conv3_w, m->conv3_b, 2, 1);
+    h = tensor_relu(ctx.scratch, h);
+    h = tensor_conv2d(ctx.scratch, h, m->conv3_w, m->conv3_b, 2, 1);
     printf("  after conv3: (%d,%d,%d,%d)\n",
            tensor_shape(h,0),tensor_shape(h,1),tensor_shape(h,2),tensor_shape(h,3));
 
-    h = tensor_relu(h);
-    h = tensor_reshape(h, 2, (int[]){N, -1});
+    h = tensor_relu(ctx.scratch, h);
+    h = tensor_reshape(ctx.scratch, h, 2, (int[]){N, -1});
     printf("  after flatten: (%d,%d)\n",
            tensor_shape(h,0),tensor_shape(h,1));
     if (tensor_shape(h,1) != 3136) {
         printf("    FAIL: expected 3136\n"); fail++;
     }
-    dnn_no_grad_exit(ctx);
-    mem_pool_reset(_mem_pool_scratch());
+    dnn_no_grad_exit(gc);
+    mem_pool_reset(ctx.scratch);
 
     if (!fail) printf("  ALL PASS\n");
     return fail;
@@ -264,36 +269,36 @@ static int test_cnn_model(void) {
 static int test_cnn_timing(void) {
     printf("\n── test_cnn_timing ──\n");
 
-    mem_pool_reset(_mem_pool_params());
-    mem_pool_reset(_mem_pool_scratch());
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
-    mnist_model_cnn *m = mnist_model_create_cnn();
+    mnist_model_cnn *m = mnist_model_create_cnn(ctx.params);
     tensor *params[] = {m->conv1_w, m->conv1_b, m->conv2_w, m->conv2_b,
                         m->conv3_w, m->conv3_b, m->fc1->weight, m->fc1->bias,
                         m->fc2->weight, m->fc2->bias};
-    adamw_opt *opt = adamw_create(params, 10, 0.001f, 0.9f, 0.999f, 1e-8f, 0.01f);
+    adamw_opt *opt = adamw_create(ctx.params, params, 10, 0.001f, 0.9f, 0.999f, 1e-8f, 0.01f);
 
     int N = 128;
     int n_batches = 10;
     double t_total = 0.0;
 
     for (int b = 0; b < n_batches; b++) {
-        tensor *bx = _tensor_scratch_create(2, (int[]){N, 784}, 0);
+        tensor *bx = tensor_scratch(ctx.scratch, 2, (int[]){N, 784}, 0);
         float *xd = (float*)bx->data;
         for (int i = 0; i < N * 784; i++)
             xd[i] = ((float)rand() / RAND_MAX) * 2.0f - 1.0f;
 
-        tensor *by = _tensor_scratch_create(1, (int[]){N}, 0);
+        tensor *by = tensor_scratch(ctx.scratch, 1, (int[]){N}, 0);
         int *yd = (int*)by->data;
         for (int i = 0; i < N; i++) yd[i] = rand() % 10;
 
         double t0 = now_ms();
-        tensor *logits = mnist_model_forward_cnn(m, bx);
-        tensor *loss = tensor_cross_entropy(logits, by, 1);
-        dnn_backward(loss);
+        tensor *logits = mnist_model_forward_cnn(ctx.scratch, m, bx);
+        tensor *loss = tensor_cross_entropy(ctx.scratch, logits, by, 1);
+        dnn_backward(ctx.scratch, loss);
         adamw_step(opt);
         adamw_zero_grad(opt);
-        mem_pool_reset(_mem_pool_scratch());
+        mem_pool_reset(ctx.scratch);
         double t1 = now_ms();
 
         t_total += (t1 - t0);
@@ -309,17 +314,17 @@ static int test_cnn_timing(void) {
     printf("  est. 5 epochs: %.1f s\n", epoch_s * 5);
 
     adamw_free(opt);
-    mem_pool_reset(_mem_pool_scratch());
+    mem_pool_reset(ctx.scratch);
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }
 
 /* ================================================================ */
 
 int main(void) {
-    mem_pool params  = mem_pool_create(12 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(192 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 12 * 1024 * 1024, 192 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
 
@@ -329,8 +334,6 @@ int main(void) {
     fail += test_cnn_timing();
 
     printf("\n%s\n", fail ? "SOME TESTS FAIL" : "ALL PASS");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
     return fail ? 1 : 0;
 }

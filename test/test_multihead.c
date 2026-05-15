@@ -1,8 +1,11 @@
 #include "dnn.h"
+#include "context.h"
 #include <stdio.h>
 #include <assert.h>
 #include <math.h>
 #include <string.h>
+
+static dnn_ctx ctx;
 
 #define EPS 1e-4f
 
@@ -43,7 +46,7 @@ static void check_data_eq(tensor *t, const float *exp, int n, const char *label)
 }
 
 static tensor *make_param(int ndim, const int *shape, const float *data) {
-    tensor *t = tensor_zeros(ndim, shape, 1);
+    tensor *t = tensor_zeros(ctx.params, ndim, shape, 1);
     float *td = tensor_data_ptr(t);
     memcpy(td, data, tensor_numel(t) * sizeof(float));
     return t;
@@ -64,7 +67,7 @@ static void test_split_basic(void) {
     float data[] = {1.0f, 2.0f, 3.0f, 4.0f,
                     5.0f, 6.0f, 7.0f, 8.0f};
     tensor *t = make_tensor(3, (int[]){1, 2, 4}, data);
-    tensor *out = tensor_split_heads(t, 2);
+    tensor *out = tensor_split_heads(ctx.scratch, t, 2);
 
     assert(tensor_ndim(out) == 4);
     assert(tensor_shape(out, 0) == 1);
@@ -94,7 +97,7 @@ static void test_split_batched(void) {
         13.0f, 14.0f, 15.0f, 16.0f
     };
     tensor *t = make_tensor(3, (int[]){2, 2, 4}, data);
-    tensor *out = tensor_split_heads(t, 2);
+    tensor *out = tensor_split_heads(ctx.scratch, t, 2);
 
     assert(tensor_ndim(out) == 4);
     assert(tensor_shape(out, 0) == 2);
@@ -118,7 +121,7 @@ static void test_split_h1(void) {
     printf("  test_split_h1... ");
     float data[] = {1.0f, 2.0f, 3.0f, 4.0f};
     tensor *t = make_tensor(3, (int[]){1, 2, 2}, data);  /* B=1, N=2, H=1, d_k=2 */
-    tensor *out = tensor_split_heads(t, 1);
+    tensor *out = tensor_split_heads(ctx.scratch, t, 1);
 
     assert(tensor_ndim(out) == 4);
     assert(tensor_shape(out, 0) == 1);
@@ -142,7 +145,7 @@ static void test_merge_basic(void) {
                     5.0f, 6.0f,    /* head 0, N=1 */
                     7.0f, 8.0f};   /* head 1, N=1 */
     tensor *t = make_tensor(4, (int[]){1, 2, 2, 2}, data);
-    tensor *out = tensor_merge_heads(t);
+    tensor *out = tensor_merge_heads(ctx.scratch, t);
 
     assert(tensor_ndim(out) == 3);
     assert(tensor_shape(out, 0) == 1);
@@ -167,7 +170,7 @@ static void test_merge_batched(void) {
         9.0f, 10.0f, 11.0f, 12.0f, 13.0f, 14.0f, 15.0f, 16.0f
     };
     tensor *t = make_tensor(4, (int[]){2, 2, 2, 2}, data);
-    tensor *out = tensor_merge_heads(t);
+    tensor *out = tensor_merge_heads(ctx.scratch, t);
 
     assert(tensor_ndim(out) == 3);
     assert(tensor_shape(out, 0) == 2);
@@ -193,8 +196,8 @@ static void test_split_merge_roundtrip(void) {
                     9.0f, 10.0f,11.0f,12.0f};
     tensor *t = make_tensor(3, (int[]){1, 3, 4}, data);
 
-    tensor *split = tensor_split_heads(t, 2);
-    tensor *merged = tensor_merge_heads(split);
+    tensor *split = tensor_split_heads(ctx.scratch, t, 2);
+    tensor *merged = tensor_merge_heads(ctx.scratch, split);
 
     assert(tensor_ndim(merged) == 3);
     assert(tensor_shape(merged, 0) == 1);
@@ -214,8 +217,8 @@ static void test_merge_split_roundtrip(void) {
                     13.0f,14.0f,15.0f,16.0f};
     tensor *t = make_tensor(4, (int[]){2, 2, 2, 2}, data);
 
-    tensor *merged = tensor_merge_heads(t);
-    tensor *split = tensor_split_heads(merged, 2);
+    tensor *merged = tensor_merge_heads(ctx.scratch, t);
+    tensor *split = tensor_split_heads(ctx.scratch, merged, 2);
 
     assert(tensor_ndim(split) == 4);
     assert(tensor_shape(split, 0) == 2);
@@ -234,11 +237,11 @@ static void test_split_grad(void) {
                     5.0f, 6.0f, 7.0f, 8.0f};
     tensor *t = make_param(3, (int[]){1, 2, 4}, data);
 
-    tensor *split = tensor_split_heads(t, 2);
-    tensor *loss  = tensor_sum(split, -1);  /* sum over last dim → shape [1,2,2] */
-    tensor *loss2 = tensor_sum(loss, -1);   /* → shape [1,2] */
-    tensor *loss3 = tensor_sum(loss2, -1);  /* → scalar [1] */
-    dnn_backward(loss3);
+    tensor *split = tensor_split_heads(ctx.scratch, t, 2);
+    tensor *loss  = tensor_sum(ctx.scratch, split, -1);  /* sum over last dim → shape [1,2,2] */
+    tensor *loss2 = tensor_sum(ctx.scratch, loss, -1);   /* → shape [1,2] */
+    tensor *loss3 = tensor_sum(ctx.scratch, loss2, -1);  /* → scalar [1] */
+    dnn_backward(ctx.scratch, loss3);
 
     assert(tensor_grad(t) && "d_input must be non-NULL");
     float *g = tensor_grad(t);
@@ -255,10 +258,10 @@ static void test_merge_grad(void) {
                     5.0f, 6.0f, 7.0f, 8.0f};
     tensor *t = make_param(4, (int[]){1, 2, 2, 2}, data);
 
-    tensor *merged = tensor_merge_heads(t);
-    tensor *loss   = tensor_sum(merged, -1);
-    tensor *loss2  = tensor_sum(loss, -1);
-    dnn_backward(loss2);
+    tensor *merged = tensor_merge_heads(ctx.scratch, t);
+    tensor *loss   = tensor_sum(ctx.scratch, merged, -1);
+    tensor *loss2  = tensor_sum(ctx.scratch, loss, -1);
+    dnn_backward(ctx.scratch, loss2);
 
     assert(tensor_grad(t) && "d_input must be non-NULL");
     float *g = tensor_grad(t);
@@ -275,9 +278,9 @@ static void test_no_grad(void) {
                     5.0f, 6.0f, 7.0f, 8.0f};
     tensor *t = make_param(3, (int[]){1, 2, 4}, data);
 
-    dnn_grad_ctx ctx = dnn_no_grad_enter();
-    tensor *split = tensor_split_heads(t, 2);
-    dnn_no_grad_exit(ctx);
+    dnn_grad_ctx gc = dnn_no_grad_enter();
+    tensor *split = tensor_split_heads(ctx.scratch, t, 2);
+    dnn_no_grad_exit(gc);
 
     /* In no-grad mode, grad_fn should be NULL on directly created tensors.
      * The view ops don't create new grad_fn nodes, they pass through. */
@@ -293,7 +296,7 @@ static void test_split_various_shapes(void) {
     float data[24];
     for (int i = 0; i < 24; i++) data[i] = (float)i;
     tensor *t = make_tensor(3, (int[]){1, 2, 12}, data);
-    tensor *out = tensor_split_heads(t, 4);
+    tensor *out = tensor_split_heads(ctx.scratch, t, 4);
 
     assert(tensor_ndim(out) == 4);
     assert(tensor_shape(out, 1) == 4);
@@ -326,7 +329,7 @@ static void test_merge_various_shapes(void) {
     float data[24];
     for (int i = 0; i < 24; i++) data[i] = (float)i;
     tensor *t = make_tensor(4, (int[]){1, 4, 2, 3}, data);
-    tensor *out = tensor_merge_heads(t);
+    tensor *out = tensor_merge_heads(ctx.scratch, t);
 
     assert(tensor_ndim(out) == 3);
     assert(tensor_shape(out, 2) == 12);
@@ -352,7 +355,7 @@ static void test_split_structure(void) {
     printf("  test_split_structure... ");
     float data[12];
     tensor *t = make_tensor(3, (int[]){3, 2, 6}, data);
-    tensor *out = tensor_split_heads(t, 3);
+    tensor *out = tensor_split_heads(ctx.scratch, t, 3);
 
     assert(tensor_shape(out, 0) == 3);
     assert(tensor_shape(out, 1) == 3);
@@ -365,27 +368,24 @@ static void test_split_structure(void) {
 int main(void) {
     printf("test_multihead:\n");
 
-    mem_pool params  = mem_pool_create(10 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(50 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, NULL);
+    dnn_ctx_init(&ctx, 10 * 1024 * 1024, 50 * 1024 * 1024, 8*1024*1024);
 
-    test_split_basic();             mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_split_batched();           mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_split_h1();                mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_merge_basic();             mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_merge_batched();           mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_split_merge_roundtrip();   mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_merge_split_roundtrip();   mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_split_grad();              mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_merge_grad();              mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_no_grad();                 mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_split_various_shapes();    mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_merge_various_shapes();    mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_split_structure();         mem_pool_reset(&params); mem_pool_reset(&scratch);
-
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
+    test_split_basic();             mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_split_batched();           mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_split_h1();                mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_merge_basic();             mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_merge_batched();           mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_split_merge_roundtrip();   mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_merge_split_roundtrip();   mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_split_grad();              mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_merge_grad();              mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_no_grad();                 mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_split_various_shapes();    mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_merge_various_shapes();    mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_split_structure();         mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
 
     printf("  ALL PASS\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

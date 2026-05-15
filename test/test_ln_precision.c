@@ -5,6 +5,7 @@
  * with a known grad_output.  Compares against the analytical formula.
  */
 #include "dnn.h"
+#include "context.h"
 #include "norm.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,10 +13,11 @@
 #include <math.h>
 #include <string.h>
 
+static dnn_ctx ctx;
+
 int main(void) {
-    mem_pool params  = mem_pool_create(512 * 1024);
-    mem_pool scratch = mem_pool_create(512 * 1024);
-    mem_pool_set_defaults(&params, &scratch, NULL);
+
+    dnn_ctx_init(&ctx, 512 * 1024, 512 * 1024, 8*1024*1024);
 
     int pass = 1;
 
@@ -24,20 +26,20 @@ int main(void) {
     srand(42);
     int d = 6;
 
-    tensor *x = tensor_randn(1, (int[]){d}, 1);
-    tensor *w = tensor_zeros(1, (int[]){d}, 1);
+    tensor *x = tensor_randn(ctx.params, 1, (int[]){d}, 1);
+    tensor *w = tensor_zeros(ctx.params, 1, (int[]){d}, 1);
     float *wp = tensor_data_ptr(w);
     for (int j = 0; j < d; j++) wp[j] = 1.0f + 0.5f * (float)rand()/(float)RAND_MAX;
 
     /* non-uniform grad by gating with a scale vector */
-    tensor *scale = tensor_zeros(1, (int[]){d}, 0);
+    tensor *scale = tensor_zeros(ctx.params, 1, (int[]){d}, 0);
     float *sp = tensor_data_ptr(scale);
     for (int j = 0; j < d; j++) sp[j] = 1.0f + 2.0f * (float)rand()/(float)RAND_MAX;
 
-    tensor *out   = tensor_layer_norm(x, w, NULL, 1e-5f);
-    tensor *gated = tensor_mul(out, scale);
-    tensor *loss  = tensor_sum(gated, 0);
-    dnn_backward(loss);
+    tensor *out   = tensor_layer_norm(ctx.scratch, x, w, NULL, 1e-5f);
+    tensor *gated = tensor_mul(ctx.scratch, out, scale);
+    tensor *loss  = tensor_sum(ctx.scratch, gated, 0);
+    dnn_backward(ctx.scratch, loss);
 
     float *dx = tensor_grad(x);
     float *dw = tensor_grad(w);
@@ -84,28 +86,28 @@ int main(void) {
     printf("\n");
 
     /* reset for next test */
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     /* ── 2D batch test ── */
     printf("── 2D batch LayerNorm backward ──\n");
     srand(43);
     int B = 4;
 
-    tensor *x2 = tensor_randn(2, (int[]){B, d}, 1);
+    tensor *x2 = tensor_randn(ctx.params, 2, (int[]){B, d}, 1);
     float *x2d = tensor_data_ptr(x2);
-    tensor *w2 = tensor_zeros(1, (int[]){d}, 1);
+    tensor *w2 = tensor_zeros(ctx.params, 1, (int[]){d}, 1);
     float *w2p = tensor_data_ptr(w2);
     for (int j = 0; j < d; j++) w2p[j] = 1.0f + 0.3f * (float)rand()/(float)RAND_MAX;
 
-    tensor *s2 = tensor_zeros(1, (int[]){d}, 0);
+    tensor *s2 = tensor_zeros(ctx.params, 1, (int[]){d}, 0);
     float *s2p = tensor_data_ptr(s2);
     for (int j = 0; j < d; j++) s2p[j] = 1.0f + 0.5f * (float)rand()/(float)RAND_MAX;
 
-    tensor *o2 = tensor_layer_norm(x2, w2, NULL, 1e-5f);
-    tensor *g2 = tensor_mul(o2, s2);
-    tensor *l2 = tensor_sum(g2, 0);
-    dnn_backward(l2);
+    tensor *o2 = tensor_layer_norm(ctx.scratch, x2, w2, NULL, 1e-5f);
+    tensor *g2 = tensor_mul(ctx.scratch, o2, s2);
+    tensor *l2 = tensor_sum(ctx.scratch, g2, 0);
+    dnn_backward(ctx.scratch, l2);
 
     float *dx2 = tensor_grad(x2);
     float *dw2 = tensor_grad(w2);
@@ -157,9 +159,8 @@ int main(void) {
     } else printf("  PASS\n");
     printf("\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-
     printf(pass ? "ALL PASS\n" : "SOME FAILED\n");
+    dnn_ctx_destroy(&ctx);
+
     return pass ? 0 : 1;
 }

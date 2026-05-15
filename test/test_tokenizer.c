@@ -1,9 +1,13 @@
 #include "tokenizer.h"
+#include "context.h"
 #include "pool.h"
+#include "context.h"
 #include <stdio.h>
 #include <assert.h>
 #include <string.h>
 #include <stdlib.h>
+
+static dnn_ctx ctx;
 
 /* ── helpers ── */
 
@@ -15,7 +19,7 @@ static void test_encode_decode_roundtrip(void) {
 
     const char *original = "hello";
     int len;
-    int *ids = tokenizer_encode(&tok, original, &len);
+    int *ids = tokenizer_encode(ctx.data, &tok, original, &len);
     assert(len == 7);  /* BOS + 5 + EOS */
     assert(ids[0] == TOKENIZER_BOS_ID);
     assert(ids[1] == 'h');
@@ -37,7 +41,7 @@ static void test_encode_decode_empty(void) {
 
     /* empty string encode */
     int len;
-    int *ids = tokenizer_encode(&tok, "", &len);
+    int *ids = tokenizer_encode(ctx.data, &tok, "", &len);
     assert(ids == NULL);
     assert(len == 0);
 
@@ -80,7 +84,7 @@ static void test_encode_utf8_bytes(void) {
     /* UTF-8 encoded "caffè" — è is 2 bytes (0xC3 0xA8) */
     const char *utf8 = "caff\xC3\xA8";
     int len;
-    int *ids = tokenizer_encode(&tok, utf8, &len);
+    int *ids = tokenizer_encode(ctx.data, &tok, utf8, &len);
     assert(len == 8);  /* BOS + 6 bytes + EOS */
 
     /* bytes: c(0x63) a(0x61) f(0x66) f(0x66) 0xC3 0xA8 */
@@ -110,7 +114,7 @@ static void test_encode_all_byte_values(void) {
     const char *text = (const char *)buf;
 
     int len;
-    int *ids = tokenizer_encode(&tok, text, &len);
+    int *ids = tokenizer_encode(ctx.data, &tok, text, &len);
     assert(len == 257);  /* BOS + 255 bytes + EOS */
 
     for (int i = 0; i < 255; i++) {
@@ -132,7 +136,7 @@ static void test_text_to_tensor_pipeline(void) {
     tokenizer tok = tokenizer_default();
 
     const char *original = "hello world";
-    tensor *t = tokenizer_text_to_tensor(&tok, original);
+    tensor *t = tokenizer_text_to_tensor(ctx.data, &tok, original);
     assert(t != NULL);
     assert(tensor_ndim(t) == 2);
     assert(tensor_shape(t, 0) == 1);
@@ -167,7 +171,7 @@ static void test_chat_template_encode(void) {
 
     /* encode: "hello" without special strings — same as default */
     int len;
-    int *ids = tokenizer_encode(&tok, "hello", &len);
+    int *ids = tokenizer_encode(ctx.data, &tok, "hello", &len);
     assert(len == 7);
     assert(ids[0] == TOKENIZER_BOS_ID);
     assert(ids[1] == 'h');
@@ -186,7 +190,7 @@ static void test_chat_template_maps_special_strings(void) {
      * plus auto BOS + auto EOS = 7 + 2 = 9
      */
     int len;
-    int *ids = tokenizer_encode(&tok, "<|im_start|>hello<|im_end|>", &len);
+    int *ids = tokenizer_encode(ctx.data, &tok, "<|im_start|>hello<|im_end|>", &len);
     assert(len == 9);
     assert(ids[0] == TOKENIZER_BOS_ID);    /* auto BOS */
     assert(ids[1] == TOKENIZER_BOS_ID);    /* <|im_start|> → BOS */
@@ -211,7 +215,7 @@ static void test_chat_template_overlap_non_special(void) {
 
     /* text that looks like a prefix of special but isn't complete */
     int len;
-    int *ids = tokenizer_encode(&tok, "<|im_not_a_token|>", &len);
+    int *ids = tokenizer_encode(ctx.data, &tok, "<|im_not_a_token|>", &len);
     /* all bytes encoded individually (no match) */
     int expected = (int)strlen("<|im_not_a_token|>") + 2;
     assert(len == expected);
@@ -231,7 +235,7 @@ static void test_chat_template_pad_string(void) {
 
     /* "a<|pad|>b" should become [BOS, a, PAD, b, EOS] */
     int len;
-    int *ids = tokenizer_encode(&tok, "a<|pad|>b", &len);
+    int *ids = tokenizer_encode(ctx.data, &tok, "a<|pad|>b", &len);
     assert(len == 5);
     assert(ids[0] == TOKENIZER_BOS_ID);
     assert(ids[1] == 'a');
@@ -253,7 +257,7 @@ static void test_chat_template_multiple_specials(void) {
     /* multiple interleaved specials */
     const char *input = "<|im_start|>user<|im_end|><|im_start|>assistant<|im_end|>";
     int len;
-    int *ids = tokenizer_encode(&tok, input, &len);
+    int *ids = tokenizer_encode(ctx.data, &tok, input, &len);
 
     /* expected: auto BOS + [BOS,user,EOS,BOS,assistant,EOS] + auto EOS */
     /* content tokens: BOS + user(4) + EOS + BOS + assistant(9) + EOS = 17 */
@@ -291,7 +295,7 @@ static void test_chat_template_only_specials(void) {
 
     /* text consisting entirely of special strings */
     int len;
-    int *ids = tokenizer_encode(&tok, "<|im_start|><|im_end|>", &len);
+    int *ids = tokenizer_encode(ctx.data, &tok, "<|im_start|><|im_end|>", &len);
     /* auto BOS + BOS + EOS + auto EOS = 4 */
     assert(len == 4);
     assert(ids[0] == TOKENIZER_BOS_ID);
@@ -321,7 +325,7 @@ static void test_chat_template_large_text_roundtrip(void) {
 
     const char *text = (const char *)raw;
     int len;
-    int *ids = tokenizer_encode(&tok, text, &len);
+    int *ids = tokenizer_encode(ctx.data, &tok, text, &len);
     assert(len == (int)nread + 2);  /* no special strings in Italian text */
 
     /* all bytes preserved */
@@ -343,7 +347,7 @@ static void test_with_specials_custom(void) {
     assert(tok.bos_len == 5);
 
     int len;
-    int *ids = tokenizer_encode(&tok, "a[PAD]b", &len);
+    int *ids = tokenizer_encode(ctx.data, &tok, "a[PAD]b", &len);
     assert(len == 5);
     assert(ids[1] == 'a');
     assert(ids[2] == TOKENIZER_PAD_ID);
@@ -364,7 +368,7 @@ static void test_custom_tokenizer(void) {
     tok.unk_id = 255;
 
     int len;
-    int *ids = tokenizer_encode(&tok, "abc", &len);
+    int *ids = tokenizer_encode(ctx.data, &tok, "abc", &len);
     assert(len == 5);
     assert(ids[0] == 100);  /* custom BOS */
     assert(ids[1] == 'a');
@@ -403,7 +407,7 @@ static void test_large_text_roundtrip(void) {
     const char *text = (const char *)raw;
 
     int len;
-    int *ids = tokenizer_encode(&tok, text, &len);
+    int *ids = tokenizer_encode(ctx.data, &tok, text, &len);
     assert(len == (int)nread + 2);  /* BOS + nread bytes + EOS */
 
     /* Check IDs directly */
@@ -449,7 +453,7 @@ static void test_tensor_to_text_empty_tensor(void) {
 
     /* Tensor with 0 elements → empty string */
     int shape[] = {1, 0};
-    tensor *t = tensor_zeros_data(2, shape);
+    tensor *t = tensor_zeros_data(ctx.data, 2, shape);
     text = tokenizer_tensor_to_text(&tok, t);
     assert(text != NULL);
     assert(text[0] == '\0');
@@ -462,7 +466,7 @@ static void test_text_to_tensor_null_empty(void) {
     tokenizer tok = tokenizer_default();
 
     /* empty string → NULL */
-    tensor *t = tokenizer_text_to_tensor(&tok, "");
+    tensor *t = tokenizer_text_to_tensor(ctx.data, &tok, "");
     assert(t == NULL);
 
     printf("OK\n");
@@ -474,10 +478,8 @@ int main(void) {
     printf("test_tokenizer:\n");
 
     /* pools for tensor ops (text_to_tensor) */
-    mem_pool params  = mem_pool_create(2 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(2 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(10 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 2 * 1024 * 1024, 2 * 1024 * 1024, 10 * 1024 * 1024);
 
     test_encode_decode_roundtrip();
     test_encode_decode_empty();
@@ -498,10 +500,8 @@ int main(void) {
     test_tensor_to_text_empty_tensor();
     test_text_to_tensor_null_empty();
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
-
     printf("  ALL PASS\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

@@ -1,10 +1,13 @@
 #include "dnn.h"
+#include "context.h"
 #include "transformer.h"
 #include <stdio.h>
 #include <assert.h>
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+
+static dnn_ctx ctx;
 
 #define EPS 1e-5f
 
@@ -13,7 +16,7 @@
 static tensor *make_int_tensor(int ndim, const int *shape, const int *data) {
     int n = 1;
     for (int i = 0; i < ndim; i++) n *= shape[i];
-    tensor *t = tensor_zeros_data(ndim, shape);
+    tensor *t = tensor_zeros_data(ctx.data, ndim, shape);
     if (data) memcpy(t->data, data, n * sizeof(int));
     return t;
 }
@@ -25,13 +28,12 @@ static int ref_input_ids[] = {2, 5, 2};
 
 static void test_lm_create(void) {
     printf("  test_lm_create... ");
-    mem_pool params  = mem_pool_create(2 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, NULL);
+
+    dnn_ctx_init(&ctx, 2 * 1024 * 1024, 32 * 1024 * 1024, 2 * 1024 * 1024);
 
     int vocab=10, d_model=4, n_layers=2, n_heads=2, d_k=2, intermediate=8;
 
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     assert(lm->vocab_size == vocab);
@@ -67,28 +69,25 @@ static void test_lm_create(void) {
     assert(tensor_requires_grad(lm->lm_head->bias));
 
     printf("OK\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
+
 }
 
 /* ── Test: forward shape and output ── */
 
 static void test_forward_basic(void) {
     printf("  test_forward_basic... ");
-    mem_pool params  = mem_pool_create(2 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 2 * 1024 * 1024, 32 * 1024 * 1024, 2 * 1024 * 1024);
 
     int B=1, N=3, vocab=10, d_model=4, n_layers=2, n_heads=2, d_k=2, intermediate=8;
 
     srand(42);
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ref_input_ids);
 
-    tensor *logits = decoder_lm_forward(lm, input_ids);
+    tensor *logits = decoder_lm_forward(ctx.scratch, lm, input_ids);
 
     /* Shape check */
     assert(tensor_ndim(logits) == 3);
@@ -102,7 +101,7 @@ static void test_forward_basic(void) {
         assert(isfinite(ld[i]) && "logits non-finite");
 
     /* Backward: sum loss */
-    dnn_backward(logits);
+    dnn_backward(ctx.scratch, logits);
 
     /* All major param groups get grads */
     assert(tensor_grad(lm->embedding_table)  && "embedding grad NULL");
@@ -131,31 +130,27 @@ static void test_forward_basic(void) {
 
     printf("OK (shape correct, grads flow to all %d param groups, finite)\n",
            3 + n_layers * 9);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: embedding gradient only flows to looked-up rows ── */
 
 static void test_embedding_grad_sparsity(void) {
     printf("  test_embedding_grad_sparsity... ");
-    mem_pool params  = mem_pool_create(2 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 2 * 1024 * 1024, 32 * 1024 * 1024, 2 * 1024 * 1024);
 
     int B=1, N=3, vocab=10, d_model=4, n_layers=1, n_heads=2, d_k=2, intermediate=8;
 
     srand(7);
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     /* Input IDs {2, 5, 2} — only rows 2 and 5 should get gradients */
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ref_input_ids);
 
-    tensor *logits = decoder_lm_forward(lm, input_ids);
-    dnn_backward(logits);
+    tensor *logits = decoder_lm_forward(ctx.scratch, lm, input_ids);
+    dnn_backward(ctx.scratch, logits);
 
     float *eg = tensor_grad(lm->embedding_table);
     for (int i = 0; i < vocab; i++) {
@@ -172,9 +167,7 @@ static void test_embedding_grad_sparsity(void) {
     }
 
     printf("OK (rows {2,5} get grad, others zero)\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: numerical gradient check (finite diff) ── */
@@ -185,20 +178,17 @@ static void test_numerical_grad(void) {
     int B=1, N=2, vocab=5, d_model=2, n_layers=1, n_heads=1, d_k=2, intermediate=4;
     int n_input = B * N;  (void)n_input;
 
-    mem_pool params  = mem_pool_create(1 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 2 * 1024 * 1024, 32 * 1024 * 1024, 2 * 1024 * 1024);
 
     srand(42);
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     int input_data[] = {0, 3};
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, input_data);
 
-    tensor *logits = decoder_lm_forward(lm, input_ids);
-    dnn_backward(logits);
+    tensor *logits = decoder_lm_forward(ctx.scratch, lm, input_ids);
+    dnn_backward(ctx.scratch, logits);
 
     /* Pick a few parameters for finite diff check */
     float h = 1e-4f;
@@ -215,36 +205,36 @@ static void test_numerical_grad(void) {
 
     for (int idx = 0; idx < n_lm && n_passed < n_checks; idx += n_lm / n_checks) {
         /* +h */
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
 
         srand(42);
-        decoder_lm *lm1 = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+        decoder_lm *lm1 = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                              d_k, intermediate);
         memcpy(tensor_data_ptr(lm1->lm_head->weight), lm_w_orig, n_lm * sizeof(float));
         float *w1d = tensor_data_ptr(lm1->lm_head->weight);
         w1d[idx] += h;
 
         tensor *ids1 = make_int_tensor(2, (int[]){B, N}, input_data);
-        tensor *o1 = decoder_lm_forward(lm1, ids1);
+        tensor *o1 = decoder_lm_forward(ctx.scratch, lm1, ids1);
         float l1 = 0.0f;
         float *o1d = tensor_data_ptr(o1);
         int nel = tensor_numel(o1);
         for (int i = 0; i < nel; i++) l1 += o1d[i];
 
         /* -h */
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
 
         srand(42);
-        decoder_lm *lm2 = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+        decoder_lm *lm2 = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                              d_k, intermediate);
         memcpy(tensor_data_ptr(lm2->lm_head->weight), lm_w_orig, n_lm * sizeof(float));
         float *w2d = tensor_data_ptr(lm2->lm_head->weight);
         w2d[idx] -= h;
 
         tensor *ids2 = make_int_tensor(2, (int[]){B, N}, input_data);
-        tensor *o2 = decoder_lm_forward(lm2, ids2);
+        tensor *o2 = decoder_lm_forward(ctx.scratch, lm2, ids2);
         float l2 = 0.0f;
         float *o2d = tensor_data_ptr(o2);
         for (int i = 0; i < nel; i++) l2 += o2d[i];
@@ -261,31 +251,27 @@ static void test_numerical_grad(void) {
 
     printf("  numerical gradient: OK (%d checks)\n", n_passed);
     free(lm_w_orig);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: no-grad mode (eval) ── */
 
 static void test_no_grad(void) {
     printf("  test_no_grad... ");
-    mem_pool params  = mem_pool_create(2 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 2 * 1024 * 1024, 32 * 1024 * 1024, 2 * 1024 * 1024);
 
     int B=1, N=3, vocab=10, d_model=4, n_layers=2, n_heads=2, d_k=2, intermediate=8;
 
     srand(42);
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ref_input_ids);
 
-    dnn_grad_ctx ctx = dnn_no_grad_enter();
-    tensor *logits = decoder_lm_forward(lm, input_ids);
-    dnn_no_grad_exit(ctx);
+    dnn_grad_ctx gc = dnn_no_grad_enter();
+    tensor *logits = decoder_lm_forward(ctx.scratch, lm, input_ids);
+    dnn_no_grad_exit(gc);
 
     assert(logits->grad_fn == NULL && "no-grad: autograd should not be wired");
     assert(tensor_ndim(logits) == 3);
@@ -297,36 +283,32 @@ static void test_no_grad(void) {
     for (int i = 0; i < B * N * vocab; i++) assert(isfinite(ld[i]));
 
     printf("OK\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: batch processing ── */
 
 static void test_batch(void) {
     printf("  test_batch... ");
-    mem_pool params  = mem_pool_create(2 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 2 * 1024 * 1024, 32 * 1024 * 1024, 2 * 1024 * 1024);
 
     int B=2, N=3, vocab=10, d_model=4, n_layers=2, n_heads=2, d_k=2, intermediate=8;
 
     srand(42);
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     int ids_data[] = {0, 1, 2, 3, 4, 5};
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ids_data);
 
-    tensor *logits = decoder_lm_forward(lm, input_ids);
+    tensor *logits = decoder_lm_forward(ctx.scratch, lm, input_ids);
 
     assert(tensor_shape(logits, 0) == B);
     assert(tensor_shape(logits, 1) == N);
     assert(tensor_shape(logits, 2) == vocab);
 
-    dnn_backward(logits);
+    dnn_backward(ctx.scratch, logits);
     assert(tensor_grad(lm->embedding_table) && "batch: embedding grad");
     assert(tensor_grad(lm->blocks[0]->q_proj->weight) && "batch: block q_proj grad");
 
@@ -334,66 +316,58 @@ static void test_batch(void) {
     for (int i = 0; i < vocab * d_model; i++) assert(isfinite(eg[i]));
 
     printf("OK (B=2, grads flow)\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: different sequence lengths ── */
 
 static void test_seq_len(void) {
     printf("  test_seq_len... ");
-    mem_pool params  = mem_pool_create(2 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 2 * 1024 * 1024, 32 * 1024 * 1024, 2 * 1024 * 1024);
 
     int vocab=10, d_model=4, n_layers=2, n_heads=2, d_k=2, intermediate=8;
 
     srand(42);
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     /* N=1 */
     int ids1_data[] = {7};
     tensor *ids1 = make_int_tensor(2, (int[]){1, 1}, ids1_data);
-    tensor *o1 = decoder_lm_forward(lm, ids1);
+    tensor *o1 = decoder_lm_forward(ctx.scratch, lm, ids1);
     assert(tensor_shape(o1, 0) == 1 && tensor_shape(o1, 1) == 1 && tensor_shape(o1, 2) == vocab);
-    dnn_backward(o1);
+    dnn_backward(ctx.scratch, o1);
     assert(tensor_grad(lm->embedding_table) && "N=1: grads flow");
     printf("  N=1 OK ");
 
-    mem_pool_reset(&scratch);
-    mem_pool_reset(&data);
+    mem_pool_reset(ctx.scratch);
+    mem_pool_reset(ctx.data);
 
     /* N=7 */
     int ids7_data[] = {0, 1, 2, 3, 4, 5, 6};
     tensor *ids7 = make_int_tensor(2, (int[]){1, 7}, ids7_data);
-    tensor *o7 = decoder_lm_forward(lm, ids7);
+    tensor *o7 = decoder_lm_forward(ctx.scratch, lm, ids7);
     assert(tensor_shape(o7, 0) == 1 && tensor_shape(o7, 1) == 7 && tensor_shape(o7, 2) == vocab);
-    dnn_backward(o7);
+    dnn_backward(ctx.scratch, o7);
     assert(tensor_grad(lm->embedding_table) && "N=7: grads flow");
     printf("N=7 OK ");
 
     printf("\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: weight tying (optional feature) ── */
 
 static void test_weight_tying(void) {
     printf("  test_weight_tying... ");
-    mem_pool params  = mem_pool_create(2 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 2 * 1024 * 1024, 32 * 1024 * 1024, 2 * 1024 * 1024);
 
     int vocab=10, d_model=4, n_layers=1, n_heads=2, d_k=2, intermediate=8;
 
     srand(7);
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     /* Test that embedding table and lm_head are different tensors by default */
@@ -408,9 +382,7 @@ static void test_weight_tying(void) {
      * They are different shapes so can't share buffer without a transpose. */
 
     printf("OK (separate tensors, both require grad)\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test: gradient flow through embedding duplicates
@@ -422,22 +394,20 @@ static void test_weight_tying(void) {
 
 static void test_embedding_duplicate_ids(void) {
     printf("  test_embedding_duplicate_ids... ");
-    mem_pool params  = mem_pool_create(2 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 2 * 1024 * 1024, 32 * 1024 * 1024, 2 * 1024 * 1024);
 
     int B=1, N=3, vocab=10, d_model=4, n_layers=1, n_heads=2, d_k=2, intermediate=8;
 
     srand(9);
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     /* IDs {2, 5, 2}: row 2 gets gradient from positions 0 and 2 */
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ref_input_ids);
 
-    tensor *logits = decoder_lm_forward(lm, input_ids);
-    dnn_backward(logits);
+    tensor *logits = decoder_lm_forward(ctx.scratch, lm, input_ids);
+    dnn_backward(ctx.scratch, logits);
 
     float *eg = tensor_grad(lm->embedding_table);
     float *eg_row2 = eg + 2 * d_model;
@@ -459,9 +429,7 @@ static void test_embedding_duplicate_ids(void) {
 
     printf("OK (row2 norm=%.4f, row5 norm=%.4f, both >0)\n",
            sqrtf(norm2), sqrtf(norm5));
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Main ── */
@@ -480,5 +448,7 @@ int main(void) {
     test_embedding_duplicate_ids();
 
     printf("\nAll decoder_lm tests passed.\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

@@ -1,8 +1,12 @@
 #include "ops.h"
+#include "context.h"
 #include "pool.h"
+#include "context.h"
 #include <stdio.h>
 #include <assert.h>
 #include <math.h>
+
+static dnn_ctx ctx;
 
 /* ── Helpers ── */
 
@@ -37,7 +41,7 @@ static void print_mask(tensor *t) {
 static void test_triu_n1_d0(void) {
     /* j >= i + 0 → j >= i
      * (0,0): 0 >= 0 → T → -inf */
-    tensor *m = tensor_triu(1, 0);
+    tensor *m = tensor_triu(ctx.scratch, 1, 0);
     float *d = (float*)m->data + m->offset;
     assert(is_neginf(d[0]));
     mem_pool_reset(m->pool);
@@ -47,7 +51,7 @@ static void test_triu_n1_d0(void) {
 static void test_triu_n1_d1(void) {
     /* j >= i + 1
      * (0,0): 0 >= 1 → F → 0 */
-    tensor *m = tensor_triu(1, 1);
+    tensor *m = tensor_triu(ctx.scratch, 1, 1);
     float *d = (float*)m->data + m->offset;
     assert(d[0] == 0.0f);
     mem_pool_reset(m->pool);
@@ -55,7 +59,7 @@ static void test_triu_n1_d1(void) {
 
 /* ── Test 3: N=3, diagonal=0 — no self-attention ── */
 static void test_triu_n3_d0(void) {
-    tensor *m = tensor_triu(3, 0);
+    tensor *m = tensor_triu(ctx.scratch, 3, 0);
     float *d = (float*)m->data + m->offset;
     /* row 0: j >= 0 → all -inf */
     assert(is_neginf(d[0]) && is_neginf(d[1]) && is_neginf(d[2]));
@@ -73,7 +77,7 @@ static void test_triu_n3_d1(void) {
      *   (1,0): 0 → 0  (1,1): 1 ≥ 2? N → 0  (1,2): 2 → -inf
      *   (2,0): 0 → 0  (2,1): 1 → 0           (2,2): 2 ≥ 3? N → 0
      */
-    tensor *m = tensor_triu(3, 1);
+    tensor *m = tensor_triu(ctx.scratch, 3, 1);
     float *d = (float*)m->data + m->offset;
     assert(d[0] == 0.0f && is_neginf(d[1]) && is_neginf(d[2]));
     assert(d[3] == 0.0f && d[4] == 0.0f && is_neginf(d[5]));
@@ -88,7 +92,7 @@ static void test_triu_n3_d2(void) {
      *   (1,0): 0 → 0  (1,1): 1 → 0  (1,2): 2 → 0
      *   (2,0): 0 → 0  (2,1): 1 → 0  (2,2): 2 → 0
      */
-    tensor *m = tensor_triu(3, 2);
+    tensor *m = tensor_triu(ctx.scratch, 3, 2);
     float *d = (float*)m->data + m->offset;
     assert(d[0] == 0.0f && d[1] == 0.0f && is_neginf(d[2]));
     assert(d[3] == 0.0f && d[4] == 0.0f && d[5] == 0.0f);
@@ -98,7 +102,7 @@ static void test_triu_n3_d2(void) {
 
 /* ── Test 6: N=4, diagonal=1 full verification ── */
 static void test_triu_n4_d1(void) {
-    tensor *m = tensor_triu(4, 1);
+    tensor *m = tensor_triu(ctx.scratch, 4, 1);
     float *d = (float*)m->data + m->offset;
     int expected[16] = {
     /*  j=0  j=1  j=2  j=3 */
@@ -118,7 +122,7 @@ static void test_triu_n4_d1(void) {
 
 /* ── Test 7: N=5, diagonal=1 smoke ── */
 static void test_triu_n5_d1(void) {
-    tensor *m = tensor_triu(5, 1);
+    tensor *m = tensor_triu(ctx.scratch, 5, 1);
     float *d = (float*)m->data + m->offset;
     for (int i = 0; i < 5; i++) {
         for (int j = 0; j < 5; j++) {
@@ -134,7 +138,7 @@ static void test_triu_n5_d1(void) {
 
 /* ── Test 8: structural properties ── */
 static void test_triu_properties(void) {
-    tensor *m = tensor_triu(4, 1);
+    tensor *m = tensor_triu(ctx.scratch, 4, 1);
     assert(tensor_ndim(m) == 2);
     assert(tensor_shape(m, 0) == 4);
     assert(tensor_shape(m, 1) == 4);
@@ -147,9 +151,7 @@ static void test_triu_properties(void) {
 int main(void) {
     printf("test_triu: causal mask via tensor_triu\n");
 
-    mem_pool params  = mem_pool_create(64 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024);
-    mem_pool_set_defaults(&params, &scratch, NULL);
+    dnn_ctx_init(&ctx, 64 * 1024, 64 * 1024, 8*1024*1024);
 
     printf("  triu N=1 diag=0... ");   test_triu_n1_d0();    printf("OK\n");
     printf("  triu N=1 diag=1... ");   test_triu_n1_d1();    printf("OK\n");
@@ -160,9 +162,8 @@ int main(void) {
     printf("  triu N=5 diag=1... ");   test_triu_n5_d1();    printf("OK\n");
     printf("  triu properties... ");    test_triu_properties(); printf("OK\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-
     printf("  PASS\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

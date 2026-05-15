@@ -1,9 +1,12 @@
 #include "dnn.h"
+#include "context.h"
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+
+static dnn_ctx ctx;
 
 #define EPS 1e-5f
 
@@ -21,7 +24,7 @@ static float max_abs_diff(const float *a, const float *b, int n) {
 /* Fill tensor with given float values */
 /* Create a tensor in params pool with data from array */
 static tensor *make_tensor(int ndim, const int *shape, const float *data, int requires_grad) {
-    tensor *t = tensor_zeros(ndim, shape, requires_grad);
+    tensor *t = tensor_zeros(ctx.params, ndim, shape, requires_grad);
     if (data) {
         int n = tensor_numel(t);
         memcpy(tensor_data_ptr(t), data, n * sizeof(float));
@@ -63,10 +66,8 @@ static void test_forward_ref(void) {
                        0.28439379f, 0.77067548f, 0.36284411f, 0.37677070f};
 
     /* Pool for params (weights/grads) */
-    mem_pool params  = mem_pool_create(256 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 256 * 1024, 32 * 1024 * 1024, 1 * 1024 * 1024);
 
     tensor *q = make_tensor(4, (int[]){B, H, N, d}, q_data, 1);
     tensor *k = make_tensor(4, (int[]){B, H, N, d}, k_data, 1);
@@ -75,7 +76,7 @@ static void test_forward_ref(void) {
     /* Set seed for reproducibility (though attention doesn't use random) */
     srand(789);
 
-    tensor *out = tensor_attention(q, k, v, NULL);
+    tensor *out = tensor_attention(ctx.scratch, q, k, v, NULL);
 
     float *od = tensor_data_ptr(out);
     float diff = max_abs_diff(od, exp_out, B * H * N * d);
@@ -88,9 +89,6 @@ static void test_forward_ref(void) {
     }
     printf("OK (max diff %.6f)\n", diff);
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -122,10 +120,7 @@ static void test_backward_ref(void) {
                       0.98582536f, 0.98582536f, 0.98582536f, 0.98582536f,
                       0.57959348f, 0.57959348f, 0.57959348f, 0.57959348f};
 
-    mem_pool params  = mem_pool_create(256 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 32 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(789);
 
@@ -133,10 +128,10 @@ static void test_backward_ref(void) {
     tensor *k = make_tensor(4, (int[]){B, H, N, d}, k_data, 1);
     tensor *v = make_tensor(4, (int[]){B, H, N, d}, v_data, 1);
 
-    tensor *out = tensor_attention(q, k, v, NULL);
+    tensor *out = tensor_attention(ctx.scratch, q, k, v, NULL);
 
     /* backward: d(sum(O)) / d params  (loss = sum of all output elements) */
-    dnn_backward(out);
+    dnn_backward(ctx.scratch, out);
 
     float *qg = tensor_grad(q);
     float *kg = tensor_grad(k);
@@ -158,9 +153,6 @@ static void test_backward_ref(void) {
 
     printf("OK  (dQ %.2e, dK %.2e, dV %.2e)\n", dq_diff, dk_diff, dv_diff);
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -172,18 +164,15 @@ static void test_causal_mask(void) {
 
     int B = 2, H = 3, N = 5, d = 8;
 
-    mem_pool params  = mem_pool_create(256 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 32 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
 
-    tensor *q = tensor_randn(4, (int[]){B, H, N, d}, 1);
-    tensor *k = tensor_randn(4, (int[]){B, H, N, d}, 1);
-    tensor *v = tensor_randn(4, (int[]){B, H, N, d}, 1);
+    tensor *q = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
+    tensor *k = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
+    tensor *v = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
 
-    tensor *out = tensor_attention(q, k, v, NULL);
+    tensor *out = tensor_attention(ctx.scratch, q, k, v, NULL);
 
     /* Verify causal mask by checking autograd chain.
      * For a simpler direct test, we need to inspect intermediate values.
@@ -202,9 +191,6 @@ static void test_causal_mask(void) {
 
     printf("OK\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -214,19 +200,16 @@ static void test_causal_mask(void) {
 static void test_shapes(void) {
     printf("test_shapes... ");
 
-    mem_pool params  = mem_pool_create(256 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 32 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(1);
 
     /* Basic 4D */
     {
-        tensor *q = tensor_randn(4, (int[]){1, 1, 4, 8}, 1);
-        tensor *k = tensor_randn(4, (int[]){1, 1, 4, 8}, 1);
-        tensor *v = tensor_randn(4, (int[]){1, 1, 4, 8}, 1);
-        tensor *out = tensor_attention(q, k, v, NULL);
+        tensor *q = tensor_randn(ctx.params, 4, (int[]){1, 1, 4, 8}, 1);
+        tensor *k = tensor_randn(ctx.params, 4, (int[]){1, 1, 4, 8}, 1);
+        tensor *v = tensor_randn(ctx.params, 4, (int[]){1, 1, 4, 8}, 1);
+        tensor *out = tensor_attention(ctx.scratch, q, k, v, NULL);
         assert(out->shape[0] == 1);
         assert(out->shape[1] == 1);
         assert(out->shape[2] == 4);
@@ -236,10 +219,10 @@ static void test_shapes(void) {
 
     /* Larger: multiple batch and heads */
     {
-        tensor *q = tensor_randn(4, (int[]){2, 4, 8, 16}, 1);
-        tensor *k = tensor_randn(4, (int[]){2, 4, 8, 16}, 1);
-        tensor *v = tensor_randn(4, (int[]){2, 4, 8, 16}, 1);
-        tensor *out = tensor_attention(q, k, v, NULL);
+        tensor *q = tensor_randn(ctx.params, 4, (int[]){2, 4, 8, 16}, 1);
+        tensor *k = tensor_randn(ctx.params, 4, (int[]){2, 4, 8, 16}, 1);
+        tensor *v = tensor_randn(ctx.params, 4, (int[]){2, 4, 8, 16}, 1);
+        tensor *out = tensor_attention(ctx.scratch, q, k, v, NULL);
         assert(out->shape[0] == 2);
         assert(out->shape[1] == 4);
         assert(out->shape[2] == 8);
@@ -249,21 +232,18 @@ static void test_shapes(void) {
 
     /* No-grad mode (eval) */
     {
-        dnn_grad_ctx ctx = dnn_no_grad_enter();
-        tensor *q = tensor_randn(4, (int[]){1, 1, 3, 4}, 0);
-        tensor *k = tensor_randn(4, (int[]){1, 1, 3, 4}, 0);
-        tensor *v = tensor_randn(4, (int[]){1, 1, 3, 4}, 0);
-        tensor *out = tensor_attention(q, k, v, NULL);
+        dnn_grad_ctx gc = dnn_no_grad_enter();
+        tensor *q = tensor_randn(ctx.params, 4, (int[]){1, 1, 3, 4}, 0);
+        tensor *k = tensor_randn(ctx.params, 4, (int[]){1, 1, 3, 4}, 0);
+        tensor *v = tensor_randn(ctx.params, 4, (int[]){1, 1, 3, 4}, 0);
+        tensor *out = tensor_attention(ctx.scratch, q, k, v, NULL);
         assert(out->grad_fn == NULL);
-        dnn_no_grad_exit(ctx);
+        dnn_no_grad_exit(gc);
         printf("no-grad OK");
     }
 
     printf("\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -275,16 +255,13 @@ static void test_numerical_grad(void) {
 
     int B = 1, H = 1, N = 3, d = 4;
 
-    mem_pool params  = mem_pool_create(512 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 32 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
 
-    tensor *q = tensor_randn(4, (int[]){B, H, N, d}, 1);
-    tensor *k = tensor_randn(4, (int[]){B, H, N, d}, 1);
-    tensor *v = tensor_randn(4, (int[]){B, H, N, d}, 1);
+    tensor *q = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
+    tensor *k = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
+    tensor *v = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
 
     int nq = tensor_numel(q);
     int nk = tensor_numel(k);
@@ -299,8 +276,8 @@ static void test_numerical_grad(void) {
     memcpy(v_orig, tensor_data_ptr(v), nv * sizeof(float));
 
     /* Compute autograd gradients */
-    tensor *out = tensor_attention(q, k, v, NULL);
-    dnn_backward(out);
+    tensor *out = tensor_attention(ctx.scratch, q, k, v, NULL);
+    dnn_backward(ctx.scratch, out);
 
     float *q_grad_auto = malloc(nq * sizeof(float));
     float *k_grad_auto = malloc(nk * sizeof(float));
@@ -327,8 +304,8 @@ static void test_numerical_grad(void) {
 
         for (int idx = 0; idx < n && n_checked < max_checks; idx += (n > 6 ? n/3 : 1)) {
             /* Positive perturbation */
-            mem_pool_reset(&scratch);
-            mem_pool_reset(&data);
+            mem_pool_reset(ctx.scratch);
+            mem_pool_reset(ctx.data);
 
             srand(42);
             tensor *q2 = make_tensor(4, (int[]){B, H, N, d}, q_orig, 1);
@@ -343,14 +320,14 @@ static void test_numerical_grad(void) {
             float orig_val = target_data[idx];
             target_data[idx] = orig_val + h;
 
-            tensor *out_p = tensor_attention(q2, k2, v2, NULL);
+            tensor *out_p = tensor_attention(ctx.scratch, q2, k2, v2, NULL);
             float loss_p = 0.0f;
             float *pd = tensor_data_ptr(out_p);
             for (int i = 0; i < tensor_numel(out_p); i++) loss_p += pd[i];
 
             /* Negative perturbation */
-            mem_pool_reset(&scratch);
-            mem_pool_reset(&data);
+            mem_pool_reset(ctx.scratch);
+            mem_pool_reset(ctx.data);
 
             srand(42);
             tensor *q3 = make_tensor(4, (int[]){B, H, N, d}, q_orig, 1);
@@ -362,7 +339,7 @@ static void test_numerical_grad(void) {
             else target_data = tensor_data_ptr(v3);
             target_data[idx] = orig_val - h;
 
-            tensor *out_n = tensor_attention(q3, k3, v3, NULL);
+            tensor *out_n = tensor_attention(ctx.scratch, q3, k3, v3, NULL);
             float loss_n = 0.0f;
             float *nd = tensor_data_ptr(out_n);
             for (int i = 0; i < tensor_numel(out_n); i++) loss_n += nd[i];
@@ -384,9 +361,6 @@ static void test_numerical_grad(void) {
     free(q_orig); free(k_orig); free(v_orig);
     free(q_grad_auto); free(k_grad_auto); free(v_grad_auto);
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -398,25 +372,22 @@ static void test_autograd_chain(void) {
 
     int B = 1, H = 1, N = 3, d = 4;
 
-    mem_pool params  = mem_pool_create(512 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 32 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(99);
 
-    tensor *q = tensor_randn(4, (int[]){B, H, N, d}, 1);
-    tensor *k = tensor_randn(4, (int[]){B, H, N, d}, 1);
-    tensor *v = tensor_randn(4, (int[]){B, H, N, d}, 1);
+    tensor *q = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
+    tensor *k = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
+    tensor *v = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
 
     /* Chain: attention → sum → scalar loss */
-    tensor *attn_out = tensor_attention(q, k, v, NULL);
-    tensor *loss = tensor_sum(attn_out, -1);   /* [B, H, N] */
-    tensor *loss2 = tensor_sum(loss, -1);       /* [B, H] */
-    tensor *loss3 = tensor_sum(loss2, -1);      /* [B] */
-    tensor *final_loss = tensor_sum(loss3, 0);  /* scalar */
+    tensor *attn_out = tensor_attention(ctx.scratch, q, k, v, NULL);
+    tensor *loss = tensor_sum(ctx.scratch, attn_out, -1);   /* [B, H, N] */
+    tensor *loss2 = tensor_sum(ctx.scratch, loss, -1);       /* [B, H] */
+    tensor *loss3 = tensor_sum(ctx.scratch, loss2, -1);      /* [B] */
+    tensor *final_loss = tensor_sum(ctx.scratch, loss3, 0);  /* scalar */
 
-    dnn_backward(final_loss);
+    dnn_backward(ctx.scratch, final_loss);
 
     float *qg = tensor_grad(q);
     float *kg = tensor_grad(k);
@@ -435,9 +406,6 @@ static void test_autograd_chain(void) {
 
     printf("OK (grads non-zero, finite)\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -449,18 +417,15 @@ static void test_self_attention(void) {
 
     int B = 1, H = 1, N = 4, d = 8;
 
-    mem_pool params  = mem_pool_create(512 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 32 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(7);
 
     /* All three same tensor (self-attention) */
-    tensor *x = tensor_randn(4, (int[]){B, H, N, d}, 1);
+    tensor *x = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
 
-    tensor *out = tensor_attention(x, x, x, NULL);
-    dnn_backward(out);
+    tensor *out = tensor_attention(ctx.scratch, x, x, x, NULL);
+    dnn_backward(ctx.scratch, out);
 
     float *xg = tensor_grad(x);
     assert(xg != NULL);
@@ -469,9 +434,6 @@ static void test_self_attention(void) {
 
     printf("OK\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -486,21 +448,18 @@ static void test_causal_grad_isolation(void) {
 
     int B = 1, H = 1, N = 4, d = 4;
 
-    mem_pool params  = mem_pool_create(512 * 1024);
-    mem_pool scratch = mem_pool_create(32 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 32 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(123);
 
-    tensor *q = tensor_randn(4, (int[]){B, H, N, d}, 1);
-    tensor *k = tensor_randn(4, (int[]){B, H, N, d}, 1);
-    tensor *v = tensor_randn(4, (int[]){B, H, N, d}, 1);
+    tensor *q = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
+    tensor *k = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
+    tensor *v = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
 
-    tensor *out = tensor_attention(q, k, v, NULL);
+    tensor *out = tensor_attention(ctx.scratch, q, k, v, NULL);
 
     /* Verify that non-zero gradients flow through causal mask */
-    dnn_backward(out);
+    dnn_backward(ctx.scratch, out);
 
     float *qg = tensor_grad(q);
     float *kg = tensor_grad(k);
@@ -535,9 +494,6 @@ static void test_causal_grad_isolation(void) {
 
     printf("OK (Q[0] zero by causality, all others non-zero)\n");
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ──────────────────────────────────────────────
@@ -557,5 +513,7 @@ int main(void) {
     test_causal_grad_isolation();
 
     printf("\nAll attention tests passed.\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

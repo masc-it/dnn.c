@@ -1,9 +1,12 @@
 #include "dnn.h"
+#include "context.h"
 #include "ops.h"
 #include <stdio.h>
 #include <assert.h>
 #include <math.h>
 #include <string.h>
+
+static dnn_ctx ctx;
 
 #define EPS 1e-5f
 
@@ -35,7 +38,7 @@ static void check_grad_ary(tensor *t, const float *exp, int n, const char *label
 static void test_embedding_simple(void) {
     printf("  test_embedding_simple... ");
     /* table [4, 3], ids [2] */
-    tensor *table = tensor_zeros(2, (int[]){4, 3}, 1);
+    tensor *table = tensor_zeros(ctx.params, 2, (int[]){4, 3}, 1);
     float *td = tensor_data_ptr(table);
     /* row 0: [1, 2, 3] */
     td[0]=1; td[1]=2; td[2]=3;
@@ -47,12 +50,12 @@ static void test_embedding_simple(void) {
     td[9]=10; td[10]=11; td[11]=12;
 
     /* ids as int tensor: store via memset wrapping */
-    tensor *ids = tensor_zeros_data(1, (int[]){2});
+    tensor *ids = tensor_zeros_data(ctx.data, 1, (int[]){2});
     int *idp = (int*)ids->data;
     idp[0] = 1;  /* lookup row 1 */
     idp[1] = 3;  /* lookup row 3 */
 
-    tensor *out = tensor_embedding(table, ids);
+    tensor *out = tensor_embedding(ctx.scratch, table, ids);
     assert(tensor_ndim(out) == 2);
     assert(tensor_shape(out, 0) == 2);
     assert(tensor_shape(out, 1) == 3);
@@ -66,17 +69,17 @@ static void test_embedding_simple(void) {
 static void test_embedding_batch(void) {
     printf("  test_embedding_batch... ");
     /* table [3, 2], ids [4] — larger batch */
-    tensor *table = tensor_zeros(2, (int[]){3, 2}, 1);
+    tensor *table = tensor_zeros(ctx.params, 2, (int[]){3, 2}, 1);
     float *td = tensor_data_ptr(table);
     td[0]=10; td[1]=100;
     td[2]=20; td[3]=200;
     td[4]=30; td[5]=300;
 
-    tensor *ids = tensor_zeros_data(1, (int[]){4});
+    tensor *ids = tensor_zeros_data(ctx.data, 1, (int[]){4});
     int *idp = (int*)ids->data;
     idp[0]=0; idp[1]=2; idp[2]=1; idp[3]=0;
 
-    tensor *out = tensor_embedding(table, ids);
+    tensor *out = tensor_embedding(ctx.scratch, table, ids);
     assert(tensor_shape(out, 0) == 4);
     assert(tensor_shape(out, 1) == 2);
 
@@ -88,14 +91,14 @@ static void test_embedding_batch(void) {
 static void test_embedding_single_id(void) {
     printf("  test_embedding_single_id... ");
     /* table [5, 4], single id */
-    tensor *table = tensor_zeros(2, (int[]){5, 4}, 1);
+    tensor *table = tensor_zeros(ctx.params, 2, (int[]){5, 4}, 1);
     float *td = tensor_data_ptr(table);
     for (int i = 0; i < 20; i++) td[i] = (float)(i + 1);
 
-    tensor *ids = tensor_zeros_data(1, (int[]){1});
+    tensor *ids = tensor_zeros_data(ctx.data, 1, (int[]){1});
     ((int*)ids->data)[0] = 0;
 
-    tensor *out = tensor_embedding(table, ids);
+    tensor *out = tensor_embedding(ctx.scratch, table, ids);
     assert(tensor_shape(out, 0) == 1);
     assert(tensor_shape(out, 1) == 4);
 
@@ -109,19 +112,19 @@ static void test_embedding_single_id(void) {
 static void test_embedding_backward_simple(void) {
     printf("  test_embedding_backward_simple... ");
     /* table [3, 2], ids [2], backward with dloss/dy = ones */
-    tensor *table = tensor_zeros(2, (int[]){3, 2}, 1);
+    tensor *table = tensor_zeros(ctx.params, 2, (int[]){3, 2}, 1);
     float *td = tensor_data_ptr(table);
     td[0]=1; td[1]=2;
     td[2]=3; td[3]=4;
     td[4]=5; td[5]=6;
 
-    tensor *ids = tensor_zeros_data(1, (int[]){2});
+    tensor *ids = tensor_zeros_data(ctx.data, 1, (int[]){2});
     int *idp = (int*)ids->data;
     idp[0] = 0;   /* look up row 0 */
     idp[1] = 2;   /* look up row 2 */
 
-    tensor *out = tensor_embedding(table, ids);
-    dnn_backward(out);
+    tensor *out = tensor_embedding(ctx.scratch, table, ids);
+    dnn_backward(ctx.scratch, out);
 
     /* d_table gradients:
      *   row 0 gets d_out[0] = [1,1]  → d_table[0] += [1,1]
@@ -136,18 +139,18 @@ static void test_embedding_backward_simple(void) {
 static void test_embedding_backward_scaled(void) {
     printf("  test_embedding_backward_scaled... ");
     /* table [2, 3], ids [3], loss = sum(out) so d_out = ones(3,3) */
-    tensor *table = tensor_zeros(2, (int[]){2, 3}, 1);
+    tensor *table = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 1);
     float *td = tensor_data_ptr(table);
     td[0]=0.1f; td[1]=0.2f; td[2]=0.3f;
     td[3]=0.4f; td[4]=0.5f; td[5]=0.6f;
 
-    tensor *ids = tensor_zeros_data(1, (int[]){3});
+    tensor *ids = tensor_zeros_data(ctx.data, 1, (int[]){3});
     int *idp = (int*)ids->data;
     idp[0]=1; idp[1]=0; idp[2]=1;  /* row 1, 0, 1 */
 
-    tensor *out = tensor_embedding(table, ids);
-    tensor *loss = tensor_sum(out, 0);  /* sum all -> scalar */
-    dnn_backward(loss);
+    tensor *out = tensor_embedding(ctx.scratch, table, ids);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);  /* sum all -> scalar */
+    dnn_backward(ctx.scratch, loss);
 
     /* d_table accumulation:
      *   row 0 appears once (id[1]) → gets 1.0f across d_model
@@ -161,17 +164,17 @@ static void test_embedding_backward_scaled(void) {
 static void test_embedding_backward_duplicate_ids(void) {
     printf("  test_embedding_backward_duplicate_ids... ");
     /* Same id multiple times — must accumulate grads */
-    tensor *table = tensor_zeros(2, (int[]){2, 2}, 1);
+    tensor *table = tensor_zeros(ctx.params, 2, (int[]){2, 2}, 1);
     float *td = tensor_data_ptr(table);
     td[0]=1; td[1]=2;
     td[2]=3; td[3]=4;
 
-    tensor *ids = tensor_zeros_data(1, (int[]){4});
+    tensor *ids = tensor_zeros_data(ctx.data, 1, (int[]){4});
     int *idp = (int*)ids->data;
     idp[0]=0; idp[1]=0; idp[2]=1; idp[3]=0;  /* row 0 appears 3×, row 1 appears 1× */
 
-    tensor *out = tensor_embedding(table, ids);
-    dnn_backward(out);
+    tensor *out = tensor_embedding(ctx.scratch, table, ids);
+    dnn_backward(ctx.scratch, out);
 
     /* row 0 gets 3× d_out = [1,1] → [3,3] */
     /* row 1 gets 1× d_out = [1,1] → [1,1] */
@@ -183,20 +186,20 @@ static void test_embedding_backward_duplicate_ids(void) {
 static void test_embedding_no_grad(void) {
     printf("  test_embedding_no_grad... ");
     /* no-grad mode: no gradients allocated */
-    tensor *table = tensor_zeros(2, (int[]){3, 2}, 0);  /* no grad */
+    tensor *table = tensor_zeros(ctx.params, 2, (int[]){3, 2}, 0);  /* no grad */
     float *td = tensor_data_ptr(table);
     td[0]=1; td[1]=2;
     td[2]=3; td[3]=4;
     td[4]=5; td[5]=6;
 
-    tensor *ids = tensor_zeros_data(1, (int[]){2});
+    tensor *ids = tensor_zeros_data(ctx.data, 1, (int[]){2});
     ((int*)ids->data)[0] = 0;
     ((int*)ids->data)[1] = 1;
 
     {
-        dnn_grad_ctx ctx = dnn_no_grad_enter();
-        tensor *out = tensor_embedding(table, ids);
-        dnn_no_grad_exit(ctx);
+        dnn_grad_ctx gc = dnn_no_grad_enter();
+        tensor *out = tensor_embedding(ctx.scratch, table, ids);
+        dnn_no_grad_exit(gc);
 
         /* forward still works */
         assert(tensor_shape(out, 0) == 2);
@@ -213,26 +216,26 @@ static void test_embedding_no_grad(void) {
 static void test_embedding_chain(void) {
     printf("  test_embedding_chain... ");
     /* embed -> linear: y = embed(ids) @ W + b */
-    tensor *table = tensor_zeros(2, (int[]){3, 2}, 1);
+    tensor *table = tensor_zeros(ctx.params, 2, (int[]){3, 2}, 1);
     float *td = tensor_data_ptr(table);
     td[0]=1; td[1]=2;
     td[2]=3; td[3]=4;
     td[4]=5; td[5]=6;
 
-    tensor *ids = tensor_zeros_data(1, (int[]){2});
+    tensor *ids = tensor_zeros_data(ctx.data, 1, (int[]){2});
     int *idp = (int*)ids->data;
     idp[0]=0; idp[1]=2;
 
     /* linear layer [2 -> 2] */
-    linear *l = linear_create(2, 2);
+    linear *l = linear_create(ctx.params, 2, 2);
     float *wp = tensor_data_ptr(l->weight);
     wp[0]=1; wp[1]=0; wp[2]=0; wp[3]=1;  /* identity */
     float *bp = tensor_data_ptr(l->bias);
     bp[0]=0; bp[1]=0;
 
-    tensor *e = tensor_embedding(table, ids);  /* [2, 2] */
-    tensor *y = linear_forward(l, e);           /* [2, 2] */
-    dnn_backward(y);
+    tensor *e = tensor_embedding(ctx.scratch, table, ids);  /* [2, 2] */
+    tensor *y = linear_forward(ctx.scratch, l, e);           /* [2, 2] */
+    dnn_backward(ctx.scratch, y);
 
     /* Gradients flow back to embedding table */
     float *d_table = tensor_grad(table);
@@ -245,47 +248,42 @@ static void test_embedding_chain(void) {
 int main(void) {
     printf("test_embedding:\n");
 
-    mem_pool params  = mem_pool_create(128 * 1024);
-    mem_pool scratch = mem_pool_create(128 * 1024);
-    mem_pool data    = mem_pool_create(128 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 128 * 1024, 128 * 1024, 128 * 1024);
 
     test_embedding_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_embedding_batch();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_embedding_single_id();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_embedding_backward_simple();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_embedding_backward_scaled();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_embedding_backward_duplicate_ids();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_embedding_no_grad();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     test_embedding_chain();
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
-
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
     printf("  ALL PASS\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

@@ -5,11 +5,14 @@
  * Usage:   ./bench_conv2d
  */
 #include "dnn.h"
+#include "context.h"
 #include "conv.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+static dnn_ctx ctx;
 
 static double now_us(void) {
     struct timespec ts;
@@ -24,22 +27,18 @@ static double time_conv(int N, int C, int H, int W, int out_C, int kH, int kW,
     if (!times) return -1;
 
     for (int t = -warmup; t < trials; t++) {
-        mem_pool params  = mem_pool_create(4 * 1024 * 1024);
-        mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-        mem_pool_set_defaults(&params, &scratch, NULL);
 
-        tensor *x = tensor_randn(4, (int[]){N, C, H, W}, 1);
-        tensor *w = tensor_randn(4, (int[]){out_C, C, kH, kW}, 1);
-        tensor *b = tensor_zeros(1, (int[]){out_C}, 1);
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 4 * 1024 * 1024, 8*1024*1024);
+
+        tensor *x = tensor_randn(ctx.params, 4, (int[]){N, C, H, W}, 1);
+        tensor *w = tensor_randn(ctx.params, 4, (int[]){out_C, C, kH, kW}, 1);
+        tensor *b = tensor_zeros(ctx.params, 1, (int[]){out_C}, 1);
 
         double t0 = now_us();
-        tensor *out = tensor_conv2d(x, w, b, stride, pad);
-        tensor *loss = tensor_sum(out, 0);
-        dnn_backward(loss);
+        tensor *out = tensor_conv2d(ctx.scratch, x, w, b, stride, pad);
+        tensor *loss = tensor_sum(ctx.scratch, out, 0);
+        dnn_backward(ctx.scratch, loss);
         double dt = now_us() - t0;
-
-        mem_pool_destroy(&params);
-        mem_pool_destroy(&scratch);
 
         if (t >= 0) times[t] = dt;
     }
@@ -104,5 +103,7 @@ int main(void) {
     }
 
     printf("\n# Baseline captured. Date: " __DATE__ " " __TIME__ "\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

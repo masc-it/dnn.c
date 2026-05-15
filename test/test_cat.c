@@ -1,9 +1,12 @@
 #include "dnn.h"
+#include "context.h"
 #include "ops.h"
 #include <stdio.h>
 #include <assert.h>
 #include <math.h>
 #include <string.h>
+
+static dnn_ctx ctx;
 
 #define EPS 1e-5f
 
@@ -34,14 +37,14 @@ static void check_grad_ary(tensor *t, const float *exp, int n, const char *label
 
 static void test_cat_1d(void) {
     printf("  test_cat_1d... ");
-    tensor *a = tensor_zeros(1, (int[]){3}, 0);
-    tensor *b = tensor_zeros(1, (int[]){2}, 0);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){3}, 0);
+    tensor *b = tensor_zeros(ctx.params, 1, (int[]){2}, 0);
     float *ad = tensor_data_ptr(a);
     float *bd = tensor_data_ptr(b);
     ad[0]=1; ad[1]=2; ad[2]=3;
     bd[0]=4; bd[1]=5;
 
-    tensor *out = tensor_cat(a, b, 0);
+    tensor *out = tensor_cat(ctx.scratch, a, b, 0);
     assert(tensor_ndim(out) == 1);
     assert(tensor_shape(out, 0) == 5);
 
@@ -55,14 +58,14 @@ static void test_cat_1d(void) {
 
 static void test_cat_2d_dim0(void) {
     printf("  test_cat_2d_dim0... ");
-    tensor *a = tensor_zeros(2, (int[]){2, 3}, 0);
-    tensor *b = tensor_zeros(2, (int[]){4, 3}, 0);
+    tensor *a = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 0);
+    tensor *b = tensor_zeros(ctx.params, 2, (int[]){4, 3}, 0);
     float *ad = tensor_data_ptr(a);
     float *bd = tensor_data_ptr(b);
     for (int i = 0; i < 6; i++) ad[i] = (float)(i + 1);       /* [[1,2,3],[4,5,6]] */
     for (int i = 0; i < 12; i++) bd[i] = (float)(i + 7);      /* [[7,8,9],[10,11,12],[13,14,15],[16,17,18]] */
 
-    tensor *out = tensor_cat(a, b, 0);
+    tensor *out = tensor_cat(ctx.scratch, a, b, 0);
     assert(tensor_ndim(out) == 2);
     assert(tensor_shape(out, 0) == 6 && tensor_shape(out, 1) == 3);
 
@@ -73,14 +76,14 @@ static void test_cat_2d_dim0(void) {
 
 static void test_cat_2d_dim1(void) {
     printf("  test_cat_2d_dim1... ");
-    tensor *a = tensor_zeros(2, (int[]){3, 2}, 0);
-    tensor *b = tensor_zeros(2, (int[]){3, 5}, 0);
+    tensor *a = tensor_zeros(ctx.params, 2, (int[]){3, 2}, 0);
+    tensor *b = tensor_zeros(ctx.params, 2, (int[]){3, 5}, 0);
     float *ad = tensor_data_ptr(a);
     float *bd = tensor_data_ptr(b);
     for (int i = 0; i < 6; i++) ad[i] = (float)(i + 1);        /* [[1,2],[3,4],[5,6]] */
     for (int i = 0; i < 15; i++) bd[i] = (float)(i + 7);       /* [[7..11],[12..16],[17..21]] */
 
-    tensor *out = tensor_cat(a, b, 1);
+    tensor *out = tensor_cat(ctx.scratch, a, b, 1);
     assert(tensor_shape(out, 0) == 3 && tensor_shape(out, 1) == 7);
 
     float exp[] = {1,2, 7,8,9,10,11,   3,4, 12,13,14,15,16,   5,6, 17,18,19,20,21};
@@ -90,14 +93,14 @@ static void test_cat_2d_dim1(void) {
 
 static void test_cat_3d_dim1(void) {
     printf("  test_cat_3d_dim1... ");
-    tensor *a = tensor_zeros(3, (int[]){2, 3, 4}, 0);
-    tensor *b = tensor_zeros(3, (int[]){2, 7, 4}, 0);
+    tensor *a = tensor_zeros(ctx.params, 3, (int[]){2, 3, 4}, 0);
+    tensor *b = tensor_zeros(ctx.params, 3, (int[]){2, 7, 4}, 0);
     float *ad = tensor_data_ptr(a);
     float *bd = tensor_data_ptr(b);
     for (int i = 0; i < 24; i++) ad[i] = 1.0f;
     for (int i = 0; i < 56; i++) bd[i] = 2.0f;
 
-    tensor *out = tensor_cat(a, b, 1);
+    tensor *out = tensor_cat(ctx.scratch, a, b, 1);
     assert(tensor_shape(out, 0) == 2);
     assert(tensor_shape(out, 1) == 10);
     assert(tensor_shape(out, 2) == 4);
@@ -116,11 +119,11 @@ static void test_cat_3d_dim1(void) {
 static void test_cat_negative_dim(void) {
     printf("  test_cat_negative_dim... ");
     /* Use compatible shapes: cat along dim=0, so dim=1 must match */
-    tensor *a = tensor_zeros(2, (int[]){2, 3}, 0);
-    tensor *b = tensor_zeros(2, (int[]){4, 3}, 0);
+    tensor *a = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 0);
+    tensor *b = tensor_zeros(ctx.params, 2, (int[]){4, 3}, 0);
 
     /* dim=-2 → dim=0: cat [2,3]+[4,3] along rows → [6,3] */
-    tensor *out = tensor_cat(a, b, -2);
+    tensor *out = tensor_cat(ctx.scratch, a, b, -2);
     assert(tensor_shape(out, 0) == 6 && tensor_shape(out, 1) == 3);
 
     /* dim=-1 → dim=1 would require matching dim=0 shapes, not tested here */
@@ -131,13 +134,13 @@ static void test_cat_negative_dim(void) {
 
 static void test_cat_backward_simple(void) {
     printf("  test_cat_backward_simple... ");
-    tensor *a = tensor_zeros(1, (int[]){3}, 1);
-    tensor *b = tensor_zeros(1, (int[]){2}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
+    tensor *b = tensor_zeros(ctx.params, 1, (int[]){2}, 1);
     float *ad = tensor_data_ptr(a); ad[0]=1; ad[1]=2; ad[2]=3;
     float *bd = tensor_data_ptr(b); bd[0]=4; bd[1]=5;
 
-    tensor *out = tensor_cat(a, b, 0);
-    dnn_backward(out);  /* d_out = ones */
+    tensor *out = tensor_cat(ctx.scratch, a, b, 0);
+    dnn_backward(ctx.scratch, out);  /* d_out = ones */
 
     float exp_a[] = {1.0f, 1.0f, 1.0f};
     float exp_b[] = {1.0f, 1.0f};
@@ -148,11 +151,11 @@ static void test_cat_backward_simple(void) {
 
 static void test_cat_backward_2d_dim0(void) {
     printf("  test_cat_backward_2d_dim0... ");
-    tensor *a = tensor_zeros(2, (int[]){2, 3}, 1);
-    tensor *b = tensor_zeros(2, (int[]){4, 3}, 1);
+    tensor *a = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 1);
+    tensor *b = tensor_zeros(ctx.params, 2, (int[]){4, 3}, 1);
 
-    tensor *out = tensor_cat(a, b, 0);
-    dnn_backward(out);
+    tensor *out = tensor_cat(ctx.scratch, a, b, 0);
+    dnn_backward(ctx.scratch, out);
 
     float exp_a[] = {1,1,1, 1,1,1};
     float exp_b[] = {1,1,1, 1,1,1, 1,1,1, 1,1,1};
@@ -163,11 +166,11 @@ static void test_cat_backward_2d_dim0(void) {
 
 static void test_cat_backward_2d_dim1(void) {
     printf("  test_cat_backward_2d_dim1... ");
-    tensor *a = tensor_zeros(2, (int[]){3, 2}, 1);
-    tensor *b = tensor_zeros(2, (int[]){3, 5}, 1);
+    tensor *a = tensor_zeros(ctx.params, 2, (int[]){3, 2}, 1);
+    tensor *b = tensor_zeros(ctx.params, 2, (int[]){3, 5}, 1);
 
-    tensor *out = tensor_cat(a, b, 1);
-    dnn_backward(out);
+    tensor *out = tensor_cat(ctx.scratch, a, b, 1);
+    dnn_backward(ctx.scratch, out);
 
     float exp_a[] = {1,1, 1,1, 1,1};
     float exp_b[] = {1,1,1,1,1, 1,1,1,1,1, 1,1,1,1,1};
@@ -179,13 +182,13 @@ static void test_cat_backward_2d_dim1(void) {
 static void test_cat_backward_partial_grad(void) {
     printf("  test_cat_backward_partial_grad... ");
     /* only a requires grad */
-    tensor *a = tensor_zeros(1, (int[]){3}, 1);
-    tensor *b = tensor_zeros(1, (int[]){2}, 0);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
+    tensor *b = tensor_zeros(ctx.params, 1, (int[]){2}, 0);
     float *ad = tensor_data_ptr(a); ad[0]=1; ad[1]=2; ad[2]=3;
     float *bd = tensor_data_ptr(b); bd[0]=4; bd[1]=5;
 
-    tensor *out = tensor_cat(a, b, 0);
-    dnn_backward(out);
+    tensor *out = tensor_cat(ctx.scratch, a, b, 0);
+    dnn_backward(ctx.scratch, out);
 
     float exp_a[] = {1.0f, 1.0f, 1.0f};
     check_grad_ary(a, exp_a, 3, "a.grad");
@@ -195,17 +198,17 @@ static void test_cat_backward_partial_grad(void) {
 
 static void test_cat_backward_self(void) {
     printf("  test_cat_backward_self... ");
-    tensor *a = tensor_zeros(1, (int[]){2}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){2}, 1);
     float *ad = tensor_data_ptr(a); ad[0]=1; ad[1]=2;
 
-    tensor *out = tensor_cat(a, a, 0);  /* self-concatenation */
+    tensor *out = tensor_cat(ctx.scratch, a, a, 0);  /* self-concatenation */
     assert(tensor_shape(out, 0) == 4);
     float *od = tensor_data_ptr(out);
     assert(fabsf(od[0]-1)<EPS && fabsf(od[1]-2)<EPS && fabsf(od[2]-1)<EPS && fabsf(od[3]-2)<EPS);
 
     /* loss = sum(out), gradient = ones(4) */
-    tensor *loss = tensor_sum(out, 0);
-    dnn_backward(loss);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);
+    dnn_backward(ctx.scratch, loss);
 
     /* Each element of a appears twice in out, so gradient = 2 */
     float exp_a[] = {2.0f, 2.0f};
@@ -216,14 +219,14 @@ static void test_cat_backward_self(void) {
 static void test_cat_backward_sum_loss(void) {
     printf("  test_cat_backward_sum_loss... ");
     /* cat -> sum loss = scalar */
-    tensor *a = tensor_zeros(1, (int[]){3}, 1);
-    tensor *b = tensor_zeros(1, (int[]){2}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
+    tensor *b = tensor_zeros(ctx.params, 1, (int[]){2}, 1);
     float *ad = tensor_data_ptr(a); ad[0]=1; ad[1]=2; ad[2]=3;
     float *bd = tensor_data_ptr(b); bd[0]=4; bd[1]=5;
 
-    tensor *out = tensor_cat(a, b, 0);
-    tensor *loss = tensor_sum(out, 0);  /* scalar, keepdim */
-    dnn_backward(loss);
+    tensor *out = tensor_cat(ctx.scratch, a, b, 0);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);  /* scalar, keepdim */
+    dnn_backward(ctx.scratch, loss);
 
     /* grad everywhere = 1.0f (sum backprop) */
     float exp_a[] = {1.0f, 1.0f, 1.0f};
@@ -235,16 +238,16 @@ static void test_cat_backward_sum_loss(void) {
 
 static void test_cat_no_grad(void) {
     printf("  test_cat_no_grad... ");
-    tensor *a = tensor_zeros(1, (int[]){3}, 1);
-    tensor *b = tensor_zeros(1, (int[]){2}, 1);
+    tensor *a = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
+    tensor *b = tensor_zeros(ctx.params, 1, (int[]){2}, 1);
     float *ad = tensor_data_ptr(a); ad[0]=1; ad[1]=2; ad[2]=3;
     float *bd = tensor_data_ptr(b); bd[0]=4; bd[1]=5;
 
     tensor *out;
     {
-        dnn_grad_ctx ctx = dnn_no_grad_enter();
-        out = tensor_cat(a, b, 0);
-        dnn_no_grad_exit(ctx);
+        dnn_grad_ctx gc = dnn_no_grad_enter();
+        out = tensor_cat(ctx.scratch, a, b, 0);
+        dnn_no_grad_exit(gc);
     }
 
     /* forward still works */
@@ -260,15 +263,15 @@ static void test_cat_no_grad(void) {
 static void test_cat_chain_matmul(void) {
     printf("  test_cat_chain_matmul... ");
     /* cat -> matmul -> loss, verify grads flow through both paths */
-    tensor *a = tensor_zeros(3, (int[]){2, 3, 4}, 1);
-    tensor *b = tensor_zeros(3, (int[]){2, 3, 4}, 1);
+    tensor *a = tensor_zeros(ctx.params, 3, (int[]){2, 3, 4}, 1);
+    tensor *b = tensor_zeros(ctx.params, 3, (int[]){2, 3, 4}, 1);
     float *ad = tensor_data_ptr(a);
     float *bd = tensor_data_ptr(b);
     for (int i = 0; i < 24; i++) ad[i] = 1.0f;
     for (int i = 0; i < 24; i++) bd[i] = 2.0f;
 
     /* linear weight */
-    linear *l = linear_create(4, 4);
+    linear *l = linear_create(ctx.params, 4, 4);
     float *wp = tensor_data_ptr(l->weight);
     /* identity weight */
     memset(wp, 0, 16 * sizeof(float));
@@ -276,9 +279,9 @@ static void test_cat_chain_matmul(void) {
     float *bp = tensor_data_ptr(l->bias);
     memset(bp, 0, 4 * sizeof(float));
 
-    tensor *cat_out = tensor_cat(a, b, 1);  /* [2, 6, 4] */
-    tensor *y = linear_forward(l, cat_out);  /* [2, 6, 4] */
-    dnn_backward(y);
+    tensor *cat_out = tensor_cat(ctx.scratch, a, b, 1);  /* [2, 6, 4] */
+    tensor *y = linear_forward(ctx.scratch, l, cat_out);  /* [2, 6, 4] */
+    dnn_backward(ctx.scratch, y);
 
     /* grads should flow back to both a and b */
     float *a_grad = tensor_grad(a);
@@ -293,32 +296,27 @@ static void test_cat_chain_matmul(void) {
 int main(void) {
     printf("test_cat:\n");
 
-    mem_pool params  = mem_pool_create(2 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(2 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(2 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 2 * 1024 * 1024, 2 * 1024 * 1024, 2 * 1024 * 1024);
 
     /* ── Forward ── */
-    test_cat_1d();                mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_cat_2d_dim0();           mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_cat_2d_dim1();           mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_cat_3d_dim1();           mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_cat_negative_dim();      mem_pool_reset(&params); mem_pool_reset(&scratch);
+    test_cat_1d();                mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_cat_2d_dim0();           mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_cat_2d_dim1();           mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_cat_3d_dim1();           mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_cat_negative_dim();      mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
 
     /* ── Backward ── */
-    test_cat_backward_simple();   mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_cat_backward_2d_dim0();  mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_cat_backward_2d_dim1();  mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_cat_backward_partial_grad(); mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_cat_backward_self();     mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_cat_backward_sum_loss(); mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_cat_no_grad();           mem_pool_reset(&params); mem_pool_reset(&scratch);
-    test_cat_chain_matmul();      mem_pool_reset(&params); mem_pool_reset(&scratch);
-
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+    test_cat_backward_simple();   mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_cat_backward_2d_dim0();  mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_cat_backward_2d_dim1();  mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_cat_backward_partial_grad(); mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_cat_backward_self();     mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_cat_backward_sum_loss(); mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_cat_no_grad();           mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
+    test_cat_chain_matmul();      mem_pool_reset(ctx.params); mem_pool_reset(ctx.scratch);
 
     printf("  ALL PASS\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

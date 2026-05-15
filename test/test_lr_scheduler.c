@@ -1,9 +1,12 @@
 #include "dnn.h"
+#include "context.h"
 #include "optim.h"
 #include <stdio.h>
 #include <assert.h>
 #include <math.h>
 #include <string.h>
+
+static dnn_ctx ctx;
 
 #define EPS 1e-5f
 
@@ -20,11 +23,11 @@ static float lr_exponential[130] = {1.000000000000000e-03f, 5.000000000000000e-0
 
 static adamw_opt *make_test_opt(float base_lr) {
     /* Create a minimal 1-param model just to have a valid adamw_opt */
-    tensor *p = tensor_zeros(1, (int[]){1}, 1);  /* one param with grad */
-    tensor **params = mem_params_alloc(sizeof(tensor*), NULL);
+    tensor *p = tensor_zeros(ctx.params, 1, (int[]){1}, 1);  /* one param with grad */
+    tensor **params = _mem_pool_alloc(ctx.params, sizeof(tensor*), NULL);
     params[0] = p;
 
-    adamw_opt *opt = adamw_create(params, 1, base_lr, 0.9f, 0.999f, 1e-8f, 0.01f);
+    adamw_opt *opt = adamw_create(ctx.params, params, 1, base_lr, 0.9f, 0.999f, 1e-8f, 0.01f);
     return opt;
 }
 
@@ -38,13 +41,12 @@ static void test_schedule_sequence(const char *name, int schedule,
 
     /* Compact pools just for this test */
     mem_pool params_small  = mem_pool_create(256 * 1024);
-    mem_pool scratch_small = mem_pool_create(256 * 1024);
-    mem_pool data_small    = mem_pool_create(256 * 1024);
-    mem_pool_set_defaults(&params_small, &scratch_small, &data_small);
+
+    dnn_ctx_init(&ctx, 256 * 1024, 256 * 1024, 256 * 1024);
 
     adamw_opt *opt = make_test_opt(base_lr);
 
-    lr_scheduler *sched = lr_scheduler_create(opt, schedule,
+    lr_scheduler *sched = lr_scheduler_create(ctx.params, opt, schedule,
                                                base_lr, warmup, total,
                                                min_lr, step_sz, gamma);
 
@@ -71,9 +73,12 @@ static void test_schedule_sequence(const char *name, int schedule,
         }
     }
 
-    mem_pool_destroy(&params_small);
-    mem_pool_destroy(&scratch_small);
-    mem_pool_destroy(&data_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&params_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&scratch_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&data_small);
     printf("OK\n");
 }
 
@@ -83,21 +88,23 @@ static void test_default_min_lr(void) {
     printf("  test_default_min_lr... ");
 
     mem_pool params_small  = mem_pool_create(256 * 1024);
-    mem_pool scratch_small = mem_pool_create(256 * 1024);
-    mem_pool data_small    = mem_pool_create(256 * 1024);
-    mem_pool_set_defaults(&params_small, &scratch_small, &data_small);
+
+    dnn_ctx_init(&ctx, 256 * 1024, 256 * 1024, 256 * 1024);
 
     adamw_opt *opt = make_test_opt(0.01f);
 
     /* min_lr < 0 → should default to base_lr/10 */
-    lr_scheduler *sched = lr_scheduler_create(opt, LR_SCHEDULE_COSINE,
+    lr_scheduler *sched = lr_scheduler_create(ctx.params, opt, LR_SCHEDULE_COSINE,
                                                0.01f, 0, 100, -1.0f, 0, 0);
     assert(fabsf(sched->min_lr - 0.001f) < EPS);
     printf("OK (min_lr=%f)\n", sched->min_lr);
 
-    mem_pool_destroy(&params_small);
-    mem_pool_destroy(&scratch_small);
-    mem_pool_destroy(&data_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&params_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&scratch_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&data_small);
 }
 
 /* ── Test: reset ── */
@@ -106,13 +113,12 @@ static void test_reset(void) {
     printf("  test_reset... ");
 
     mem_pool params_small  = mem_pool_create(256 * 1024);
-    mem_pool scratch_small = mem_pool_create(256 * 1024);
-    mem_pool data_small    = mem_pool_create(256 * 1024);
-    mem_pool_set_defaults(&params_small, &scratch_small, &data_small);
+
+    dnn_ctx_init(&ctx, 256 * 1024, 256 * 1024, 256 * 1024);
 
     adamw_opt *opt = make_test_opt(0.001f);
 
-    lr_scheduler *sched = lr_scheduler_create(opt, LR_SCHEDULE_LINEAR_WARMUP_COSINE,
+    lr_scheduler *sched = lr_scheduler_create(ctx.params, opt, LR_SCHEDULE_LINEAR_WARMUP_COSINE,
                                                0.001f, 10, 100, 1e-5f, 0, 0);
 
     /* Advance some steps */
@@ -137,9 +143,12 @@ static void test_reset(void) {
 
     printf("OK\n");
 
-    mem_pool_destroy(&params_small);
-    mem_pool_destroy(&scratch_small);
-    mem_pool_destroy(&data_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&params_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&scratch_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&data_small);
 }
 
 /* ── Test: get_lr without stepping ── */
@@ -148,13 +157,12 @@ static void test_get_lr_no_side_effects(void) {
     printf("  test_get_lr_no_side_effects... ");
 
     mem_pool params_small  = mem_pool_create(256 * 1024);
-    mem_pool scratch_small = mem_pool_create(256 * 1024);
-    mem_pool data_small    = mem_pool_create(256 * 1024);
-    mem_pool_set_defaults(&params_small, &scratch_small, &data_small);
+
+    dnn_ctx_init(&ctx, 256 * 1024, 256 * 1024, 256 * 1024);
 
     adamw_opt *opt = make_test_opt(0.001f);
 
-    lr_scheduler *sched = lr_scheduler_create(opt, LR_SCHEDULE_COSINE,
+    lr_scheduler *sched = lr_scheduler_create(ctx.params, opt, LR_SCHEDULE_COSINE,
                                                0.001f, 0, 100, 1e-5f, 0, 0);
 
     float lr1 = lr_scheduler_get_lr(sched);
@@ -167,9 +175,12 @@ static void test_get_lr_no_side_effects(void) {
 
     printf("OK\n");
 
-    mem_pool_destroy(&params_small);
-    mem_pool_destroy(&scratch_small);
-    mem_pool_destroy(&data_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&params_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&scratch_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&data_small);
 }
 
 /* ── Test: step decay boundaries ── */
@@ -178,14 +189,13 @@ static void test_step_boundaries(void) {
     printf("  test_step_boundaries... ");
 
     mem_pool params_small  = mem_pool_create(256 * 1024);
-    mem_pool scratch_small = mem_pool_create(256 * 1024);
-    mem_pool data_small    = mem_pool_create(256 * 1024);
-    mem_pool_set_defaults(&params_small, &scratch_small, &data_small);
+
+    dnn_ctx_init(&ctx, 256 * 1024, 256 * 1024, 256 * 1024);
 
     adamw_opt *opt = make_test_opt(0.001f);
 
     /* step_size=10, gamma=0.5, no warmup */
-    lr_scheduler *sched = lr_scheduler_create(opt, LR_SCHEDULE_STEP,
+    lr_scheduler *sched = lr_scheduler_create(ctx.params, opt, LR_SCHEDULE_STEP,
                                                0.001f, 0, 0, 0,
                                                10, 0.5f);
 
@@ -208,9 +218,12 @@ static void test_step_boundaries(void) {
 
     printf("OK\n");
 
-    mem_pool_destroy(&params_small);
-    mem_pool_destroy(&scratch_small);
-    mem_pool_destroy(&data_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&params_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&scratch_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&data_small);
 }
 
 /* ── Test: exponential decay exact values ── */
@@ -219,14 +232,13 @@ static void test_exponential_values(void) {
     printf("  test_exponential_values... ");
 
     mem_pool params_small  = mem_pool_create(256 * 1024);
-    mem_pool scratch_small = mem_pool_create(256 * 1024);
-    mem_pool data_small    = mem_pool_create(256 * 1024);
-    mem_pool_set_defaults(&params_small, &scratch_small, &data_small);
+
+    dnn_ctx_init(&ctx, 256 * 1024, 256 * 1024, 256 * 1024);
 
     adamw_opt *opt = make_test_opt(0.001f);
 
     /* gamma=0.5, no warmup */
-    lr_scheduler *sched = lr_scheduler_create(opt, LR_SCHEDULE_EXPONENTIAL,
+    lr_scheduler *sched = lr_scheduler_create(ctx.params, opt, LR_SCHEDULE_EXPONENTIAL,
                                                0.001f, 0, 0, 0,
                                                0, 0.5f);
 
@@ -244,9 +256,12 @@ static void test_exponential_values(void) {
 
     printf("OK\n");
 
-    mem_pool_destroy(&params_small);
-    mem_pool_destroy(&scratch_small);
-    mem_pool_destroy(&data_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&params_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&scratch_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&data_small);
 }
 
 /* ── Test: no warmup, just constant ── */
@@ -255,13 +270,12 @@ static void test_constant_no_warmup(void) {
     printf("  test_constant_no_warmup... ");
 
     mem_pool params_small  = mem_pool_create(256 * 1024);
-    mem_pool scratch_small = mem_pool_create(256 * 1024);
-    mem_pool data_small    = mem_pool_create(256 * 1024);
-    mem_pool_set_defaults(&params_small, &scratch_small, &data_small);
+
+    dnn_ctx_init(&ctx, 256 * 1024, 256 * 1024, 256 * 1024);
 
     adamw_opt *opt = make_test_opt(0.001f);
 
-    lr_scheduler *sched = lr_scheduler_create(opt, LR_SCHEDULE_CONSTANT,
+    lr_scheduler *sched = lr_scheduler_create(ctx.params, opt, LR_SCHEDULE_CONSTANT,
                                                0.001f, 0, 0, 0, 0, 0);
 
     /* LR should remain constant at base_lr */
@@ -272,9 +286,12 @@ static void test_constant_no_warmup(void) {
 
     printf("OK\n");
 
-    mem_pool_destroy(&params_small);
-    mem_pool_destroy(&scratch_small);
-    mem_pool_destroy(&data_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&params_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&scratch_small);
+    dnn_ctx_destroy(&ctx);
+    // mem_pool_destroy(&data_small);
 }
 
 /* ── Test: scheduler with actual model training ── */
@@ -282,13 +299,10 @@ static void test_constant_no_warmup(void) {
 static void test_scheduler_with_training(void) {
     printf("  test_scheduler_with_training... ");
 
-    mem_pool params  = mem_pool_create(2 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(2 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(2 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024, 256 * 1024, 256 * 1024);
 
     /* Create minimal decoder LM */
-    decoder_lm *lm = decoder_lm_create(8, 8, 2, 2, 4, 16);
+    decoder_lm *lm = decoder_lm_create(ctx.params, 8, 8, 2, 2, 4, 16);
 
     /* Collect params */
     tensor *all_params[256];
@@ -320,11 +334,11 @@ static void test_scheduler_with_training(void) {
         all_params[n_params++] = b->ffn->down_proj->bias;
     }
 
-    adamw_opt *opt = adamw_create(all_params, n_params, 0.01f,
+    adamw_opt *opt = adamw_create(ctx.params, all_params, n_params, 0.01f,
                                    0.9f, 0.999f, 1e-8f, 0.01f);
 
     /* Create scheduler with linear warmup + cosine */
-    lr_scheduler *sched = lr_scheduler_create(opt, LR_SCHEDULE_LINEAR_WARMUP_COSINE,
+    lr_scheduler *sched = lr_scheduler_create(ctx.params, opt, LR_SCHEDULE_LINEAR_WARMUP_COSINE,
                                                 0.01f, 5, 20, 1e-4f, 0, 0);
 
     /* Train a few steps and verify LR follows schedule */
@@ -333,18 +347,18 @@ static void test_scheduler_with_training(void) {
         lrs[step] = lr_scheduler_get_lr(sched);
 
         /* Create input_ids (B=2, N=4) */
-        tensor *input_ids = tensor_zeros_data(2, (int[]){2, 4});
+        tensor *input_ids = tensor_zeros_data(ctx.data, 2, (int[]){2, 4});
         int *id_data = (int *)input_ids->data;
         id_data[0] = 0; id_data[1] = 1; id_data[2] = 2; id_data[3] = 3;
         id_data[4] = 3; id_data[5] = 2; id_data[6] = 1; id_data[7] = 0;
 
-        tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 0.0f, NULL);
+        tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
         (void)loss;
 
         lr_scheduler_step(sched);
 
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
     }
 
     /* Verify LR progression: warmup steps 0-4 should increase, later decay */
@@ -358,9 +372,6 @@ static void test_scheduler_with_training(void) {
     printf("OK (lrs: %.6f %.6f %.6f %.6f ... %.6f)\n",
            lrs[0], lrs[1], lrs[2], lrs[3], lrs[9]);
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 int main(void) {

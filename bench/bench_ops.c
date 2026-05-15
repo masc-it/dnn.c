@@ -9,6 +9,7 @@
  */
 
 #include "dnn.h"
+#include "context.h"
 #include "nn.h"
 #include "norm.h"
 #include "pool.h"
@@ -20,6 +21,8 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+
+static dnn_ctx ctx;
 
 /* Compiler barrier — prevents dead-code elimination of benchmark loops.
    Has zero runtime cost; only constrains the optimizer. */
@@ -383,7 +386,7 @@ static void free_ctx(bench_ctx *c) { free(c); }
 
 static tensor *do_relu(tensor *x, bench_ctx *c) {
     (void)c;
-    return tensor_relu(x);
+    return tensor_relu(ctx.scratch, x);
 }
 
 static tensor *do_xent(tensor *x, bench_ctx *c) {
@@ -399,7 +402,7 @@ static tensor *do_xent(tensor *x, bench_ctx *c) {
         c->target->contiguous = 1;
         c->target->data = td;
     }
-    return tensor_cross_entropy(x, c->target, 1);
+    return tensor_cross_entropy(ctx.scratch, x, c->target, 1);
 }
 
 static tensor *do_ln(tensor *x, bench_ctx *c) {
@@ -417,7 +420,7 @@ static tensor *do_ln(tensor *x, bench_ctx *c) {
         c->ln_w->contiguous = 1; c->ln_b->contiguous = 1;
         for (int j = 0; j < d; j++) { wd[j] = 1.0f; bd[j] = 0.0f; }
     }
-    return tensor_layer_norm(x, c->ln_w, c->ln_b, 1e-5f);
+    return tensor_layer_norm(ctx.scratch, x, c->ln_w, c->ln_b, 1e-5f);
 }
 
 static tensor *do_add(tensor *x, bench_ctx *c) {
@@ -437,7 +440,7 @@ static tensor *do_add(tensor *x, bench_ctx *c) {
             s *= c->extra->shape[i];
         }
     }
-    return tensor_add(x, c->extra);
+    return tensor_add(ctx.scratch, x, c->extra);
 }
 
 static tensor *do_mul(tensor *x, bench_ctx *c) {
@@ -457,7 +460,7 @@ static tensor *do_mul(tensor *x, bench_ctx *c) {
             s *= c->extra->shape[i];
         }
     }
-    return tensor_mul(x, c->extra);
+    return tensor_mul(ctx.scratch, x, c->extra);
 }
 
 typedef tensor *(*fwd_fn_t)(tensor*, bench_ctx*);
@@ -466,7 +469,7 @@ static double bench_fwd(fwd_fn_t fwd, tensor *x, bench_ctx *ctx,
                          int warmup, int trials) {
     double *ts = malloc((size_t)trials * sizeof(double));
     for (int t = -warmup; t < trials; t++) {
-        mem_pool_reset(_mem_pool_scratch());
+        mem_pool_reset(ctx.scratch);
         double t0 = now_us();
         tensor *y = fwd(x, ctx);
         /* sink via volatile read to prevent DCE */
@@ -483,10 +486,10 @@ static double bench_step(fwd_fn_t fwd, tensor *x, bench_ctx *ctx,
                           int warmup, int trials) {
     double *ts = malloc((size_t)trials * sizeof(double));
     for (int t = -warmup; t < trials; t++) {
-        mem_pool_reset(_mem_pool_scratch());
+        mem_pool_reset(ctx.scratch);
         double t0 = now_us();
         tensor *y  = fwd(x, ctx);
-        if (y) { dnn_backward(y); volatile float sink = ((float*)y->data)[0]; (void)sink; }
+        if (y) { dnn_backward(ctx.scratch, y); volatile float sink = ((float*)y->data)[0]; (void)sink; }
         double dt = now_us() - t0;
         if (t >= 0) ts[t] = dt;
     }
@@ -529,17 +532,14 @@ static void run_library_benchmarks(void) {
            "--", "-----", "------", "------", "------",
            "-------", "-------", "-------");
 
-    mem_pool params  = mem_pool_create(256 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(256 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(64 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx_init(&ctx, 256 * 1024 * 1024, 256 * 1024 * 1024, 64 * 1024 * 1024);
 
     for (int i = 0; i < ncfgs; i++) {
         bench_cfg *c = &cfgs[i];
-        mem_pool_reset(&params);
-        mem_pool_reset(&scratch);
+        mem_pool_reset(ctx.params);
+        mem_pool_reset(ctx.scratch);
 
-        tensor *x = tensor_randn(c->ndim, c->shape, c->wants_grad);
+        tensor *x = tensor_randn(ctx.params, c->ndim, c->shape, c->wants_grad);
         bench_ctx *ctx = make_ctx();
         int numel = tensor_numel(x);
         double bytes_fwd  = (double)numel * sizeof(float) * 2.0;
@@ -566,12 +566,9 @@ static void run_library_benchmarks(void) {
                c->name, shape_str, fwd_us, bwd_us, step_us,
                fwd_gbs, bwd_gbs, step_gbs);
         free_ctx(ctx);
-        mem_pool_reset(&params);
+        mem_pool_reset(ctx.params);
     }
 
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -586,5 +583,7 @@ int main(void) {
     run_kernel_benchmarks();
     run_library_benchmarks();
     printf("\n# done.\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }

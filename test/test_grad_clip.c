@@ -1,4 +1,5 @@
 #include "dnn.h"
+#include "context.h"
 #include "transformer.h"
 #include "optim.h"
 #include <stdio.h>
@@ -6,6 +7,8 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+
+static dnn_ctx ctx;
 
 #define EPS 1e-5f
 
@@ -41,25 +44,23 @@ static float max_abs_grad(tensor **params, int n_params) {
 
 static void test_clip_norm_basic(void) {
     printf("  test_clip_norm_basic... ");
-    mem_pool params  = mem_pool_create(4 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
 
-    tensor *a = tensor_randn(1, (int[]){100}, 1);
-    tensor *b = tensor_randn(1, (int[]){50}, 1);
-    tensor *c = tensor_randn(1, (int[]){25}, 1);
+    tensor *a = tensor_randn(ctx.params, 1, (int[]){100}, 1);
+    tensor *b = tensor_randn(ctx.params, 1, (int[]){50}, 1);
+    tensor *c = tensor_randn(ctx.params, 1, (int[]){25}, 1);
     tensor *all[] = {a, b, c};
     int n = 3;
 
     /* Build graph: loss = sum(a*2) + sum(b) + sum(c) — separate params, each summed */
-    tensor *scale = tensor_zeros(1, (int[]){1}, 0);
+    tensor *scale = tensor_zeros(ctx.params, 1, (int[]){1}, 0);
     tensor_data_ptr(scale)[0] = 2.0f; scale->contiguous = 1;
-    tensor *loss = tensor_add(tensor_sum(tensor_mul(a, scale), -1), tensor_sum(b, -1));
-    loss = tensor_add(loss, tensor_sum(c, -1));
-    dnn_backward(loss);
+    tensor *loss = tensor_add(ctx.scratch, tensor_sum(ctx.scratch, tensor_mul(ctx.scratch, a, scale), -1), tensor_sum(ctx.scratch, b, -1));
+    loss = tensor_add(ctx.scratch, loss, tensor_sum(ctx.scratch, c, -1));
+    dnn_backward(ctx.scratch, loss);
 
     float norm_before = total_grad_norm(all, n);
     assert(norm_before > 0.0f && "grad norm should be > 0");
@@ -77,30 +78,26 @@ static void test_clip_norm_basic(void) {
 
     printf("OK (norm %.4f -> %.4f, max_norm=%.1f)\n",
            norm_before, norm_after, max_norm);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test 2: no clipping when norm < max_norm ── */
 
 static void test_clip_norm_noop(void) {
     printf("  test_clip_norm_noop... ");
-    mem_pool params  = mem_pool_create(4 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
 
-    tensor *a = tensor_randn(1, (int[]){100}, 1);
+    tensor *a = tensor_randn(ctx.params, 1, (int[]){100}, 1);
     tensor *all[] = {a};
     int n = 1;
 
-    tensor *scale = tensor_zeros(1, (int[]){1}, 0);
+    tensor *scale = tensor_zeros(ctx.params, 1, (int[]){1}, 0);
     tensor_data_ptr(scale)[0] = 0.001f; scale->contiguous = 1;
-    tensor *loss = tensor_sum(tensor_mul(a, scale), -1);
-    dnn_backward(loss);
+    tensor *loss = tensor_sum(ctx.scratch, tensor_mul(ctx.scratch, a, scale), -1);
+    dnn_backward(ctx.scratch, loss);
 
     float norm_before = total_grad_norm(all, n);
     assert(norm_before > 0.0f);
@@ -113,30 +110,26 @@ static void test_clip_norm_noop(void) {
     assert(fabsf(norm_after - norm_before) < 1e-6f && "norm should be unchanged");
 
     printf("OK (norm %.6e unchanged)\n", norm_before);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test 3: max_norm <= 0 is no-op ── */
 
 static void test_clip_norm_zero_noop(void) {
     printf("  test_clip_norm_zero_noop... ");
-    mem_pool params  = mem_pool_create(4 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
 
-    tensor *a = tensor_randn(1, (int[]){100}, 1);
+    tensor *a = tensor_randn(ctx.params, 1, (int[]){100}, 1);
     tensor *all[] = {a};
     int n = 1;
 
-    tensor *two = tensor_zeros(1, (int[]){1}, 0);
+    tensor *two = tensor_zeros(ctx.params, 1, (int[]){1}, 0);
     tensor_data_ptr(two)[0] = 2.0f; two->contiguous = 1;
-    tensor *loss = tensor_sum(tensor_mul(a, two), -1);
-    dnn_backward(loss);
+    tensor *loss = tensor_sum(ctx.scratch, tensor_mul(ctx.scratch, a, two), -1);
+    dnn_backward(ctx.scratch, loss);
 
     int n_el = tensor_numel(a);
     float *g_copy = malloc(n_el * sizeof(float));
@@ -160,30 +153,26 @@ static void test_clip_norm_zero_noop(void) {
 
     printf("OK (no-op)\n");
     free(g_copy);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test 4: extreme clip (very small max_norm) ── */
 
 static void test_clip_norm_extreme(void) {
     printf("  test_clip_norm_extreme... ");
-    mem_pool params  = mem_pool_create(4 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
 
-    tensor *a = tensor_randn(1, (int[]){20}, 1);
+    tensor *a = tensor_randn(ctx.params, 1, (int[]){20}, 1);
     tensor *all[] = {a};
     int n = 1;
 
-    tensor *hundred = tensor_zeros(1, (int[]){1}, 0);
+    tensor *hundred = tensor_zeros(ctx.params, 1, (int[]){1}, 0);
     tensor_data_ptr(hundred)[0] = 100.0f; hundred->contiguous = 1;
-    tensor *loss = tensor_sum(tensor_mul(a, hundred), -1);
-    dnn_backward(loss);
+    tensor *loss = tensor_sum(ctx.scratch, tensor_mul(ctx.scratch, a, hundred), -1);
+    dnn_backward(ctx.scratch, loss);
 
     float norm_before = total_grad_norm(all, n);
 
@@ -197,32 +186,28 @@ static void test_clip_norm_extreme(void) {
 
     printf("OK (norm %.4e -> %.4e, max_norm=%.2e)\n",
            norm_before, norm_after, max_norm);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test 5: clip_grad_value basic ── */
 
 static void test_clip_value_basic(void) {
     printf("  test_clip_value_basic... ");
-    mem_pool params  = mem_pool_create(4 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
 
-    tensor *a = tensor_randn(1, (int[]){100}, 1);
-    tensor *b = tensor_randn(1, (int[]){50}, 1);
+    tensor *a = tensor_randn(ctx.params, 1, (int[]){100}, 1);
+    tensor *b = tensor_randn(ctx.params, 1, (int[]){50}, 1);
     tensor *all[] = {a, b};
     int n = 2;
 
-    tensor *two = tensor_zeros(1, (int[]){1}, 0);
+    tensor *two = tensor_zeros(ctx.params, 1, (int[]){1}, 0);
     tensor_data_ptr(two)[0] = 2.0f; two->contiguous = 1;
-    tensor *loss = tensor_add(tensor_sum(tensor_mul(a, two), -1),
-                              tensor_sum(b, -1));
-    dnn_backward(loss);
+    tensor *loss = tensor_add(ctx.scratch, tensor_sum(ctx.scratch, tensor_mul(ctx.scratch, a, two), -1),
+                              tensor_sum(ctx.scratch, b, -1));
+    dnn_backward(ctx.scratch, loss);
 
     float max_before = max_abs_grad(all, n);
     assert(max_before > 0.0f);
@@ -234,30 +219,26 @@ static void test_clip_value_basic(void) {
     assert(max_after <= clip_val + EPS && "all grad values should be <= clip_val");
 
     printf("OK (max_abs %.4e -> %.4e)\n", max_before, max_after);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test 6: clip_grad_value no-op for small values ── */
 
 static void test_clip_value_noop(void) {
     printf("  test_clip_value_noop... ");
-    mem_pool params  = mem_pool_create(4 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
 
-    tensor *a = tensor_randn(1, (int[]){100}, 1);
+    tensor *a = tensor_randn(ctx.params, 1, (int[]){100}, 1);
     tensor *all[] = {a};
     int n = 1;
 
-    tensor *small = tensor_zeros(1, (int[]){1}, 0);
+    tensor *small = tensor_zeros(ctx.params, 1, (int[]){1}, 0);
     tensor_data_ptr(small)[0] = 0.001f; small->contiguous = 1;
-    tensor *loss = tensor_sum(tensor_mul(a, small), -1);
-    dnn_backward(loss);
+    tensor *loss = tensor_sum(ctx.scratch, tensor_mul(ctx.scratch, a, small), -1);
+    dnn_backward(ctx.scratch, loss);
 
     int n_el = tensor_numel(a);
     float *g_copy = malloc(n_el * sizeof(float));
@@ -273,30 +254,26 @@ static void test_clip_value_noop(void) {
 
     printf("OK (no-op)\n");
     free(g_copy);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test 7: clip_grad_value <= 0 is no-op ── */
 
 static void test_clip_value_zero_noop(void) {
     printf("  test_clip_value_zero_noop... ");
-    mem_pool params  = mem_pool_create(4 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
 
-    tensor *a = tensor_randn(1, (int[]){100}, 1);
+    tensor *a = tensor_randn(ctx.params, 1, (int[]){100}, 1);
     tensor *all[] = {a};
     int n = 1;
 
-    tensor *two = tensor_zeros(1, (int[]){1}, 0);
+    tensor *two = tensor_zeros(ctx.params, 1, (int[]){1}, 0);
     tensor_data_ptr(two)[0] = 2.0f; two->contiguous = 1;
-    tensor *loss = tensor_sum(tensor_mul(a, two), -1);
-    dnn_backward(loss);
+    tensor *loss = tensor_sum(ctx.scratch, tensor_mul(ctx.scratch, a, two), -1);
+    dnn_backward(ctx.scratch, loss);
 
     int n_el = tensor_numel(a);
     float *g_copy = malloc(n_el * sizeof(float));
@@ -313,24 +290,20 @@ static void test_clip_value_zero_noop(void) {
 
     printf("OK (no-op)\n");
     free(g_copy);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test 8: clip in training step (via decoder_lm_train_step) ── */
 
 static void test_clip_in_training_step(void) {
     printf("  test_clip_in_training_step... ");
-    mem_pool params  = mem_pool_create(8 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     int B=2, N=4, vocab=8, d_model=4, n_layers=2, n_heads=2, d_k=2, intermediate=8;
 
     srand(42);
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
     tensor *all[256];
@@ -350,37 +323,33 @@ static void test_clip_in_training_step(void) {
         all[np++] = b->ffn->down_proj->weight; all[np++] = b->ffn->down_proj->bias;
     }
 
-    adamw_opt *opt = adamw_create(all, np, 0.001f,
+    adamw_opt *opt = adamw_create(ctx.params, all, np, 0.001f,
                                    0.9f, 0.999f, 1e-8f, 0.01f);
 
     int ids[] = {3, 6, 7, 0, 4, 3, 4, 7};
-    tensor *input_ids = tensor_zeros_data(2, (int[]){B, N});
+    tensor *input_ids = tensor_zeros_data(ctx.data, 2, (int[]){B, N});
     memcpy(input_ids->data, ids, B * N * sizeof(int));
 
-    tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 1.0f, NULL);
+    tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 1.0f, NULL);
     float loss_val = tensor_data_ptr(loss)[0];
     assert(isfinite(loss_val) && "loss non-finite after clip training step");
     assert(loss_val > 0.0f && "loss should be positive");
 
     printf("OK (loss=%.6f, clip=1.0)\n", loss_val);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test 9: grad norm is reduced when using clip in multi-step training ── */
 
 static void test_clip_reduces_norm_during_training(void) {
     printf("  test_clip_reduces_norm_during_training...\n");
-    mem_pool params  = mem_pool_create(8 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(64 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     int B=2, N=4, vocab=8, d_model=4, n_layers=2, n_heads=2, d_k=2, intermediate=8;
 
     srand(42);
-    decoder_lm *lm = decoder_lm_create(vocab, d_model, n_layers, n_heads,
+    decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
     tensor *all[256];
     int np = 0;
@@ -399,50 +368,46 @@ static void test_clip_reduces_norm_during_training(void) {
         all[np++] = b->ffn->down_proj->weight; all[np++] = b->ffn->down_proj->bias;
     }
 
-    adamw_opt *opt = adamw_create(all, np, 0.001f,
+    adamw_opt *opt = adamw_create(ctx.params, all, np, 0.001f,
                                    0.9f, 0.999f, 1e-8f, 0.01f);
 
     int ids[] = {3, 6, 7, 0, 4, 3, 4, 7};
     float clip_norm = 1.0f;
 
     for (int step = 0; step < 3; step++) {
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
 
-        tensor *input_ids = tensor_zeros_data(2, (int[]){B, N});
+        tensor *input_ids = tensor_zeros_data(ctx.data, 2, (int[]){B, N});
         memcpy(input_ids->data, ids, B * N * sizeof(int));
 
-        tensor *loss = decoder_lm_train_step(lm, input_ids, opt, clip_norm, NULL);
+        tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, clip_norm, NULL);
         float lv = tensor_data_ptr(loss)[0];
         assert(isfinite(lv));
         printf("    step %d: loss=%.6f (clip=%.1f)\n", step, lv, clip_norm);
     }
 
     printf("  clip_reduces_norm: OK\n");
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Test 10: clip_grad_norm returns correct value (norm before) ── */
 
 static void test_clip_norm_return_value(void) {
     printf("  test_clip_norm_return_value... ");
-    mem_pool params  = mem_pool_create(4 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(4 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(1 * 1024 * 1024);
-    mem_pool_set_defaults(&params, &scratch, &data);
+
+    dnn_ctx_init(&ctx, 4 * 1024 * 1024, 4 * 1024 * 1024, 1 * 1024 * 1024);
 
     srand(42);
 
-    tensor *a = tensor_randn(1, (int[]){20}, 1);
+    tensor *a = tensor_randn(ctx.params, 1, (int[]){20}, 1);
     tensor *all[] = {a};
     int n = 1;
 
-    tensor *two = tensor_zeros(1, (int[]){1}, 0);
+    tensor *two = tensor_zeros(ctx.params, 1, (int[]){1}, 0);
     tensor_data_ptr(two)[0] = 2.0f; two->contiguous = 1;
-    tensor *loss = tensor_sum(tensor_mul(a, two), -1);
-    dnn_backward(loss);
+    tensor *loss = tensor_sum(ctx.scratch, tensor_mul(ctx.scratch, a, two), -1);
+    dnn_backward(ctx.scratch, loss);
 
     float norm_before = total_grad_norm(all, n);
     float returned = clip_grad_norm(all, n, 0.5f);
@@ -454,9 +419,7 @@ static void test_clip_norm_return_value(void) {
 
     printf("OK (returned=%.6f, before=%.6f, after=%.6f)\n",
            returned, norm_before, norm_after);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+
 }
 
 /* ── Main ── */
@@ -476,5 +439,7 @@ int main(void) {
     test_clip_reduces_norm_during_training();
 
     printf("\nAll gradient clipping tests passed.\n");
+    dnn_ctx_destroy(&ctx);
+
     return 0;
 }
