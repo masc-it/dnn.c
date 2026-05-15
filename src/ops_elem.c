@@ -37,8 +37,8 @@ static void add_backward(grad_fn *fn, tensor *grad_output) {
      * then accumulate (scalar scatter, cannot SIMD on NEON). */
     float *ag_ptr = (a->grad_fn || a->requires_grad) ? _grad_ensure(a) : NULL;
     float *bg_ptr = (b->grad_fn || b->requires_grad) ? _grad_ensure(b) : NULL;
-    int *a_offs = ag_ptr ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
-    int *b_offs = bg_ptr ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
+    int *a_offs = ag_ptr ? _mem_pool_alloc(fn->pool, out_numel * sizeof(int), NULL) : NULL;
+    int *b_offs = bg_ptr ? _mem_pool_alloc(fn->pool, out_numel * sizeof(int), NULL) : NULL;
     int out_ndim = grad_output->ndim;
     for (int i = 0; i < out_numel; i++) {
         int coord[DNN_MAX_DIMS];
@@ -62,7 +62,7 @@ static void add_backward(grad_fn *fn, tensor *grad_output) {
 
 /* ── tensor_add ── */
 
-tensor *tensor_add(const tensor *a, const tensor *b) {
+tensor *tensor_add(struct mem_pool *scratch, const tensor *a, const tensor *b) {
     assert(a && b);
 
     int ndim_out;
@@ -70,7 +70,7 @@ tensor *tensor_add(const tensor *a, const tensor *b) {
     ndim_out = _bcast_ndim(a->ndim, a->shape, b->ndim, b->shape, shape_out);
     assert(ndim_out > 0 && "tensor_add: incompatible shapes");
 
-    tensor *out = _tensor_scratch_create(ndim_out, shape_out, 0);
+    tensor *out = tensor_scratch(scratch, ndim_out, shape_out, 0);
     int numel = _numel(ndim_out, shape_out);
     float *od = (float*)out->data;
 
@@ -101,10 +101,10 @@ tensor *tensor_add(const tensor *a, const tensor *b) {
     /* autograd tape */
     if (dnn_grad_enabled() &&
         (tensor_requires_grad(a) || tensor_requires_grad(b))) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = add_backward;
         fn->n_inputs = 2;
-        fn->inputs = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)a;
         fn->inputs[1] = (tensor*)b;
         fn->n_saved = 0;
@@ -147,8 +147,8 @@ static void sub_backward(grad_fn *fn, tensor *grad_output) {
     }
     float *ag_ptr = (a->grad_fn || a->requires_grad) ? _grad_ensure(a) : NULL;
     float *bg_ptr = (b->grad_fn || b->requires_grad) ? _grad_ensure(b) : NULL;
-    int *a_offs = ag_ptr ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
-    int *b_offs = bg_ptr ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
+    int *a_offs = ag_ptr ? _mem_pool_alloc(fn->pool, out_numel * sizeof(int), NULL) : NULL;
+    int *b_offs = bg_ptr ? _mem_pool_alloc(fn->pool, out_numel * sizeof(int), NULL) : NULL;
     int out_ndim = grad_output->ndim;
     for (int i = 0; i < out_numel; i++) {
         int coord[DNN_MAX_DIMS];
@@ -172,7 +172,7 @@ static void sub_backward(grad_fn *fn, tensor *grad_output) {
 
 /* ── tensor_sub ── */
 
-tensor *tensor_sub(const tensor *a, const tensor *b) {
+tensor *tensor_sub(struct mem_pool *scratch, const tensor *a, const tensor *b) {
     assert(a && b);
 
     int ndim_out;
@@ -180,7 +180,7 @@ tensor *tensor_sub(const tensor *a, const tensor *b) {
     ndim_out = _bcast_ndim(a->ndim, a->shape, b->ndim, b->shape, shape_out);
     assert(ndim_out > 0 && "tensor_sub: incompatible shapes");
 
-    tensor *out = _tensor_scratch_create(ndim_out, shape_out, 0);
+    tensor *out = tensor_scratch(scratch, ndim_out, shape_out, 0);
     int numel = _numel(ndim_out, shape_out);
     float *od = (float*)out->data;
 
@@ -208,10 +208,10 @@ tensor *tensor_sub(const tensor *a, const tensor *b) {
 
     if (dnn_grad_enabled() &&
         (tensor_requires_grad(a) || tensor_requires_grad(b))) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = sub_backward;
         fn->n_inputs = 2;
-        fn->inputs = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)a;
         fn->inputs[1] = (tensor*)b;
         fn->n_saved = 0;
@@ -253,8 +253,8 @@ static void mul_backward(grad_fn *fn, tensor *grad_output) {
     float *ag_ptr = (a->grad_fn || a->requires_grad) ? _grad_ensure(a) : NULL;
     float *bg_ptr = (b->grad_fn || b->requires_grad) ? _grad_ensure(b) : NULL;
     int need_offs = (ag_ptr || bg_ptr);
-    int *a_offs = need_offs ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
-    int *b_offs = need_offs ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
+    int *a_offs = need_offs ? _mem_pool_alloc(fn->pool, out_numel * sizeof(int), NULL) : NULL;
+    int *b_offs = need_offs ? _mem_pool_alloc(fn->pool, out_numel * sizeof(int), NULL) : NULL;
     int out_ndim = grad_output->ndim;
     for (int i = 0; i < out_numel; i++) {
         int coord[DNN_MAX_DIMS];
@@ -278,7 +278,7 @@ static void mul_backward(grad_fn *fn, tensor *grad_output) {
 
 /* ── tensor_mul ── */
 
-tensor *tensor_mul(const tensor *a, const tensor *b) {
+tensor *tensor_mul(struct mem_pool *scratch, const tensor *a, const tensor *b) {
     assert(a && b);
 
     int ndim_out;
@@ -286,7 +286,7 @@ tensor *tensor_mul(const tensor *a, const tensor *b) {
     ndim_out = _bcast_ndim(a->ndim, a->shape, b->ndim, b->shape, shape_out);
     assert(ndim_out > 0 && "tensor_mul: incompatible shapes");
 
-    tensor *out = _tensor_scratch_create(ndim_out, shape_out, 0);
+    tensor *out = tensor_scratch(scratch, ndim_out, shape_out, 0);
     int numel = _numel(ndim_out, shape_out);
     float *od = (float*)out->data;
 
@@ -314,10 +314,10 @@ tensor *tensor_mul(const tensor *a, const tensor *b) {
 
     if (dnn_grad_enabled() &&
         (tensor_requires_grad(a) || tensor_requires_grad(b))) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = mul_backward;
         fn->n_inputs = 2;
-        fn->inputs = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)a;
         fn->inputs[1] = (tensor*)b;
         fn->n_saved = 0;
@@ -365,8 +365,8 @@ static void div_backward(grad_fn *fn, tensor *grad_output) {
     float *ag_ptr = (a->grad_fn || a->requires_grad) ? _grad_ensure(a) : NULL;
     float *bg_ptr = (b->grad_fn || b->requires_grad) ? _grad_ensure(b) : NULL;
     int need_offs = (ag_ptr || bg_ptr);
-    int *a_offs = need_offs ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
-    int *b_offs = need_offs ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
+    int *a_offs = need_offs ? _mem_pool_alloc(fn->pool, out_numel * sizeof(int), NULL) : NULL;
+    int *b_offs = need_offs ? _mem_pool_alloc(fn->pool, out_numel * sizeof(int), NULL) : NULL;
     int out_ndim = grad_output->ndim;
     for (int i = 0; i < out_numel; i++) {
         int coord[DNN_MAX_DIMS];
@@ -390,7 +390,7 @@ static void div_backward(grad_fn *fn, tensor *grad_output) {
 
 /* ── tensor_div ── */
 
-tensor *tensor_div(const tensor *a, const tensor *b) {
+tensor *tensor_div(struct mem_pool *scratch, const tensor *a, const tensor *b) {
     assert(a && b);
 
     int ndim_out;
@@ -398,7 +398,7 @@ tensor *tensor_div(const tensor *a, const tensor *b) {
     ndim_out = _bcast_ndim(a->ndim, a->shape, b->ndim, b->shape, shape_out);
     assert(ndim_out > 0 && "tensor_div: incompatible shapes");
 
-    tensor *out = _tensor_scratch_create(ndim_out, shape_out, 0);
+    tensor *out = tensor_scratch(scratch, ndim_out, shape_out, 0);
     int numel = _numel(ndim_out, shape_out);
     float *od = (float*)out->data;
 
@@ -426,10 +426,10 @@ tensor *tensor_div(const tensor *a, const tensor *b) {
 
     if (dnn_grad_enabled() &&
         (tensor_requires_grad(a) || tensor_requires_grad(b))) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = div_backward;
         fn->n_inputs = 2;
-        fn->inputs = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)a;
         fn->inputs[1] = (tensor*)b;
         fn->n_saved = 0;
@@ -464,10 +464,10 @@ static void pow_backward(grad_fn *fn, tensor *grad_output) {
     }
 }
 
-tensor *tensor_pow(const tensor *t, float exp) {
+tensor *tensor_pow(struct mem_pool *scratch, const tensor *t, float exp) {
     assert(t);
 
-    tensor *out = _tensor_scratch_create(t->ndim, t->shape, 0);
+    tensor *out = tensor_scratch(scratch, t->ndim, t->shape, 0);
     int numel = _numel(t->ndim, t->shape);
     float *od = (float*)out->data;
     float *td = (float*)t->data;
@@ -490,14 +490,14 @@ tensor *tensor_pow(const tensor *t, float exp) {
     }
 
     if (dnn_grad_enabled() && tensor_requires_grad(t)) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = pow_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)t;
         fn->n_saved = 1;
-        fn->saved_tensors = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
-        float *exp_data = mem_scratch_alloc(sizeof(float), NULL);
+        fn->saved_tensors = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
+        float *exp_data = _mem_pool_alloc(scratch, sizeof(float), NULL);
         *exp_data = exp;
         fn->saved_tensors[0] = (tensor*)exp_data;
         out->requires_grad = 1;
@@ -526,10 +526,10 @@ static void neg_backward(grad_fn *fn, tensor *grad_output) {
     }
 }
 
-tensor *tensor_neg(const tensor *t) {
+tensor *tensor_neg(struct mem_pool *scratch, const tensor *t) {
     assert(t);
 
-    tensor *out = _tensor_scratch_create(t->ndim, t->shape, 0);
+    tensor *out = tensor_scratch(scratch, t->ndim, t->shape, 0);
     int numel = _numel(t->ndim, t->shape);
     float *od = (float*)out->data;
     float *td = (float*)t->data;
@@ -552,10 +552,10 @@ tensor *tensor_neg(const tensor *t) {
     }
 
     if (dnn_grad_enabled() && tensor_requires_grad(t)) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = neg_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)t;
         fn->n_saved = 0;
         out->requires_grad = 1;
@@ -581,9 +581,9 @@ tensor *tensor_neg(const tensor *t) {
  * No grad_fn attached — mask is a constant input. Gradients flow through
  * tensor_add into it but are dropped (requires_grad=0).
  */
-tensor *tensor_triu(int N, int diagonal) {
+tensor *tensor_triu(struct mem_pool *scratch, int N, int diagonal) {
     assert(N > 0);
-    tensor *out = _tensor_scratch_create(2, (int[]){N, N}, 0);
+    tensor *out = tensor_scratch(scratch, 2, (int[]){N, N}, 0);
     float *od = (float*)out->data + out->offset;
     for (int i = 0; i < N; i++) {
         for (int j = 0; j < N; j++) {
@@ -768,7 +768,7 @@ static void _cat_copy(float *od, const tensor *t, int dim,
  * Autograd: backward splits grad_output along dim and scatters to a, b.
  */
 
-tensor *tensor_cat(const tensor *a, const tensor *b, int dim) {
+tensor *tensor_cat(struct mem_pool *scratch, const tensor *a, const tensor *b, int dim) {
     assert(a && b);
     assert(a->ndim == b->ndim && "tensor_cat: ndim must match");
 
@@ -785,7 +785,7 @@ tensor *tensor_cat(const tensor *a, const tensor *b, int dim) {
     memcpy(out_shape, a->shape, ndim * sizeof(int));
     out_shape[dim] = a->shape[dim] + b->shape[dim];
 
-    tensor *out = _tensor_scratch_create(ndim, out_shape, 0);
+    tensor *out = tensor_scratch(scratch, ndim, out_shape, 0);
     float *od = (float*)out->data;
 
     _cat_copy(od, a, dim, 0, out_shape);
@@ -794,15 +794,15 @@ tensor *tensor_cat(const tensor *a, const tensor *b, int dim) {
     /* Autograd tape */
     if (dnn_grad_enabled() &&
         (tensor_requires_grad(a) || tensor_requires_grad(b))) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward  = cat_backward;
         fn->n_inputs  = 2;
-        fn->inputs    = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
+        fn->inputs    = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)a;
         fn->inputs[1] = (tensor*)b;
         fn->n_saved   = 1;
-        fn->saved_tensors = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
-        int *saved_dim = mem_scratch_alloc(sizeof(int), NULL);
+        fn->saved_tensors = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
+        int *saved_dim = _mem_pool_alloc(scratch, sizeof(int), NULL);
         *saved_dim = dim;
         fn->saved_tensors[0] = (tensor*)saved_dim;
         out->requires_grad = 1;

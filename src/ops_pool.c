@@ -247,7 +247,7 @@ static void avg_pool2d_backward(grad_fn *fn, tensor *grad_output) {
 
 /* ── tensor_avg_pool2d forward ── */
 
-tensor *tensor_avg_pool2d(const tensor *x, int k, int stride) {
+tensor *tensor_avg_pool2d(struct mem_pool *scratch, const tensor *x, int k, int stride) {
     assert(x);
     assert(x->ndim == 4 && "avg_pool2d: input must be (N, C, H, W)");
     assert(k > 0 && "avg_pool2d: kernel size must be positive");
@@ -260,7 +260,7 @@ tensor *tensor_avg_pool2d(const tensor *x, int k, int stride) {
 
     assert(H_out > 0 && W_out > 0 && "avg_pool2d: kernel too large for input");
 
-    tensor *out = _tensor_scratch_create(4, (int[]){N, C, H_out, W_out}, 0);
+    tensor *out = tensor_scratch(scratch, 4, (int[]){N, C, H_out, W_out}, 0);
     float *od = (float*)out->data;
     float *xd = (float*)x->data;
 
@@ -359,18 +359,18 @@ tensor *tensor_avg_pool2d(const tensor *x, int k, int stride) {
 attach_grad:
     /* autograd tape */
     if (dnn_grad_enabled() && tensor_requires_grad(x)) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = avg_pool2d_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)x;
 
         fn->n_saved = 2;
-        fn->saved_tensors = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
-        int *k_saved = mem_scratch_alloc(sizeof(int), NULL);
+        fn->saved_tensors = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
+        int *k_saved = _mem_pool_alloc(scratch, sizeof(int), NULL);
         *k_saved = k;
         fn->saved_tensors[0] = (tensor*)k_saved;
-        int *s_saved = mem_scratch_alloc(sizeof(int), NULL);
+        int *s_saved = _mem_pool_alloc(scratch, sizeof(int), NULL);
         *s_saved = stride;
         fn->saved_tensors[1] = (tensor*)s_saved;
 

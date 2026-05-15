@@ -4,48 +4,48 @@
 #include "tensor.h"
 
 /* ── Arithmetic ── */
-tensor *tensor_add(const tensor *a, const tensor *b);
-tensor *tensor_sub(const tensor *a, const tensor *b);
-tensor *tensor_mul(const tensor *a, const tensor *b);  /* element-wise */
-tensor *tensor_div(const tensor *a, const tensor *b);
+tensor *tensor_add(struct mem_pool *scratch, const tensor *a, const tensor *b);
+tensor *tensor_sub(struct mem_pool *scratch, const tensor *a, const tensor *b);
+tensor *tensor_mul(struct mem_pool *scratch, const tensor *a, const tensor *b);  /* element-wise */
+tensor *tensor_div(struct mem_pool *scratch, const tensor *a, const tensor *b);
 
 /* ── Matrix ops ── */
-tensor *tensor_matmul(const tensor *a, const tensor *b);
+tensor *tensor_matmul(struct mem_pool *scratch, const tensor *a, const tensor *b);
 
 /* ── Activations ── */
-tensor *tensor_relu(const tensor *t);
-tensor *tensor_sigmoid(const tensor *t);
-tensor *tensor_tanh(const tensor *t);
-tensor *tensor_silu(const tensor *t);
-tensor *tensor_swiglu(const tensor *gate, const tensor *up);
-tensor *tensor_softmax(const tensor *t, int dim);
-tensor *tensor_causal_softmax(const tensor *t);
+tensor *tensor_relu(struct mem_pool *scratch, const tensor *t);
+tensor *tensor_sigmoid(struct mem_pool *scratch, const tensor *t);
+tensor *tensor_tanh(struct mem_pool *scratch, const tensor *t);
+tensor *tensor_silu(struct mem_pool *scratch, const tensor *t);
+tensor *tensor_swiglu(struct mem_pool *scratch, const tensor *gate, const tensor *up);
+tensor *tensor_softmax(struct mem_pool *scratch, const tensor *t, int dim);
+tensor *tensor_causal_softmax(struct mem_pool *scratch, const tensor *t);
 
 /* ── Attention ── */
-tensor *tensor_attention(tensor *q, tensor *k, tensor *v, tensor *mask);
+tensor *tensor_attention(struct mem_pool *scratch, tensor *q, tensor *k, tensor *v, tensor *mask);
 
 /* ── Regularization ── */
-tensor *tensor_dropout(const tensor *t, float p);
+tensor *tensor_dropout(struct mem_pool *scratch, const tensor *t, float p);
 
 /* ── Reduction ── */
-tensor *tensor_sum(const tensor *t, int dim);
-tensor *tensor_mean(const tensor *t, int dim);
+tensor *tensor_sum(struct mem_pool *scratch, const tensor *t, int dim);
+tensor *tensor_mean(struct mem_pool *scratch, const tensor *t, int dim);
 
 /* ── Loss ── */
-tensor *tensor_cross_entropy(const tensor *logits, const tensor *target, int dim);
+tensor *tensor_cross_entropy(struct mem_pool *scratch, const tensor *logits, const tensor *target, int dim);
 
 /* ── Embedding ── */
-tensor *tensor_embedding(const tensor *table, const tensor *ids);
+tensor *tensor_embedding(struct mem_pool *scratch, const tensor *table, const tensor *ids);
 
 /* ── Utility ── */
-tensor *tensor_pow(const tensor *t, float exp);
-tensor *tensor_neg(const tensor *t);
-tensor *tensor_triu(int N, int diagonal);
+tensor *tensor_pow(struct mem_pool *scratch, const tensor *t, float exp);
+tensor *tensor_neg(struct mem_pool *scratch, const tensor *t);
+tensor *tensor_triu(struct mem_pool *scratch, int N, int diagonal);
 
 /* ── Pooling ── */
-tensor *tensor_avg_pool2d(const tensor *x, int k, int stride);
+tensor *tensor_avg_pool2d(struct mem_pool *scratch, const tensor *x, int k, int stride);
 
 /* ── Tensor concatenation ── */
-tensor *tensor_cat(const tensor *a, const tensor *b, int dim);
+tensor *tensor_cat(struct mem_pool *scratch, const tensor *a, const tensor *b, int dim);
 
 #endif /* DNN_OPS_H */

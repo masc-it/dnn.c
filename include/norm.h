@@ -16,7 +16,7 @@
  *
  *   Returns a new tensor with same shape as x.
  */
-tensor *tensor_layer_norm(const tensor *x, const tensor *weight,
-                          const tensor *bias, float eps);
+tensor *tensor_layer_norm(struct mem_pool *scratch, const tensor *x,
+                          const tensor *weight, const tensor *bias, float eps);
 
 #endif /* DNN_NORM_H */

@@ -5,6 +5,7 @@
 
 struct grad_fn {
     void     (*backward)(grad_fn *fn, tensor *grad_output);
+    struct mem_pool *pool;  /* scratch pool — used for temp allocs in backward */
     tensor  **inputs;
     int       n_inputs;
     tensor  **saved_tensors;
@@ -19,6 +20,6 @@ dnn_grad_ctx dnn_no_grad_enter(void);
 void         dnn_no_grad_exit(dnn_grad_ctx ctx);
 
 /* ── Backward ── */
-void dnn_backward(tensor *loss);
+void dnn_backward(struct mem_pool *scratch, tensor *loss);
 
 #endif /* DNN_AUTOGRAD_H */

@@ -21,7 +21,8 @@
  *
  *   Returns tensor with same shape as Q (last dim = d_k).
  */
-tensor *tensor_attention(tensor *Q, tensor *K, tensor *V,
+tensor *tensor_attention(struct mem_pool *scratch,
+                         tensor *Q, tensor *K, tensor *V,
                          tensor *mask);
 
 #endif /* DNN_ATTENTION_H */

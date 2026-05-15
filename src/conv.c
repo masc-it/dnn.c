@@ -399,8 +399,8 @@ static void conv2d_backward(grad_fn *fn, tensor *grad_output) {
     if (tensor_requires_grad(input)) {
         float *xg = _grad_ensure(input);
 
-        size_t _dcm = mem_pool_mark(_mem_pool_scratch());
-        float *dcol = mem_scratch_alloc((size_t)K * M * sizeof(float), NULL);
+        size_t _dcm = mem_pool_mark(fn->pool);
+        float *dcol = _mem_pool_alloc(fn->pool, (size_t)K * M * sizeof(float), NULL);
 
         /* dcol(K,M) = wd^T(K,out_C) @ gd^T(out_C,M)
          *   Each row k of dcol is independent: sum_oc wd[oc][k] * gd[:,oc].
@@ -431,7 +431,7 @@ static void conv2d_backward(grad_fn *fn, tensor *grad_output) {
 
         col2im(dcol, xg, N, C, H, W, kH, kW, pad, stride);
 
-        mem_pool_release(_mem_pool_scratch(), _dcm);
+        mem_pool_release(fn->pool, _dcm);
     }
 
     /* forward's col freed on next batch's mem_pool_reset — no explicit release */
@@ -490,7 +490,7 @@ static void winograd_conv2d_backward(grad_fn *fn, tensor *grad_output) {
     int n_threads = 0;
     if (need_weight) {
         n_threads = omp_get_max_threads();
-        dV = mem_scratch_alloc((size_t)n_threads * dV_sz * sizeof(float), NULL);
+        dV = _mem_pool_alloc(fn->pool, (size_t)n_threads * dV_sz * sizeof(float), NULL);
         memset(dV, 0, (size_t)n_threads * dV_sz * sizeof(float));
     }
 
@@ -602,7 +602,7 @@ static void winograd_conv2d_backward(grad_fn *fn, tensor *grad_output) {
  *  Conv2D forward (im2col-based)
  * ══════════════════════════════════════════════════════════════════ */
 
-tensor *tensor_conv2d(tensor *input, tensor *weight, tensor *bias,
+tensor *tensor_conv2d(struct mem_pool *scratch, tensor *input, tensor *weight, tensor *bias,
                       int stride, int pad) {
     assert(input);
     assert(weight);
@@ -625,7 +625,7 @@ tensor *tensor_conv2d(tensor *input, tensor *weight, tensor *bias,
     int H_out = (H + 2 * pad - kH) / stride + 1;
     int W_out = (W + 2 * pad - kW) / stride + 1;
 
-    tensor *out = _tensor_scratch_create(4,
+    tensor *out = tensor_scratch(scratch, 4,
         (int[]){N, out_C, H_out, W_out}, 0);
 
     float *xd = tensor_data_ptr(input);
@@ -643,7 +643,7 @@ tensor *tensor_conv2d(tensor *input, tensor *weight, tensor *bias,
         int H_tiles = (H_out + 1) / 2, W_tiles = (W_out + 1) / 2;
 
         /* Pre-transform weights: V[oc][ic][4×4] */
-        float *V = mem_scratch_alloc((size_t)out_C * C * 16 * sizeof(float), NULL);
+        float *V = _mem_pool_alloc(scratch, (size_t)out_C * C * 16 * sizeof(float), NULL);
         for (int oc = 0; oc < out_C; oc++) {
             for (int ic = 0; ic < C; ic++) {
                 const float *w_ocic = wd + ((size_t)oc * C + ic) * 9;
@@ -653,7 +653,7 @@ tensor *tensor_conv2d(tensor *input, tensor *weight, tensor *bias,
 
         /* Precompute per-oc bias offsets for write phase */
         float *bias_off = NULL;
-        if (bd) { bias_off = mem_scratch_alloc(out_C * sizeof(float), NULL);
+        if (bd) { bias_off = _mem_pool_alloc(scratch, out_C * sizeof(float), NULL);
                   for (int oc = 0; oc < out_C; oc++) bias_off[oc] = bd[oc]; }
 
         /* Process tiles — parallel over batch */
@@ -716,18 +716,18 @@ tensor *tensor_conv2d(tensor *input, tensor *weight, tensor *bias,
              (bias && tensor_requires_grad(bias)));
 
         if (_needs_grad) {
-            grad_fn *fn = _grad_fn_create();
+            grad_fn *fn = _grad_fn_create(scratch);
             fn->backward = winograd_conv2d_backward;
             fn->n_inputs = 2;
-            fn->inputs = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
+            fn->inputs = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
             fn->inputs[0] = (tensor*)input;
             fn->inputs[1] = (tensor*)weight;
 
             fn->n_saved = 3;
-            fn->saved_tensors = mem_scratch_alloc(3 * sizeof(void*), NULL);
+            fn->saved_tensors = _mem_pool_alloc(scratch, 3 * sizeof(void*), NULL);
             fn->saved_tensors[0] = (tensor*)bias;
 
-            winograd_shape *ws = mem_scratch_alloc(sizeof(winograd_shape), NULL);
+            winograd_shape *ws = _mem_pool_alloc(scratch, sizeof(winograd_shape), NULL);
             ws->N = N; ws->C = C; ws->H = H; ws->W = W; ws->out_C = out_C;
             fn->saved_tensors[1] = (void*)ws;
 
@@ -743,8 +743,8 @@ tensor *tensor_conv2d(tensor *input, tensor *weight, tensor *bias,
         int M = N * H_out * W_out;
         int K = C * kH * kW;
 
-        size_t _fcm = mem_pool_mark(_mem_pool_scratch());
-        float *col = mem_scratch_alloc((size_t)K * M * sizeof(float), NULL);
+        size_t _fcm = mem_pool_mark(scratch);
+        float *col = _mem_pool_alloc(scratch, (size_t)K * M * sizeof(float), NULL);
 
         im2col(xd, col, N, C, H, W, kH, kW, pad, stride);
 
@@ -796,18 +796,18 @@ tensor *tensor_conv2d(tensor *input, tensor *weight, tensor *bias,
              (bias && tensor_requires_grad(bias)));
 
         if (_needs_grad) {
-            grad_fn *fn = _grad_fn_create();
+            grad_fn *fn = _grad_fn_create(scratch);
             fn->backward = conv2d_backward;
             fn->n_inputs = 2;
-            fn->inputs = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
+            fn->inputs = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
             fn->inputs[0] = (tensor*)input;
             fn->inputs[1] = (tensor*)weight;
 
             fn->n_saved = 4;
-            fn->saved_tensors = mem_scratch_alloc(4 * sizeof(void*), NULL);
+            fn->saved_tensors = _mem_pool_alloc(scratch, 4 * sizeof(void*), NULL);
             fn->saved_tensors[0] = (tensor*)bias;
 
-            conv2d_shape *cs = mem_scratch_alloc(sizeof(conv2d_shape), NULL);
+            conv2d_shape *cs = _mem_pool_alloc(scratch, sizeof(conv2d_shape), NULL);
             cs->stride = stride;
             cs->pad    = pad;
             cs->N      = N;
@@ -825,7 +825,7 @@ tensor *tensor_conv2d(tensor *input, tensor *weight, tensor *bias,
             out->requires_grad = 1;
             out->grad_fn = fn;
         } else {
-            mem_pool_release(_mem_pool_scratch(), _fcm);
+            mem_pool_release(scratch, _fcm);
         }
     }
 

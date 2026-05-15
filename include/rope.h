@@ -24,7 +24,8 @@
  * of the forward rotation matrix), using the same saved cos/sin tables.
  */
 
-tensor *tensor_rope(tensor *x, const tensor *freqs_cos, const tensor *freqs_sin);
+tensor *tensor_rope(struct mem_pool *scratch,
+                    tensor *x, const tensor *freqs_cos, const tensor *freqs_sin);
 
 /* ── RoPE frequency table initialization ──
  *
@@ -41,7 +42,8 @@ tensor *tensor_rope(tensor *x, const tensor *freqs_cos, const tensor *freqs_sin)
  * base defaults to 10000.0 in Llama/GPT-NeoX; pass 0.0 to use default.
  */
 
-void tensor_rope_freqs_init(tensor **freqs_cos, tensor **freqs_sin,
-                             int dim, int max_seq_len, float base);
+void tensor_rope_freqs_init(struct mem_pool *params,
+                            tensor **freqs_cos, tensor **freqs_sin,
+                            int dim, int max_seq_len, float base);
 
 #endif /* DNN_ROPE_H */

@@ -154,9 +154,7 @@ int main(int argc, char **argv) {
     if (!all_ids || total_ids_len <= 0) {
         fprintf(stderr, "error: tokenizer returned empty\n");
         free(file_buf);
-        mem_pool_destroy(&params);
-        mem_pool_destroy(&scratch);
-        mem_pool_destroy(&data);
+        dnn_ctx_destroy(&ctx);
         return 1;
     }
     printf("Tokenized: %d IDs (including outer BOS/EOS)\n", total_ids_len);
@@ -173,9 +171,7 @@ int main(int argc, char **argv) {
     int seq_len          = chunk_size;        /* total including BOS/EOS */
     if (chunk_size < 3) {
         fprintf(stderr, "error: --chunk-size must be >= 3 (need room for BOS + 1 token + EOS)\n");
-        mem_pool_destroy(&params);
-        mem_pool_destroy(&scratch);
-        mem_pool_destroy(&data);
+        dnn_ctx_destroy(&ctx);
         return 1;
     }
     int num_chunks = content_len / content_per_chunk;
@@ -184,9 +180,7 @@ int main(int argc, char **argv) {
     if (num_chunks == 0) {
         fprintf(stderr, "error: content too short (%d tokens) for chunk_size=%d\n",
                 content_len, chunk_size);
-        mem_pool_destroy(&params);
-        mem_pool_destroy(&scratch);
-        mem_pool_destroy(&data);
+        dnn_ctx_destroy(&ctx);
         return 1;
     }
 
@@ -202,9 +196,7 @@ int main(int argc, char **argv) {
     char *out_path = (char *)malloc(out_path_len);
     if (!out_path) {
         fprintf(stderr, "error: malloc failed for output path\n");
-        mem_pool_destroy(&params);
-        mem_pool_destroy(&scratch);
-        mem_pool_destroy(&data);
+        dnn_ctx_destroy(&ctx);
         return 1;
     }
     snprintf(out_path, out_path_len, "data/%s.bin", out_file);
@@ -214,9 +206,7 @@ int main(int argc, char **argv) {
     if (!fout) {
         fprintf(stderr, "error: cannot create '%s': %s\n", out_path, strerror(errno));
         free(out_path);
-        mem_pool_destroy(&params);
-        mem_pool_destroy(&scratch);
-        mem_pool_destroy(&data);
+        dnn_ctx_destroy(&ctx);
         return 1;
     }
 
@@ -241,9 +231,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "error: writing header to '%s'\n", out_path);
         fclose(fout);
         free(out_path);
-        mem_pool_destroy(&params);
-        mem_pool_destroy(&scratch);
-        mem_pool_destroy(&data);
+        dnn_ctx_destroy(&ctx);
         return 1;
     }
 

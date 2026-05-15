@@ -55,7 +55,7 @@ static void sum_backward(grad_fn *fn, tensor *grad_output) {
     }
 }
 
-tensor *tensor_sum(const tensor *t, int dim) {
+tensor *tensor_sum(struct mem_pool *scratch, const tensor *t, int dim) {
     assert(t);
     int ndim = t->ndim;
     if (dim < 0) dim += ndim;
@@ -66,7 +66,7 @@ tensor *tensor_sum(const tensor *t, int dim) {
     memcpy(shape_out, t->shape, ndim * sizeof(int));
     shape_out[dim] = 1;
 
-    tensor *out = _tensor_scratch_create(ndim, shape_out, 0);
+    tensor *out = tensor_scratch(scratch, ndim, shape_out, 0);
     float *od = (float*)out->data;
     float *td = (float*)t->data;
 
@@ -119,14 +119,14 @@ tensor *tensor_sum(const tensor *t, int dim) {
 
     /* autograd tape */
     if (dnn_grad_enabled() && tensor_requires_grad(t)) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = sum_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)t;
         fn->n_saved = 1;
-        fn->saved_tensors = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
-        int *dim_saved = mem_scratch_alloc(sizeof(int), NULL);
+        fn->saved_tensors = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
+        int *dim_saved = _mem_pool_alloc(scratch, sizeof(int), NULL);
         *dim_saved = dim;
         fn->saved_tensors[0] = (tensor*)dim_saved;
         out->requires_grad = 1;
@@ -136,15 +136,15 @@ tensor *tensor_sum(const tensor *t, int dim) {
     return out;
 }
 
-tensor *tensor_mean(const tensor *t, int dim) {
+tensor *tensor_mean(struct mem_pool *scratch, const tensor *t, int dim) {
     assert(t);
     float inv_n = 1.0f / (float)t->shape[dim];
 
     /* sum then scale: mean = sum(t, dim) * (1/n) */
-    tensor *s = tensor_sum(t, dim);
+    tensor *s = tensor_sum(scratch, t, dim);
 
-    tensor *scale = _tensor_scratch_create(1, (int[]){1}, 0);
+    tensor *scale = tensor_scratch(scratch, 1, (int[]){1}, 0);
     ((float*)scale->data)[0] = inv_n;
 
-    return tensor_mul(s, scale);
+    return tensor_mul(scratch, s, scale);
 }

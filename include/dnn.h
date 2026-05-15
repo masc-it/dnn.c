@@ -1,6 +1,7 @@
 #ifndef DNN_H
 #define DNN_H
 
+#include "context.h"
 #include "pool.h"
 #include "tensor.h"
 #include "ops.h"

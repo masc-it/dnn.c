@@ -31,7 +31,7 @@ typedef struct {
 
 /* Create KV cache.  Allocates zero-filled [B, H, max_seq, d_k] tensors
  * from the params pool.  seq_len starts at 0. */
-kv_cache *kv_cache_create(int B, int H, int max_seq, int d_k);
+kv_cache *kv_cache_create(struct mem_pool *params_pool, int B, int H, int max_seq, int d_k);
 
 /* Append new K, V tensors at position seq_len.
  *
@@ -45,10 +45,10 @@ void kv_cache_append(kv_cache *kvc, const tensor *K_new, const tensor *V_new);
 
 /* Get view of valid K portion [B, H, seq_len, d_k] (slice along dim 2).
  * Returns a lightweight tensor_slice view sharing the cache's data buffer. */
-tensor *kv_cache_get_K(kv_cache *kvc);
+tensor *kv_cache_get_K(struct mem_pool *scratch, kv_cache *kvc);
 
 /* Get view of valid V portion [B, H, seq_len, d_k] (slice along dim 2). */
-tensor *kv_cache_get_V(kv_cache *kvc);
+tensor *kv_cache_get_V(struct mem_pool *scratch, kv_cache *kvc);
 
 /* ── Transformer Block (pre-norm) ──
  *
@@ -80,9 +80,10 @@ typedef struct {
     tensor    *freqs_sin;           /* [max_seq_len, d_k/2], NULL = no RoPE */
 } transformer_block;
 
-transformer_block *transformer_block_create(int d_model, int n_heads, int d_k,
+transformer_block *transformer_block_create(struct mem_pool *params_pool, int d_model, int n_heads, int d_k,
                                              int intermediate_size);
-tensor            *transformer_block_forward(transformer_block *block,
+tensor            *transformer_block_forward(struct mem_pool *scratch,
+                                              transformer_block *block,
                                               const tensor *x);
 
 /* ── Decoder-only Language Model ──
@@ -118,7 +119,8 @@ typedef struct {
  * Allocates all parameters from params pool.  Embedding table and lm_head
  * are separate tensors (no weight tying by default).
  */
-decoder_lm *decoder_lm_create(int vocab_size, int d_model,
+decoder_lm *decoder_lm_create(struct mem_pool *params_pool,
+                               int vocab_size, int d_model,
                                int n_layers, int n_heads, int d_k,
                                int intermediate_size);
 
@@ -132,7 +134,8 @@ decoder_lm *decoder_lm_create(int vocab_size, int d_model,
  *   Returns float tensor [B, N, vocab_size] — unnormalized logits.
  *   Autograd wired: backward flows gradients to all LM parameters.
  */
-tensor *decoder_lm_forward(decoder_lm *lm, const tensor *input_ids);
+tensor *decoder_lm_forward(struct mem_pool *scratch,
+                            decoder_lm *lm, const tensor *input_ids);
 
 /* ── Training step (next-token prediction, teacher forcing) ──
  *
@@ -150,7 +153,9 @@ tensor *decoder_lm_forward(decoder_lm *lm, const tensor *input_ids);
  *   Returns the scalar loss tensor from scratch pool.
  *   Caller must reset scratch/data pools before next call.
  */
-tensor *decoder_lm_train_step(decoder_lm *lm, const tensor *input_ids,
+tensor *decoder_lm_train_step(struct mem_pool *scratch_pool,
+                               struct mem_pool *data_pool,
+                               decoder_lm *lm, const tensor *input_ids,
                                adamw_opt *opt, float grad_clip,
                                float *grad_norm_out);
 
@@ -165,7 +170,8 @@ tensor *decoder_lm_train_step(decoder_lm *lm, const tensor *input_ids,
  *   No autograd wired (generation runs in dnn_no_grad mode).
  *   Returns [B, N_new, d_model].
  */
-tensor *transformer_block_forward_cached(transformer_block *block,
+tensor *transformer_block_forward_cached(struct mem_pool *scratch,
+                                          transformer_block *block,
                                           const tensor *x,
                                           kv_cache *cache);
 
@@ -188,7 +194,9 @@ tensor *transformer_block_forward_cached(transformer_block *block,
  *   - max_new_tokens is reached
  *   - total sequence length would overflow a reasonable max
  */
-int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
+int *decoder_lm_generate(struct mem_pool *scratch_pool,
+                          struct mem_pool *data_pool,
+                          decoder_lm *lm, const tensor *prompt_ids,
                           int max_new_tokens, float temperature,
                           int use_cache, int *n_out);
 
@@ -203,7 +211,8 @@ int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
  *
  * Can be called before or after training.  Safe to call once.
  */
-void decoder_lm_enable_rope(decoder_lm *lm, int max_seq_len, float base);
+void decoder_lm_enable_rope(struct mem_pool *params_pool,
+                             decoder_lm *lm, int max_seq_len, float base);
 
 /* ── Weight initialization ── 
  *

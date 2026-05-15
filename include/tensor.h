@@ -21,20 +21,20 @@ typedef struct tensor {
 } tensor;
 
 /* ── Lifecycle ── */
-tensor *tensor_zeros(int ndim, const int *shape, int requires_grad);
-tensor *tensor_zeros_data(int ndim, const int *shape);
-tensor *tensor_randn(int ndim, const int *shape, int requires_grad);
-tensor *tensor_uniform(int ndim, const int *shape, int requires_grad, float bound);
+tensor *tensor_zeros(struct mem_pool *pool, int ndim, const int *shape, int requires_grad);
+tensor *tensor_zeros_data(struct mem_pool *pool, int ndim, const int *shape);
+tensor *tensor_randn(struct mem_pool *pool, int ndim, const int *shape, int requires_grad);
+tensor *tensor_uniform(struct mem_pool *pool, int ndim, const int *shape, int requires_grad, float bound);
 
-/* ── Scratch intermediate (no-grad, from explicit pool) ── */
-tensor *tensor_scratch(struct mem_pool *pool, int ndim, const int *shape);
+/* ── Scratch intermediate tensor (from explicit pool) ── */
+tensor *tensor_scratch(struct mem_pool *pool, int ndim, const int *shape, int requires_grad);
 
 /* ── Views ── */
-tensor *tensor_slice(tensor *t, int dim, int start, int len);
-tensor *tensor_transpose(tensor *t, int d1, int d2);
-tensor *tensor_reshape(tensor *t, int ndim, const int *shape);
-tensor *tensor_flatten(tensor *t);
-tensor *tensor_contiguous(tensor *t);
+tensor *tensor_slice(struct mem_pool *scratch, tensor *t, int dim, int start, int len);
+tensor *tensor_transpose(struct mem_pool *scratch, tensor *t, int d1, int d2);
+tensor *tensor_reshape(struct mem_pool *scratch, tensor *t, int ndim, const int *shape);
+tensor *tensor_flatten(struct mem_pool *scratch, tensor *t);
+tensor *tensor_contiguous(struct mem_pool *scratch, tensor *t);
 
 /* ── Accessors ── */
 float  *tensor_data_ptr(tensor *t);

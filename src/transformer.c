@@ -28,11 +28,11 @@
 
 /* ── KV Cache ── */
 
-kv_cache *kv_cache_create(int B, int H, int max_seq, int d_k) {
-    kv_cache *kvc = mem_params_alloc(sizeof(kv_cache), NULL);
+kv_cache *kv_cache_create(struct mem_pool *params_pool, int B, int H, int max_seq, int d_k) {
+    kv_cache *kvc = _mem_pool_alloc(params_pool, sizeof(kv_cache), NULL);
     int shape[4] = {B, H, max_seq, d_k};
-    kvc->k_cache = tensor_zeros(4, shape, 0);
-    kvc->v_cache = tensor_zeros(4, shape, 0);
+    kvc->k_cache = tensor_zeros(params_pool, 4, shape, 0);
+    kvc->v_cache = tensor_zeros(params_pool, 4, shape, 0);
     kvc->seq_len = 0;
     kvc->max_seq = max_seq;
     return kvc;
@@ -100,47 +100,47 @@ void kv_cache_append(kv_cache *kvc, const tensor *K_new, const tensor *V_new) {
     kvc->seq_len += N_new;
 }
 
-tensor *kv_cache_get_K(kv_cache *kvc) {
+tensor *kv_cache_get_K(struct mem_pool *scratch, kv_cache *kvc) {
     assert(kvc && "kv_cache_get_K: NULL cache");
     assert(kvc->seq_len > 0 && "kv_cache_get_K: empty cache");
-    return tensor_slice(kvc->k_cache, 2, 0, kvc->seq_len);
+    return tensor_slice(scratch, kvc->k_cache, 2, 0, kvc->seq_len);
 }
 
-tensor *kv_cache_get_V(kv_cache *kvc) {
+tensor *kv_cache_get_V(struct mem_pool *scratch, kv_cache *kvc) {
     assert(kvc && "kv_cache_get_V: NULL cache");
     assert(kvc->seq_len > 0 && "kv_cache_get_V: empty cache");
-    return tensor_slice(kvc->v_cache, 2, 0, kvc->seq_len);
+    return tensor_slice(scratch, kvc->v_cache, 2, 0, kvc->seq_len);
 }
 
 /* ── Transformer Block ── */
 
-transformer_block *transformer_block_create(int d_model, int n_heads, int d_k,
+transformer_block *transformer_block_create(struct mem_pool *params_pool, int d_model, int n_heads, int d_k,
                                              int intermediate_size) {
     assert(d_model > 0 && n_heads > 0 && d_k > 0 && intermediate_size > 0);
     assert(d_model == n_heads * d_k && "d_model must equal n_heads * d_k");
 
-    transformer_block *block = mem_params_alloc(sizeof(transformer_block), NULL);
+    transformer_block *block = _mem_pool_alloc(params_pool, sizeof(transformer_block), NULL);
     block->d_model  = d_model;
     block->n_heads  = n_heads;
     block->d_k      = d_k;
 
-    block->q_proj   = linear_create(d_model, n_heads * d_k);
-    block->k_proj   = linear_create(d_model, n_heads * d_k);
-    block->v_proj   = linear_create(d_model, n_heads * d_k);
-    block->out_proj = linear_create(n_heads * d_k, d_model);
+    block->q_proj   = linear_create(params_pool, d_model, n_heads * d_k);
+    block->k_proj   = linear_create(params_pool, d_model, n_heads * d_k);
+    block->v_proj   = linear_create(params_pool, d_model, n_heads * d_k);
+    block->out_proj = linear_create(params_pool, n_heads * d_k, d_model);
 
     /* Pre-norm params: init γ=1, β=0 */
-    block->attn_norm_weight = tensor_zeros(1, (int[]){d_model}, 1);
-    block->attn_norm_bias   = tensor_zeros(1, (int[]){d_model}, 1);
+    block->attn_norm_weight = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
+    block->attn_norm_bias   = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
     float *wn = tensor_data_ptr(block->attn_norm_weight);
     for (int i = 0; i < d_model; i++) wn[i] = 1.0f;
 
-    block->ffn_norm_weight = tensor_zeros(1, (int[]){d_model}, 1);
-    block->ffn_norm_bias   = tensor_zeros(1, (int[]){d_model}, 1);
+    block->ffn_norm_weight = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
+    block->ffn_norm_bias   = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
     float *wf = tensor_data_ptr(block->ffn_norm_weight);
     for (int i = 0; i < d_model; i++) wf[i] = 1.0f;
 
-    block->ffn = swiglu_ffn_create(d_model, intermediate_size);
+    block->ffn = swiglu_ffn_create(params_pool, d_model, intermediate_size);
 
     /* RoPE disabled by default */
     block->freqs_cos = NULL;
@@ -149,106 +149,106 @@ transformer_block *transformer_block_create(int d_model, int n_heads, int d_k,
     return block;
 }
 
-tensor *transformer_block_forward(transformer_block *block, const tensor *x) {
+tensor *transformer_block_forward(struct mem_pool *scratch, transformer_block *block, const tensor *x) {
     assert(block && x);
     assert(x->ndim >= 2);
     assert(x->shape[x->ndim - 1] == block->d_model);
 
     /* ── Attention sublayer (pre-norm) ── */
     tensor *residual = (tensor*)x;
-    tensor *h = tensor_layer_norm(x, block->attn_norm_weight,
+    tensor *h = tensor_layer_norm(scratch, x, block->attn_norm_weight,
                                    block->attn_norm_bias, 1e-5f);
 
     /* QKV projections: [B, N, d_model] → [B, N, n_heads * d_k] */
-    tensor *Q = linear_forward(block->q_proj, h);
-    tensor *K = linear_forward(block->k_proj, h);
-    tensor *V = linear_forward(block->v_proj, h);
+    tensor *Q = linear_forward(scratch, block->q_proj, h);
+    tensor *K = linear_forward(scratch, block->k_proj, h);
+    tensor *V = linear_forward(scratch, block->v_proj, h);
 
     /* Split heads: [B, N, H*d_k] → [B, H, N, d_k] */
-    tensor *Qh = tensor_split_heads(Q, block->n_heads);
-    tensor *Kh = tensor_split_heads(K, block->n_heads);
-    tensor *Vh = tensor_split_heads(V, block->n_heads);
+    tensor *Qh = tensor_split_heads(scratch, Q, block->n_heads);
+    tensor *Kh = tensor_split_heads(scratch, K, block->n_heads);
+    tensor *Vh = tensor_split_heads(scratch, V, block->n_heads);
 
     /* ── RoPE: apply rotary position encoding to Q, K ── */
     if (block->freqs_cos && block->freqs_sin) {
         /* Slice freq tables to match current sequence length */
         int N = Qh->shape[2];
-        tensor *fc = tensor_slice(block->freqs_cos, 0, 0, N);
-        tensor *fs = tensor_slice(block->freqs_sin, 0, 0, N);
-        Qh = tensor_rope(Qh, fc, fs);
-        Kh = tensor_rope(Kh, fc, fs);
+        tensor *fc = tensor_slice(scratch, block->freqs_cos, 0, 0, N);
+        tensor *fs = tensor_slice(scratch, block->freqs_sin, 0, 0, N);
+        Qh = tensor_rope(scratch, Qh, fc, fs);
+        Kh = tensor_rope(scratch, Kh, fc, fs);
     }
 
     /* Fused causal attention (no extra mask needed) */
-    tensor *attn_out = tensor_attention(Qh, Kh, Vh, NULL);
+    tensor *attn_out = tensor_attention(scratch, Qh, Kh, Vh, NULL);
 
     /* Merge heads: [B, H, N, d_k] → [B, N, H*d_k] */
-    tensor *attn_merged = tensor_merge_heads(attn_out);
+    tensor *attn_merged = tensor_merge_heads(scratch, attn_out);
 
     /* Output projection: [B, N, H*d_k] → [B, N, d_model] */
-    tensor *attn_proj = linear_forward(block->out_proj, attn_merged);
+    tensor *attn_proj = linear_forward(scratch, block->out_proj, attn_merged);
 
     /* First residual: x = x + attn_proj */
-    tensor *x_after_attn = tensor_add(residual, attn_proj);
+    tensor *x_after_attn = tensor_add(scratch, residual, attn_proj);
 
     /* ── FFN sublayer (pre-norm) ── */
     residual = x_after_attn;
-    h = tensor_layer_norm(x_after_attn, block->ffn_norm_weight,
+    h = tensor_layer_norm(scratch, x_after_attn, block->ffn_norm_weight,
                            block->ffn_norm_bias, 1e-5f);
 
-    tensor *ffn_out = swiglu_ffn_forward(block->ffn, h);
+    tensor *ffn_out = swiglu_ffn_forward(scratch, block->ffn, h);
 
     /* Second residual: return x + ffn_out */
-    return tensor_add(residual, ffn_out);
+    return tensor_add(scratch, residual, ffn_out);
 }
 
 /* ── Decoder-only Language Model ── */
 
-decoder_lm *decoder_lm_create(int vocab_size, int d_model,
+decoder_lm *decoder_lm_create(struct mem_pool *params_pool, int vocab_size, int d_model,
                                int n_layers, int n_heads, int d_k,
                                int intermediate_size) {
     assert(vocab_size > 0 && d_model > 0 && n_layers > 0);
     assert(n_heads > 0 && d_k > 0 && intermediate_size > 0);
     assert(d_model == n_heads * d_k && "d_model must equal n_heads * d_k");
 
-    decoder_lm *lm = mem_params_alloc(sizeof(decoder_lm), NULL);
+    decoder_lm *lm = _mem_pool_alloc(params_pool, sizeof(decoder_lm), NULL);
     lm->d_model    = d_model;
     lm->vocab_size = vocab_size;
     lm->n_layers   = n_layers;
 
     /* Embedding table: [vocab_size, d_model], uniform init */
     float bound = 1.0f / sqrtf((float)d_model);
-    lm->embedding_table = tensor_uniform(2, (int[]){vocab_size, d_model}, 1, bound);
+    lm->embedding_table = tensor_uniform(params_pool, 2, (int[]){vocab_size, d_model}, 1, bound);
 
     /* Transformer blocks */
-    lm->blocks = mem_params_alloc(n_layers * sizeof(transformer_block*), NULL);
+    lm->blocks = _mem_pool_alloc(params_pool, n_layers * sizeof(transformer_block*), NULL);
     for (int i = 0; i < n_layers; i++) {
-        lm->blocks[i] = transformer_block_create(d_model, n_heads, d_k,
+        lm->blocks[i] = transformer_block_create(params_pool, d_model, n_heads, d_k,
                                                    intermediate_size);
     }
 
     /* Final layer norm: γ=1, β=0 */
-    lm->norm_weight = tensor_zeros(1, (int[]){d_model}, 1);
-    lm->norm_bias   = tensor_zeros(1, (int[]){d_model}, 1);
+    lm->norm_weight = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
+    lm->norm_bias   = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
     float *wn = tensor_data_ptr(lm->norm_weight);
     for (int i = 0; i < d_model; i++) wn[i] = 1.0f;
 
     /* LM head: d_model → vocab_size (weight tied to embedding) */
-    lm->lm_head = mem_params_alloc(sizeof(linear), NULL);
+    lm->lm_head = _mem_pool_alloc(params_pool, sizeof(linear), NULL);
     lm->lm_head->in_features  = d_model;
     lm->lm_head->out_features = vocab_size;
     /* weight = transpose(embedding_table) — persistent copy in params pool */
     {
-        tensor *tmp = tensor_transpose(lm->embedding_table, 0, 1);
-        lm->lm_head->weight = mem_params_alloc(sizeof(tensor), tmp);
-        lm->lm_head->weight->pool = _mem_pool_params();
+        tensor *tmp = tensor_transpose(params_pool, lm->embedding_table, 0, 1);
+        lm->lm_head->weight = _mem_pool_alloc(params_pool, sizeof(tensor), tmp);
+        lm->lm_head->weight->pool = params_pool;
     }
-    lm->lm_head->bias = tensor_zeros(1, (int[]){vocab_size}, 1);
+    lm->lm_head->bias = tensor_zeros(params_pool, 1, (int[]){vocab_size}, 1);
 
     return lm;
 }
 
-tensor *decoder_lm_forward(decoder_lm *lm, const tensor *input_ids) {
+tensor *decoder_lm_forward(struct mem_pool *scratch, decoder_lm *lm, const tensor *input_ids) {
     assert(lm && input_ids);
     assert(input_ids->ndim == 2 && "decoder_lm_forward: input_ids must be 2D [B, N]");
     assert(input_ids->contiguous && "decoder_lm_forward: input_ids must be contiguous");
@@ -258,31 +258,32 @@ tensor *decoder_lm_forward(decoder_lm *lm, const tensor *input_ids) {
     int D = lm->d_model;
 
     /* Flatten [B, N] → [B*N] for embedding lookup */
-    tensor *flat_ids = tensor_flatten((tensor*)input_ids);  /* view, no data copy */
+    tensor *flat_ids = tensor_flatten(scratch, (tensor*)input_ids);  /* view, no data copy */
 
     /* Embed: [B*N] → [B*N, d_model] */
-    tensor *h = tensor_embedding(lm->embedding_table, flat_ids);
+    tensor *h = tensor_embedding(scratch, lm->embedding_table, flat_ids);
 
     /* Reshape to [B, N, d_model] */
-    h = tensor_reshape(h, 3, (int[]){B, N, D});
+    h = tensor_reshape(scratch, h, 3, (int[]){B, N, D});
 
     /* Pass through all transformer blocks */
     for (int i = 0; i < lm->n_layers; i++) {
-        h = transformer_block_forward(lm->blocks[i], h);
+        h = transformer_block_forward(scratch, lm->blocks[i], h);
     }
 
     /* Final layer norm */
-    h = tensor_layer_norm(h, lm->norm_weight, lm->norm_bias, 1e-5f);
+    h = tensor_layer_norm(scratch, h, lm->norm_weight, lm->norm_bias, 1e-5f);
 
     /* LM head: [B, N, d_model] → [B, N, vocab_size] */
-    tensor *logits = linear_forward(lm->lm_head, h);
+    tensor *logits = linear_forward(scratch, lm->lm_head, h);
 
     return logits;
 }
 
 /* ── Training step ── */
 
-tensor *decoder_lm_train_step(decoder_lm *lm, const tensor *input_ids,
+tensor *decoder_lm_train_step(struct mem_pool *scratch_pool, struct mem_pool *data_pool,
+                               decoder_lm *lm, const tensor *input_ids,
                                adamw_opt *opt, float grad_clip,
                                float *grad_norm_out) {
     assert(lm && input_ids && opt);
@@ -294,13 +295,13 @@ tensor *decoder_lm_train_step(decoder_lm *lm, const tensor *input_ids,
     int N = input_ids->shape[1];
 
     /* ── Forward ── */
-    tensor *logits = decoder_lm_forward(lm, input_ids);  /* [B, N, vocab] */
+    tensor *logits = decoder_lm_forward(scratch_pool, lm, input_ids);  /* [B, N, vocab] */
 
     /* ── Shift: logits[:, :-1, :] predict input_ids[:, 1:] ── */
-    tensor *logits_shifted = tensor_slice(logits, 1, 0, N - 1);  /* [B, N-1, vocab] */
+    tensor *logits_shifted = tensor_slice(scratch_pool, logits, 1, 0, N - 1);  /* [B, N-1, vocab] */
 
     /* Build target = input_ids[:, 1:], same int-into-float trick */
-    tensor *target = tensor_zeros_data(2, (int[]){B, N - 1});
+    tensor *target = tensor_zeros_data(data_pool, 2, (int[]){B, N - 1});
     int *td = (int *)target->data;
     int *id = (int *)input_ids->data;
     for (int b = 0; b < B; b++) {
@@ -310,10 +311,10 @@ tensor *decoder_lm_train_step(decoder_lm *lm, const tensor *input_ids,
     }
 
     /* ── Loss: cross-entropy over vocab dim ── */
-    tensor *loss = tensor_cross_entropy(logits_shifted, target, 2);
+    tensor *loss = tensor_cross_entropy(scratch_pool, logits_shifted, target, 2);
 
     /* ── Backward ── */
-    dnn_backward(loss);
+    dnn_backward(scratch_pool, loss);
 
     /* ── Gradient clipping ── */
     float gn = 0.0f;
@@ -342,7 +343,8 @@ tensor *decoder_lm_train_step(decoder_lm *lm, const tensor *input_ids,
 
 /* ── Cached transformer block forward (eval-only, generation) ── */
 
-tensor *transformer_block_forward_cached(transformer_block *block,
+tensor *transformer_block_forward_cached(struct mem_pool *scratch,
+                                          transformer_block *block,
                                           const tensor *x,
                                           kv_cache *cache) {
     assert(block && x && cache);
@@ -356,42 +358,42 @@ tensor *transformer_block_forward_cached(transformer_block *block,
     int d_k   = block->d_k;
 
     /* Pre-norm */
-    tensor *h = tensor_layer_norm(x, block->attn_norm_weight,
+    tensor *h = tensor_layer_norm(scratch, x, block->attn_norm_weight,
                                    block->attn_norm_bias, 1e-5f);
 
     /* QKV projections */
-    tensor *Q = linear_forward(block->q_proj, h);  /* [B, N_new, H*d_k] */
-    tensor *K = linear_forward(block->k_proj, h);
-    tensor *V = linear_forward(block->v_proj, h);
+    tensor *Q = linear_forward(scratch, block->q_proj, h);  /* [B, N_new, H*d_k] */
+    tensor *K = linear_forward(scratch, block->k_proj, h);
+    tensor *V = linear_forward(scratch, block->v_proj, h);
 
     /* Split heads */
-    tensor *Qh = tensor_split_heads(Q, H);  /* [B, H, N_new, d_k] */
-    tensor *Kh = tensor_split_heads(K, H);
-    tensor *Vh = tensor_split_heads(V, H);
+    tensor *Qh = tensor_split_heads(scratch, Q, H);  /* [B, H, N_new, d_k] */
+    tensor *Kh = tensor_split_heads(scratch, K, H);
+    tensor *Vh = tensor_split_heads(scratch, V, H);
 
     /* ── RoPE: apply to Q, K with position offset ── */
     if (block->freqs_cos && block->freqs_sin) {
         /* New tokens are at positions [cache->seq_len, cache->seq_len + N_new)
          * Slice the freq tables to start at the current cache position. */
         int pos_offset = cache->seq_len;
-        tensor *fc_slice = tensor_slice(block->freqs_cos, 0, pos_offset, N_new);
-        tensor *fs_slice = tensor_slice(block->freqs_sin, 0, pos_offset, N_new);
-        Qh = tensor_rope(Qh, fc_slice, fs_slice);
-        Kh = tensor_rope(Kh, fc_slice, fs_slice);
+        tensor *fc_slice = tensor_slice(scratch, block->freqs_cos, 0, pos_offset, N_new);
+        tensor *fs_slice = tensor_slice(scratch, block->freqs_sin, 0, pos_offset, N_new);
+        Qh = tensor_rope(scratch, Qh, fc_slice, fs_slice);
+        Kh = tensor_rope(scratch, Kh, fc_slice, fs_slice);
     }
 
     /* Append new K/V to cache */
     kv_cache_append(cache, Kh, Vh);
 
     /* Get full cached K/V */
-    tensor *K_full = kv_cache_get_K(cache);  /* [B, H, S, d_k] */
-    tensor *V_full = kv_cache_get_V(cache);  /* [B, H, S, d_k] */
+    tensor *K_full = kv_cache_get_K(scratch, cache);  /* [B, H, S, d_k] */
+    tensor *V_full = kv_cache_get_V(scratch, cache);  /* [B, H, S, d_k] */
 
     int S = K_full->shape[2];
     float scale = 1.0f / sqrtf((float)d_k);
 
     /* Output allocation */
-    tensor *attn_out = _tensor_scratch_create(4, (int[]){B, H, N_new, d_k}, 0);
+    tensor *attn_out = tensor_scratch(scratch, 4, (int[]){B, H, N_new, d_k}, 0);
     float *od = (float*)attn_out->data;
     float *qd = (float*)Qh->data;
     float *kd = (float*)K_full->data;
@@ -403,7 +405,7 @@ tensor *transformer_block_forward_cached(transformer_block *block,
     int o_sN = attn_out->strides[2];
 
     /* Temp scores [N_new, S] */
-    float *scores = mem_scratch_alloc((size_t)N_new * S * sizeof(float), NULL);
+    float *scores = _mem_pool_alloc(scratch, (size_t)N_new * S * sizeof(float), NULL);
 
     for (int b = 0; b < B; b++) {
         for (int h = 0; h < H; h++) {
@@ -524,21 +526,21 @@ tensor *transformer_block_forward_cached(transformer_block *block,
     /* No autograd — generation is eval-only */
 
     /* Merge heads: [B, H, N_new, d_k] → [B, N_new, H*d_k] */
-    tensor *attn_merged = tensor_merge_heads(attn_out);
+    tensor *attn_merged = tensor_merge_heads(scratch, attn_out);
 
     /* Output projection */
-    tensor *attn_proj = linear_forward(block->out_proj, attn_merged);
+    tensor *attn_proj = linear_forward(scratch, block->out_proj, attn_merged);
 
     /* First residual */
-    tensor *x_after_attn = tensor_add(x, attn_proj);
+    tensor *x_after_attn = tensor_add(scratch, x, attn_proj);
 
     /* ── FFN sublayer (pre-norm) ── */
-    h = tensor_layer_norm(x_after_attn, block->ffn_norm_weight,
+    h = tensor_layer_norm(scratch, x_after_attn, block->ffn_norm_weight,
                            block->ffn_norm_bias, 1e-5f);
-    tensor *ffn_out = swiglu_ffn_forward(block->ffn, h);
+    tensor *ffn_out = swiglu_ffn_forward(scratch, block->ffn, h);
 
     /* Second residual */
-    return tensor_add(x_after_attn, ffn_out);
+    return tensor_add(scratch, x_after_attn, ffn_out);
 }
 
 
@@ -591,7 +593,8 @@ static int _sample_with_temp(const float *logits, int vocab_size, float temp) {
 
 /* ── Autoregressive generation ── */
 
-int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
+int *decoder_lm_generate(struct mem_pool *scratch_pool, struct mem_pool *data_pool,
+                          decoder_lm *lm, const tensor *prompt_ids,
                           int max_new_tokens, float temperature,
                           int use_cache, int *n_out) {
     assert(lm && prompt_ids);
@@ -608,7 +611,7 @@ int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
     int B = 1;  /* single-batch generation */
 
     /* Allocate output buffer from data pool */
-    int *output = mem_data_alloc((size_t)max_len * sizeof(int), NULL);
+    int *output = _mem_pool_alloc(data_pool, (size_t)max_len * sizeof(int), NULL);
     memcpy(output, prompt_ids->data, (size_t)prompt_len * sizeof(int));
     int cur_len = prompt_len;
 
@@ -620,43 +623,43 @@ int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
         int d_k = lm->blocks[0]->d_k;
         int H   = lm->blocks[0]->n_heads;
 
-        size_t cache_mark = mem_pool_mark(_mem_pool_params());
+        size_t cache_mark = mem_pool_mark(scratch_pool);
 
         /* Create KV-caches for each layer.
          * IMPORTANT: allocate pointer array from params pool — scratch
          * gets reset between iterations and caches must survive. */
-        kv_cache **caches = mem_params_alloc((size_t)lm->n_layers * sizeof(kv_cache*), NULL);
+        kv_cache **caches = _mem_pool_alloc(scratch_pool, (size_t)lm->n_layers * sizeof(kv_cache*), NULL);
         int max_seq = max_len;
         for (int i = 0; i < lm->n_layers; i++) {
-            caches[i] = kv_cache_create(B, H, max_seq, d_k);
+            caches[i] = kv_cache_create(scratch_pool, B, H, max_seq, d_k);
         }
 
         /* Process prompt tokens one-by-one to populate cache */
-        tensor *single_id_data = tensor_zeros_data(1, (int[]){1});  /* 1D int tensor */
+        tensor *single_id_data = tensor_zeros_data(data_pool, 1, (int[]){1});  /* 1D int tensor */
 
         for (int p = 0; p < prompt_len; p++) {
             /* Set single token ID */
             ((int*)single_id_data->data)[0] = output[p];
 
             /* Embed: [1] → [1, d_model], then reshape to [1, 1, d_model] */
-            tensor *flat_emb = tensor_embedding(lm->embedding_table, single_id_data);
-            tensor *h = tensor_reshape(flat_emb, 3, (int[]){1, 1, d_model});
+            tensor *flat_emb = tensor_embedding(scratch_pool, lm->embedding_table, single_id_data);
+            tensor *h = tensor_reshape(scratch_pool, flat_emb, 3, (int[]){1, 1, d_model});
 
             /* Pass through all transformer blocks with cache */
             for (int i = 0; i < lm->n_layers; i++) {
-                h = transformer_block_forward_cached(lm->blocks[i], h, caches[i]);
+                h = transformer_block_forward_cached(scratch_pool, lm->blocks[i], h, caches[i]);
             }
 
             /* Final norm + lm_head (only needed for last prompt token's logits) */
             if (p == prompt_len - 1) {
-                h = tensor_layer_norm(h, lm->norm_weight, lm->norm_bias, 1e-5f);
-                tensor *logits = linear_forward(lm->lm_head, h);  /* [1, 1, vocab] */
+                h = tensor_layer_norm(scratch_pool, h, lm->norm_weight, lm->norm_bias, 1e-5f);
+                tensor *logits = linear_forward(scratch_pool, lm->lm_head, h);  /* [1, 1, vocab] */
                 float *ld = tensor_data_ptr(logits);
 
                 /* Copy last logits row before resetting scratch */
-                float *last_logit_buf = mem_data_alloc((size_t)vocab_size * sizeof(float), NULL);
+                float *last_logit_buf = _mem_pool_alloc(data_pool, (size_t)vocab_size * sizeof(float), NULL);
                 memcpy(last_logit_buf, ld, (size_t)vocab_size * sizeof(float));
-                mem_pool_reset(_mem_pool_scratch());
+                mem_pool_reset(scratch_pool);
 
                 int next_id;
                 if (temperature == 0.0f) {
@@ -670,7 +673,7 @@ int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
                 if (next_id == TOKENIZER_EOS_ID) goto done_generate;
             } else {
                 /* Free scratch between non-last prompt tokens */
-                mem_pool_reset(_mem_pool_scratch());
+                mem_pool_reset(scratch_pool);
             }
         }
 
@@ -678,21 +681,21 @@ int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
         while (cur_len < max_len) {
             ((int*)single_id_data->data)[0] = output[cur_len - 1];
 
-            tensor *flat_emb = tensor_embedding(lm->embedding_table, single_id_data);
-            tensor *h = tensor_reshape(flat_emb, 3, (int[]){1, 1, d_model});
+            tensor *flat_emb = tensor_embedding(scratch_pool, lm->embedding_table, single_id_data);
+            tensor *h = tensor_reshape(scratch_pool, flat_emb, 3, (int[]){1, 1, d_model});
 
             for (int i = 0; i < lm->n_layers; i++) {
-                h = transformer_block_forward_cached(lm->blocks[i], h, caches[i]);
+                h = transformer_block_forward_cached(scratch_pool, lm->blocks[i], h, caches[i]);
             }
 
-            h = tensor_layer_norm(h, lm->norm_weight, lm->norm_bias, 1e-5f);
-            tensor *logits = linear_forward(lm->lm_head, h);
+            h = tensor_layer_norm(scratch_pool, h, lm->norm_weight, lm->norm_bias, 1e-5f);
+            tensor *logits = linear_forward(scratch_pool, lm->lm_head, h);
             float *ld = tensor_data_ptr(logits);
 
             /* Copy last logits row before resetting scratch */
-            float *last_logit_buf = mem_data_alloc((size_t)vocab_size * sizeof(float), NULL);
+            float *last_logit_buf = _mem_pool_alloc(data_pool, (size_t)vocab_size * sizeof(float), NULL);
             memcpy(last_logit_buf, ld, (size_t)vocab_size * sizeof(float));
-            mem_pool_reset(_mem_pool_scratch());
+            mem_pool_reset(scratch_pool);
 
             int next_id;
             if (temperature == 0.0f) {
@@ -706,27 +709,27 @@ int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
         }
 
 done_generate:
-        mem_pool_release(_mem_pool_params(), cache_mark);
+        mem_pool_release(scratch_pool, cache_mark);
         ;
 
     } else {
         /* ── No cache path: full forward each step ── */
         while (cur_len < max_len) {
             /* Build tensor from current output buffer */
-            tensor *ids_tensor = tensor_zeros_data(2, (int[]){1, cur_len});
+            tensor *ids_tensor = tensor_zeros_data(data_pool, 2, (int[]){1, cur_len});
             memcpy(ids_tensor->data, output, (size_t)cur_len * sizeof(int));
 
             /* Full forward pass */
-            tensor *logits = decoder_lm_forward(lm, ids_tensor);  /* [1, cur_len, vocab] */
+            tensor *logits = decoder_lm_forward(scratch_pool, lm, ids_tensor);  /* [1, cur_len, vocab] */
 
             /* Copy last token's logits before resetting scratch */
             float *ld = tensor_data_ptr(logits);
             float *last_logits = ld + (cur_len - 1) * vocab_size;
-            float *last_logit_buf = mem_data_alloc((size_t)vocab_size * sizeof(float), NULL);
+            float *last_logit_buf = _mem_pool_alloc(data_pool, (size_t)vocab_size * sizeof(float), NULL);
             memcpy(last_logit_buf, last_logits, (size_t)vocab_size * sizeof(float));
 
             /* Reset scratch — each forward pass allocates huge activations */
-            mem_pool_reset(_mem_pool_scratch());
+            mem_pool_reset(scratch_pool);
 
             int next_id;
             if (temperature == 0.0f) {
@@ -833,7 +836,7 @@ void decoder_lm_init_weights(decoder_lm *lm) {
 
 /* ── RoPE position encoding ── */
 
-void decoder_lm_enable_rope(decoder_lm *lm, int max_seq_len, float base) {
+void decoder_lm_enable_rope(struct mem_pool *params_pool, decoder_lm *lm, int max_seq_len, float base) {
     assert(lm && max_seq_len > 0);
 
     int d_k = lm->blocks[0]->d_k;
@@ -841,7 +844,7 @@ void decoder_lm_enable_rope(decoder_lm *lm, int max_seq_len, float base) {
 
     /* Init frequency tables in params pool */
     tensor *freqs_cos, *freqs_sin;
-    tensor_rope_freqs_init(&freqs_cos, &freqs_sin, d_k, max_seq_len, base);
+    tensor_rope_freqs_init(params_pool, &freqs_cos, &freqs_sin, d_k, max_seq_len, base);
 
     /* Assign to every block */
     for (int i = 0; i < lm->n_layers; i++) {

@@ -107,7 +107,7 @@ static void split_heads_backward(grad_fn *fn, tensor *grad_output) {
  *   Input:  [B, N, H*d_k], contiguous 3D
  *   Output: [B, H, N, d_k], contiguous 4D (new alloc)
  */
-tensor *tensor_split_heads(tensor *t, int H) {
+tensor *tensor_split_heads(struct mem_pool *scratch, tensor *t, int H) {
     assert(t->ndim == 3 && "split_heads: input must be 3D [B, N, H*d_k]");
 
     int B = t->shape[0];
@@ -117,7 +117,7 @@ tensor *tensor_split_heads(tensor *t, int H) {
     int d_k = D / H;
 
     /* Allocate contiguous output in scratch pool */
-    tensor *out = _tensor_scratch_create(4, (int[]){B, H, N, d_k}, 0);
+    tensor *out = tensor_scratch(scratch, 4, (int[]){B, H, N, d_k}, 0);
     float *od = (float*)out->data + out->offset;
     float *td = (float*)t->data + t->offset;
 
@@ -127,15 +127,15 @@ tensor *tensor_split_heads(tensor *t, int H) {
     /* ── Autograd ── */
     int needs_grad = dnn_grad_enabled() && tensor_requires_grad(t);
     if (needs_grad) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = split_heads_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = t;
 
         fn->n_saved = 1;
-        fn->saved_tensors = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
-        int *saved_H = mem_scratch_alloc(sizeof(int), NULL);
+        fn->saved_tensors = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
+        int *saved_H = _mem_pool_alloc(scratch, sizeof(int), NULL);
         *saved_H = H;
         fn->saved_tensors[0] = (tensor*)saved_H;
 
@@ -190,7 +190,7 @@ static void merge_heads_backward(grad_fn *fn, tensor *grad_output) {
  *   Input:  [B, H, N, d_k], contiguous 4D
  *   Output: [B, N, H*d_k], contiguous 3D (new alloc)
  */
-tensor *tensor_merge_heads(tensor *t) {
+tensor *tensor_merge_heads(struct mem_pool *scratch, tensor *t) {
     assert(t->ndim == 4 && "merge_heads: input must be 4D [B, H, N, d_k]");
 
     int B   = t->shape[0];
@@ -199,7 +199,7 @@ tensor *tensor_merge_heads(tensor *t) {
     int d_k = t->shape[3];
 
     /* Allocate contiguous output in scratch pool */
-    tensor *out = _tensor_scratch_create(3, (int[]){B, N, H * d_k}, 0);
+    tensor *out = tensor_scratch(scratch, 3, (int[]){B, N, H * d_k}, 0);
     float *od = (float*)out->data + out->offset;
     float *td = (float*)t->data + t->offset;
 
@@ -209,10 +209,10 @@ tensor *tensor_merge_heads(tensor *t) {
     /* ── Autograd ── */
     int needs_grad = dnn_grad_enabled() && tensor_requires_grad(t);
     if (needs_grad) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = merge_heads_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = t;
 
         fn->n_saved = 0;

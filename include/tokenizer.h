@@ -83,7 +83,7 @@ tokenizer tokenizer_with_specials(const char *bos_str,
  * strings and emits the special ID instead of byte-by-byte.
  * Returns NULL on empty text (len=0).
  */
-int *tokenizer_encode(tokenizer *tok, const char *text, int *len);
+int *tokenizer_encode(struct mem_pool *data_pool, tokenizer *tok, const char *text, int *len);
 
 /* Decode IDs → text string.
  *
@@ -98,7 +98,7 @@ char *tokenizer_decode(tokenizer *tok, const int *ids, int len);
 /* Text → int tensor [1, N]  (N = encoded length).
  * Tensor allocated from data pool.
  */
-tensor *tokenizer_text_to_tensor(tokenizer *tok, const char *text);
+tensor *tokenizer_text_to_tensor(struct mem_pool *data_pool, tokenizer *tok, const char *text);
 
 /* Tensor → text string.
  * Reads ints from tensor data, decodes.

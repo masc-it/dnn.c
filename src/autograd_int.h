@@ -4,7 +4,7 @@
 #include "autograd.h"
 
 /* ── Gradient function factory (exposed for ops.c) ── */
-grad_fn *_grad_fn_create(void);
+grad_fn *_grad_fn_create(struct mem_pool *pool);
 
 /* ── Gradient buffer ensure (exposed for ops.c) ── */
 float   *_grad_ensure(tensor *t);

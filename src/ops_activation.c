@@ -34,10 +34,10 @@ static void relu_backward(grad_fn *fn, tensor *grad_output) {
     }
 }
 
-tensor *tensor_relu(const tensor *t) {
+tensor *tensor_relu(struct mem_pool *scratch, const tensor *t) {
     assert(t);
 
-    tensor *out = _tensor_scratch_create(t->ndim, t->shape, 0);
+    tensor *out = tensor_scratch(scratch, t->ndim, t->shape, 0);
     int numel = _numel(t->ndim, t->shape);
     float *od = (float*)out->data;
     float *td = (float*)t->data;
@@ -55,10 +55,10 @@ tensor *tensor_relu(const tensor *t) {
 
     /* autograd tape */
     if (dnn_grad_enabled() && tensor_requires_grad(t)) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = relu_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)t;
         fn->n_saved = 0;
         out->requires_grad = 1;
@@ -91,10 +91,10 @@ static void sigmoid_backward(grad_fn *fn, tensor *grad_output) {
     }
 }
 
-tensor *tensor_sigmoid(const tensor *t) {
+tensor *tensor_sigmoid(struct mem_pool *scratch, const tensor *t) {
     assert(t);
 
-    tensor *out = _tensor_scratch_create(t->ndim, t->shape, 0);
+    tensor *out = tensor_scratch(scratch, t->ndim, t->shape, 0);
     int numel = _numel(t->ndim, t->shape);
     float *od = (float*)out->data;
     float *td = (float*)t->data;
@@ -111,13 +111,13 @@ tensor *tensor_sigmoid(const tensor *t) {
 
     /* autograd tape */
     if (dnn_grad_enabled() && tensor_requires_grad(t)) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = sigmoid_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)t;
         fn->n_saved = 1;
-        fn->saved_tensors = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->saved_tensors = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->saved_tensors[0] = out;
         out->requires_grad = 1;
         out->grad_fn = fn;
@@ -164,10 +164,10 @@ static void silu_backward(grad_fn *fn, tensor *grad_output) {
  * silu_backward (no saved tensors needed).
  */
 
-tensor *tensor_silu(const tensor *t) {
+tensor *tensor_silu(struct mem_pool *scratch, const tensor *t) {
     assert(t);
 
-    tensor *out = _tensor_scratch_create(t->ndim, t->shape, 0);
+    tensor *out = tensor_scratch(scratch, t->ndim, t->shape, 0);
     int numel = _numel(t->ndim, t->shape);
     float *od = (float*)out->data;
     float *td = (float*)t->data;
@@ -185,10 +185,10 @@ tensor *tensor_silu(const tensor *t) {
 
     /* autograd tape */
     if (dnn_grad_enabled() && tensor_requires_grad(t)) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = silu_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)t;
         fn->n_saved = 0;
         out->requires_grad = 1;
@@ -236,8 +236,8 @@ static void swiglu_backward(grad_fn *fn, tensor *grad_output) {
     }
 
     /* General: precompute offsets then scatter */
-    int *gate_offs = need_gate ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
-    int *up_offs   = need_up   ? mem_scratch_alloc(out_numel * sizeof(int), NULL) : NULL;
+    int *gate_offs = need_gate ? _mem_pool_alloc(fn->pool, out_numel * sizeof(int), NULL) : NULL;
+    int *up_offs   = need_up   ? _mem_pool_alloc(fn->pool, out_numel * sizeof(int), NULL) : NULL;
     int out_ndim = grad_output->ndim;
     for (int i = 0; i < out_numel; i++) {
         int coord[DNN_MAX_DIMS];
@@ -280,7 +280,7 @@ static void swiglu_backward(grad_fn *fn, tensor *grad_output) {
  * sigmoid(gate) in backward from the saved input pointers.
  */
 
-tensor *tensor_swiglu(const tensor *gate, const tensor *up) {
+tensor *tensor_swiglu(struct mem_pool *scratch, const tensor *gate, const tensor *up) {
     assert(gate && up);
 
     int ndim_out;
@@ -288,7 +288,7 @@ tensor *tensor_swiglu(const tensor *gate, const tensor *up) {
     ndim_out = _bcast_ndim(gate->ndim, gate->shape, up->ndim, up->shape, shape_out);
     assert(ndim_out > 0 && "tensor_swiglu: incompatible shapes");
 
-    tensor *out = _tensor_scratch_create(ndim_out, shape_out, 0);
+    tensor *out = tensor_scratch(scratch, ndim_out, shape_out, 0);
     int numel = _numel(ndim_out, shape_out);
     float *od = (float*)out->data;
     float *gd = (float*)gate->data;
@@ -318,10 +318,10 @@ tensor *tensor_swiglu(const tensor *gate, const tensor *up) {
     /* autograd tape */
     if (dnn_grad_enabled() &&
         (tensor_requires_grad(gate) || tensor_requires_grad(up))) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = swiglu_backward;
         fn->n_inputs = 2;
-        fn->inputs = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)gate;
         fn->inputs[1] = (tensor*)up;
         fn->n_saved = 0;
@@ -397,8 +397,8 @@ static void softmax_backward(grad_fn *fn, tensor *grad_output) {
     }
 
     /* ── General nD: fuse coord decompose — compute slice_idx once ── */
-    float *dot = mem_scratch_alloc(n_slices * sizeof(float), NULL);
-    int   *sid = mem_scratch_alloc(numel * sizeof(int), NULL);
+    float *dot = _mem_pool_alloc(fn->pool, n_slices * sizeof(float), NULL);
+    int   *sid = _mem_pool_alloc(fn->pool, numel * sizeof(int), NULL);
 
     for (int i = 0; i < numel; i++) {
         int coord[DNN_MAX_DIMS];
@@ -431,7 +431,7 @@ static void softmax_backward(grad_fn *fn, tensor *grad_output) {
 
 /* ── softmax forward ── */
 
-tensor *tensor_softmax(const tensor *t, int dim) {
+tensor *tensor_softmax(struct mem_pool *scratch, const tensor *t, int dim) {
     assert(t);
     int ndim = t->ndim;
     if (dim < 0) dim += ndim;
@@ -443,8 +443,8 @@ tensor *tensor_softmax(const tensor *t, int dim) {
     float *td = (float*)t->data;
 
     /* per-slice max and sum of exp(x - max) */
-    float *max_vals = mem_scratch_alloc(n_slices * sizeof(float), NULL);
-    float *sum_vals = mem_scratch_alloc(n_slices * sizeof(float), NULL);
+    float *max_vals = _mem_pool_alloc(scratch, n_slices * sizeof(float), NULL);
+    float *sum_vals = _mem_pool_alloc(scratch, n_slices * sizeof(float), NULL);
 
     /* fast path: 2D contiguous, dim=1 (most common — classification) */
     if (ndim == 2 && dim == 1 && tensor_is_contiguous(t)) {
@@ -502,7 +502,7 @@ tensor *tensor_softmax(const tensor *t, int dim) {
     }
 
     /* create output and compute softmax */
-    tensor *out = _tensor_scratch_create(ndim, t->shape, 0);
+    tensor *out = tensor_scratch(scratch, ndim, t->shape, 0);
     float *od = (float*)out->data;
 
     /* fast path: 2D contiguous output write */
@@ -556,15 +556,15 @@ tensor *tensor_softmax(const tensor *t, int dim) {
 
     /* autograd tape */
     if (dnn_grad_enabled() && tensor_requires_grad(t)) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = softmax_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)t;
         fn->n_saved = 2;
-        fn->saved_tensors = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
+        fn->saved_tensors = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
         fn->saved_tensors[0] = out;
-        int *dim_saved = mem_scratch_alloc(sizeof(int), NULL);
+        int *dim_saved = _mem_pool_alloc(scratch, sizeof(int), NULL);
         *dim_saved = dim;
         fn->saved_tensors[1] = (tensor*)dim_saved;
         out->requires_grad = 1;
@@ -680,7 +680,7 @@ static void causal_softmax_backward(grad_fn *fn, tensor *grad_output) {
  * by only computing softmax over visible positions j=0..i per row.
  */
 
-tensor *tensor_causal_softmax(const tensor *t) {
+tensor *tensor_causal_softmax(struct mem_pool *scratch, const tensor *t) {
     assert(t);
     int ndim = t->ndim;
     assert(ndim >= 2 && "causal_softmax: need at least 2 dims");
@@ -694,7 +694,7 @@ tensor *tensor_causal_softmax(const tensor *t) {
 
     float *td = (float*)t->data;
 
-    tensor *out = _tensor_scratch_create(ndim, t->shape, 0);
+    tensor *out = tensor_scratch(scratch, ndim, t->shape, 0);
     float *od = (float*)out->data;
 
     /* ── Fused causal softmax with online max+sum_exp + NEON SIMD ──
@@ -831,13 +831,13 @@ tensor *tensor_causal_softmax(const tensor *t) {
 
     /* autograd tape */
     if (dnn_grad_enabled() && tensor_requires_grad(t)) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = causal_softmax_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)t;
         fn->n_saved = 1;
-        fn->saved_tensors = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->saved_tensors = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->saved_tensors[0] = out;
         out->requires_grad = 1;
         out->grad_fn = fn;
@@ -918,7 +918,7 @@ static void cross_entropy_backward(grad_fn *fn, tensor *grad_output) {
 
 /* ── cross_entropy forward ── */
 
-tensor *tensor_cross_entropy(const tensor *logits, const tensor *target, int dim) {
+tensor *tensor_cross_entropy(struct mem_pool *scratch, const tensor *logits, const tensor *target, int dim) {
     assert(logits && target);
     int ndim = logits->ndim;
     if (dim < 0) dim += ndim;
@@ -931,8 +931,8 @@ tensor *tensor_cross_entropy(const tensor *logits, const tensor *target, int dim
     int   *td = (int*)target->data;
 
     /* per-slice max and sum of exp(x - max) */
-    float *max_vals = mem_scratch_alloc(n_slices * sizeof(float), NULL);
-    float *sum_exp  = mem_scratch_alloc(n_slices * sizeof(float), NULL);
+    float *max_vals = _mem_pool_alloc(scratch, n_slices * sizeof(float), NULL);
+    float *sum_exp  = _mem_pool_alloc(scratch, n_slices * sizeof(float), NULL);
 
     for (int s = 0; s < n_slices; s++) max_vals[s] = -INFINITY;
 
@@ -984,7 +984,7 @@ tensor *tensor_cross_entropy(const tensor *logits, const tensor *target, int dim
          * Pass 1 finds max per slice.  Pass 2 computes sum_exp and saves
          * the target logit value.  Loss computed per-slice from saved values.
          */
-        float *target_logits = mem_scratch_alloc(n_slices * sizeof(float), NULL);
+        float *target_logits = _mem_pool_alloc(scratch, n_slices * sizeof(float), NULL);
 
         /* Pass 1: find max along dim for each slice */
         for (int i = 0; i < numel; i++) {
@@ -1044,25 +1044,25 @@ tensor *tensor_cross_entropy(const tensor *logits, const tensor *target, int dim
     float inv_N = 1.0f / (float)n_slices;
     float loss_val = total_loss * inv_N;
 
-    tensor *out = _tensor_scratch_create(1, (int[]){1}, 0);
+    tensor *out = tensor_scratch(scratch, 1, (int[]){1}, 0);
     ((float*)out->data)[0] = loss_val;
 
     /* autograd tape */
     if (dnn_grad_enabled() && tensor_requires_grad(logits)) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = cross_entropy_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)logits;
         fn->n_saved = 5;
-        fn->saved_tensors = mem_scratch_alloc(5 * sizeof(tensor*), NULL);
+        fn->saved_tensors = _mem_pool_alloc(scratch, 5 * sizeof(tensor*), NULL);
         fn->saved_tensors[0] = (tensor*)max_vals;
         fn->saved_tensors[1] = (tensor*)sum_exp;
         fn->saved_tensors[2] = (tensor*)target;
-        int *dim_saved = mem_scratch_alloc(sizeof(int), NULL);
+        int *dim_saved = _mem_pool_alloc(scratch, sizeof(int), NULL);
         *dim_saved = dim;
         fn->saved_tensors[3] = (tensor*)dim_saved;
-        float *inv_n_saved = mem_scratch_alloc(sizeof(float), NULL);
+        float *inv_n_saved = _mem_pool_alloc(scratch, sizeof(float), NULL);
         *inv_n_saved = inv_N;
         fn->saved_tensors[4] = (tensor*)inv_n_saved;
         out->requires_grad = 1;
@@ -1106,7 +1106,7 @@ static void dropout_backward(grad_fn *fn, tensor *grad_output) {
 
 /* ── dropout forward ── */
 
-tensor *tensor_dropout(const tensor *t, float p) {
+tensor *tensor_dropout(struct mem_pool *scratch, const tensor *t, float p) {
     assert(t);
     assert(p >= 0.0f && p < 1.0f);
 
@@ -1117,13 +1117,13 @@ tensor *tensor_dropout(const tensor *t, float p) {
     int n    = tensor_numel(t);
     float scale = 1.0f / (1.0f - p);
 
-    tensor *out = _tensor_scratch_create(ndim, t->shape, 0);
+    tensor *out = tensor_scratch(scratch, ndim, t->shape, 0);
     float  *od  = (float*)out->data;
     float  *td  = (float*)t->data;
 
     /* generate mask and apply: out = mask * t / (1-p)
      * mask stored as byte array (75% less memory than float mask). */
-    unsigned char *mask = mem_scratch_alloc((size_t)n * sizeof(unsigned char), NULL);
+    unsigned char *mask = _mem_pool_alloc(scratch, (size_t)n * sizeof(unsigned char), NULL);
     if (tensor_is_contiguous(t)) {
         float *tp = td + t->offset;
         for (int i = 0; i < n; i++) {
@@ -1145,21 +1145,21 @@ tensor *tensor_dropout(const tensor *t, float p) {
 
     /* autograd tape */
     if (tensor_requires_grad(t)) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward  = dropout_backward;
         fn->n_inputs  = 1;
-        fn->inputs    = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs    = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)t;
 
         fn->n_saved = 3;
-        fn->saved_tensors = mem_scratch_alloc(3 * sizeof(tensor*), NULL);
+        fn->saved_tensors = _mem_pool_alloc(scratch, 3 * sizeof(tensor*), NULL);
         fn->saved_tensors[0] = (tensor*)mask;
 
-        float *p_saved = mem_scratch_alloc(sizeof(float), NULL);
+        float *p_saved = _mem_pool_alloc(scratch, sizeof(float), NULL);
         *p_saved = p;
         fn->saved_tensors[1] = (tensor*)p_saved;
 
-        int *n_saved = mem_scratch_alloc(sizeof(int), NULL);
+        int *n_saved = _mem_pool_alloc(scratch, sizeof(int), NULL);
         *n_saved = n;
         fn->saved_tensors[2] = (tensor*)n_saved;
 
@@ -1170,7 +1170,7 @@ tensor *tensor_dropout(const tensor *t, float p) {
     return out;
 }
 
-tensor *tensor_tanh(const tensor *t) {
+tensor *tensor_tanh(struct mem_pool *scratch, const tensor *t) {
     (void)t;
     return NULL;
 }

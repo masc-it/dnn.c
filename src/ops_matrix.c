@@ -308,7 +308,7 @@ static void matmul_backward(grad_fn *fn, tensor *grad_output) {
 }
 
 
-tensor *tensor_matmul(const tensor *a, const tensor *b) {
+tensor *tensor_matmul(struct mem_pool *scratch, const tensor *a, const tensor *b) {
     assert(a && b);
     assert(a->ndim >= 2 && b->ndim >= 2 && "tensor_matmul: need at least 2D");
 
@@ -320,7 +320,7 @@ tensor *tensor_matmul(const tensor *a, const tensor *b) {
 
     /* ── 2D case — existing optimized path ── */
     if (na == 2 && nb == 2) {
-        tensor *out = _tensor_scratch_create(2, (int[]){M, N}, 0);
+        tensor *out = tensor_scratch(scratch, 2, (int[]){M, N}, 0);
         float *od = (float*)out->data;
         float *ad = (float*)a->data;
         float *bd = (float*)b->data;
@@ -359,10 +359,10 @@ tensor *tensor_matmul(const tensor *a, const tensor *b) {
         /* autograd tape */
         if (dnn_grad_enabled() &&
             (tensor_requires_grad(a) || tensor_requires_grad(b))) {
-            grad_fn *fn = _grad_fn_create();
+            grad_fn *fn = _grad_fn_create(scratch);
             fn->backward = matmul_backward;
             fn->n_inputs = 2;
-            fn->inputs = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
+            fn->inputs = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
             fn->inputs[0] = (tensor*)a;
             fn->inputs[1] = (tensor*)b;
             fn->n_saved = 0;
@@ -388,7 +388,7 @@ tensor *tensor_matmul(const tensor *a, const tensor *b) {
     out_shape[batch_ndim] = M;
     out_shape[batch_ndim + 1] = N;
 
-    tensor *out = _tensor_scratch_create(out_ndim, out_shape, 0);
+    tensor *out = tensor_scratch(scratch, out_ndim, out_shape, 0);
     float *od = (float*)out->data;
     float *ad = (float*)a->data;
     float *bd = (float*)b->data;
@@ -447,10 +447,10 @@ tensor *tensor_matmul(const tensor *a, const tensor *b) {
     /* autograd tape */
     if (dnn_grad_enabled() &&
         (tensor_requires_grad(a) || tensor_requires_grad(b))) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = matmul_backward;
         fn->n_inputs = 2;
-        fn->inputs = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)a;
         fn->inputs[1] = (tensor*)b;
         fn->n_saved = 0;

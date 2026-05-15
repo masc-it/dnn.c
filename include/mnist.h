@@ -51,21 +51,21 @@ int mnist_download(void);
 
 /* Load images from decompressed IDX file into float tensor [N, 784].
    Pixels normalized to [0, 1]. */
-tensor *mnist_load_images(const char *path);
+tensor *mnist_load_images(struct mem_pool *data, const char *path);
 
 /* Load labels from decompressed IDX file into int tensor [N]. */
-tensor *mnist_load_labels(const char *path);
+tensor *mnist_load_labels(struct mem_pool *data, const char *path);
 
 /* ── Model lifecycle ── */
 
-mnist_model    *mnist_model_create(void);
-tensor         *mnist_model_forward(mnist_model *m, const tensor *x);
+mnist_model    *mnist_model_create(struct mem_pool *params_pool);
+tensor         *mnist_model_forward(struct mem_pool *scratch, mnist_model *m, const tensor *x);
 
-mnist_model_cnn *mnist_model_create_cnn(void);
-tensor          *mnist_model_forward_cnn(mnist_model_cnn *m, const tensor *x);
+mnist_model_cnn *mnist_model_create_cnn(struct mem_pool *params_pool);
+tensor          *mnist_model_forward_cnn(struct mem_pool *scratch, mnist_model_cnn *m, const tensor *x);
 
-mnist_model_cnn_pool *mnist_model_create_cnn_pool(void);
-tensor               *mnist_model_forward_cnn_pool(mnist_model_cnn_pool *m, const tensor *x);
+mnist_model_cnn_pool *mnist_model_create_cnn_pool(struct mem_pool *params_pool);
+tensor               *mnist_model_forward_cnn_pool(struct mem_pool *scratch, mnist_model_cnn_pool *m, const tensor *x);
 
 /* ── Training / eval ── */
 
@@ -76,17 +76,17 @@ tensor               *mnist_model_forward_cnn_pool(mnist_model_cnn_pool *m, cons
  *   Set val_n = 0 to skip early stopping.
  *   patience — epochs without val improvement before early stop.
  */
-void   mnist_train(mnist_model *m,
+void   mnist_train(struct dnn_ctx *ctx, mnist_model *m,
                    tensor *train_images, tensor *train_labels,
                    int epochs, int batch_size, float lr,
                    int val_n, int patience);
 
-void   mnist_train_cnn(mnist_model_cnn *m,
+void   mnist_train_cnn(struct dnn_ctx *ctx, mnist_model_cnn *m,
                        tensor *train_images, tensor *train_labels,
                        int epochs, int batch_size, float lr,
                        int val_n, int patience);
 
-void   mnist_train_cnn_pool(mnist_model_cnn_pool *m,
+void   mnist_train_cnn_pool(struct dnn_ctx *ctx, mnist_model_cnn_pool *m,
                             tensor *train_images, tensor *train_labels,
                             int epochs, int batch_size, float lr,
                             int val_n, int patience);
@@ -97,26 +97,26 @@ void   mnist_train_cnn_pool(mnist_model_cnn_pool *m,
  *              or mnist_model_forward_cnn).  Receives the model pointer
  *              and input tensor, returns logits [N, 10].
  */
-float  mnist_eval_generic(void *model,
-                          tensor *(*forward_fn)(void *, const tensor *),
+float  mnist_eval_generic(struct mem_pool *scratch, void *model,
+                          tensor *(*forward_fn)(struct mem_pool *, void *, const tensor *),
                           tensor *images, tensor *labels);
 
-static inline float mnist_eval(mnist_model *m, tensor *images, tensor *labels) {
-    return mnist_eval_generic(m,
-        (tensor *(*)(void *, const tensor *))mnist_model_forward,
+static inline float mnist_eval(struct mem_pool *scratch, mnist_model *m, tensor *images, tensor *labels) {
+    return mnist_eval_generic(scratch, m,
+        (tensor *(*)(struct mem_pool *, void *, const tensor *))mnist_model_forward,
         images, labels);
 }
 
-static inline float mnist_eval_cnn(mnist_model_cnn *m, tensor *images, tensor *labels) {
-    return mnist_eval_generic(m,
-        (tensor *(*)(void *, const tensor *))mnist_model_forward_cnn,
+static inline float mnist_eval_cnn(struct mem_pool *scratch, mnist_model_cnn *m, tensor *images, tensor *labels) {
+    return mnist_eval_generic(scratch, m,
+        (tensor *(*)(struct mem_pool *, void *, const tensor *))mnist_model_forward_cnn,
         images, labels);
 }
 
-static inline float mnist_eval_cnn_pool(mnist_model_cnn_pool *m,
+static inline float mnist_eval_cnn_pool(struct mem_pool *scratch, mnist_model_cnn_pool *m,
                                          tensor *images, tensor *labels) {
-    return mnist_eval_generic(m,
-        (tensor *(*)(void *, const tensor *))mnist_model_forward_cnn_pool,
+    return mnist_eval_generic(scratch, m,
+        (tensor *(*)(struct mem_pool *, void *, const tensor *))mnist_model_forward_cnn_pool,
         images, labels);
 }
 

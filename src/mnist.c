@@ -1,4 +1,5 @@
 #include "mnist.h"
+#include "context.h"
 #include "tensor_int.h"
 #include "pool_int.h"
 #include <stdio.h>
@@ -92,7 +93,7 @@ int mnist_download(void) {
     return 0;
 }
 
-tensor *mnist_load_images(const char *path) {
+tensor *mnist_load_images(struct mem_pool *data, const char *path) {
     gzFile f = gzopen(path, "rb");
     if (!f) { fprintf(stderr, "mnist_load_images: can't open %s\n", path); return NULL; }
 
@@ -111,7 +112,7 @@ tensor *mnist_load_images(const char *path) {
     gzclose(f);
 
     /* create float tensor [N, 784] in data pool, values in [0, 1] */
-    tensor *t = tensor_zeros_data(2, (int[]){N, img_size});
+    tensor *t = tensor_zeros_data(data, 2, (int[]){N, img_size});
     float  *dp = (float *)t->data;
     for (int i = 0; i < n_pixels; i++)
         dp[i] = raw[i] / 255.0f;
@@ -120,7 +121,7 @@ tensor *mnist_load_images(const char *path) {
     return t;
 }
 
-tensor *mnist_load_labels(const char *path) {
+tensor *mnist_load_labels(struct mem_pool *data, const char *path) {
     gzFile f = gzopen(path, "rb");
     if (!f) { fprintf(stderr, "mnist_load_labels: can't open %s\n", path); return NULL; }
 
@@ -134,7 +135,7 @@ tensor *mnist_load_labels(const char *path) {
     gzclose(f);
 
     /* create int tensor [N] in data pool – store ints in the float data region */
-    tensor *t = tensor_zeros_data(1, (int[]){N});
+    tensor *t = tensor_zeros_data(data, 1, (int[]){N});
     int    *lp = (int *)t->data;
     for (int i = 0; i < N; i++) lp[i] = raw[i];
 
@@ -146,18 +147,22 @@ tensor *mnist_load_labels(const char *path) {
  *  Model
  * ================================================================ */
 
-mnist_model *mnist_model_create(void) {
-    mnist_model *m = mem_params_alloc(sizeof(mnist_model), NULL);
-    m->fc1 = linear_create(MNIST_PIXELS, 256);
-    m->fc2 = linear_create(256, MNIST_CLASSES);
+mnist_model *mnist_model_create(struct mem_pool *params_pool) {
+    mnist_model *m = _mem_pool_alloc(params_pool, sizeof(mnist_model), NULL);
+    m->fc1 = linear_create(params_pool, MNIST_PIXELS, 256);
+    m->fc2 = linear_create(params_pool, 256, MNIST_CLASSES);
     return m;
 }
 
-tensor *mnist_model_forward(mnist_model *m, const tensor *x) {
-    tensor *h = linear_forward(m->fc1, x);
-    h = tensor_relu(h);
-    h = tensor_dropout(h, 0.2f);
-    h = linear_forward(m->fc2, h);
+tensor *mnist_model_forward(struct mem_pool *scratch, mnist_model *m, const tensor *x) {
+    assert(m && x);
+    assert(x->ndim >= 2);
+    assert(x->shape[x->ndim - 1] == MNIST_PIXELS);
+
+    tensor *h = linear_forward(scratch, m->fc1, x);
+    h = tensor_relu(scratch, h);
+    h = tensor_dropout(scratch, h, 0.2f);
+    h = linear_forward(scratch, m->fc2, h);
     return h;
 }
 
@@ -167,96 +172,96 @@ static float kaiming_bound(int in_c, int k_h, int k_w) {
     return sqrtf(6.0f / (float)(in_c * k_h * k_w));
 }
 
-mnist_model_cnn *mnist_model_create_cnn(void) {
-    mnist_model_cnn *m = mem_params_alloc(sizeof(mnist_model_cnn), NULL);
+mnist_model_cnn *mnist_model_create_cnn(struct mem_pool *params_pool) {
+    mnist_model_cnn *m = _mem_pool_alloc(params_pool, sizeof(mnist_model_cnn), NULL);
 
     /* conv1: 1→32, 3×3 */
     float b1 = kaiming_bound(1, 3, 3);
-    m->conv1_w = tensor_uniform(4, (int[]){32, 1, 3, 3}, 1, b1);
-    m->conv1_b = tensor_zeros(1, (int[]){32}, 1);
+    m->conv1_w = tensor_uniform(params_pool, 4, (int[]){32, 1, 3, 3}, 1, b1);
+    m->conv1_b = tensor_zeros(params_pool, 1, (int[]){32}, 1);
 
     /* conv2: 32→64, 3×3 */
     float b2 = kaiming_bound(32, 3, 3);
-    m->conv2_w = tensor_uniform(4, (int[]){64, 32, 3, 3}, 1, b2);
-    m->conv2_b = tensor_zeros(1, (int[]){64}, 1);
+    m->conv2_w = tensor_uniform(params_pool, 4, (int[]){64, 32, 3, 3}, 1, b2);
+    m->conv2_b = tensor_zeros(params_pool, 1, (int[]){64}, 1);
 
     /* conv3: 64→64, 3×3 */
     float b3 = kaiming_bound(64, 3, 3);
-    m->conv3_w = tensor_uniform(4, (int[]){64, 64, 3, 3}, 1, b3);
-    m->conv3_b = tensor_zeros(1, (int[]){64}, 1);
+    m->conv3_w = tensor_uniform(params_pool, 4, (int[]){64, 64, 3, 3}, 1, b3);
+    m->conv3_b = tensor_zeros(params_pool, 1, (int[]){64}, 1);
 
     /* FC: 3136→128→10 */
-    m->fc1 = linear_create(3136, 128);
-    m->fc2 = linear_create(128, 10);
+    m->fc1 = linear_create(params_pool, 3136, 128);
+    m->fc2 = linear_create(params_pool, 128, 10);
 
     return m;
 }
 
-tensor *mnist_model_forward_cnn(mnist_model_cnn *m, const tensor *x) {
+tensor *mnist_model_forward_cnn(struct mem_pool *scratch, mnist_model_cnn *m, const tensor *x) {
     /* x: (N, 784) → reshape to (N, 1, 28, 28) — contiguous view */
     int N = tensor_shape(x, 0);
-    tensor *h = tensor_reshape((tensor*)x, 4, (int[]){N, 1, 28, 28});
+    tensor *h = tensor_reshape(scratch, (tensor*)x, 4, (int[]){N, 1, 28, 28});
 
-    h = tensor_conv2d(h, m->conv1_w, m->conv1_b, 1, 1);
-    h = tensor_relu(h);
+    h = tensor_conv2d(scratch, h, m->conv1_w, m->conv1_b, 1, 1);
+    h = tensor_relu(scratch, h);
 
-    h = tensor_conv2d(h, m->conv2_w, m->conv2_b, 2, 1);
-    h = tensor_relu(h);
+    h = tensor_conv2d(scratch, h, m->conv2_w, m->conv2_b, 2, 1);
+    h = tensor_relu(scratch, h);
 
-    h = tensor_conv2d(h, m->conv3_w, m->conv3_b, 2, 1);
-    h = tensor_relu(h);
+    h = tensor_conv2d(scratch, h, m->conv3_w, m->conv3_b, 2, 1);
+    h = tensor_relu(scratch, h);
 
-    h = tensor_reshape(h, 2, (int[]){N, -1});  /* (N, 3136) */
-    h = linear_forward(m->fc1, h);
-    h = tensor_relu(h);
-    h = tensor_dropout(h, 0.5f);
-    h = linear_forward(m->fc2, h);
+    h = tensor_reshape(scratch, h, 2, (int[]){N, -1});  /* (N, 3136) */
+    h = linear_forward(scratch, m->fc1, h);
+    h = tensor_relu(scratch, h);
+    h = tensor_dropout(scratch, h, 0.5f);
+    h = linear_forward(scratch, m->fc2, h);
     return h;
 }
 
 /* ── CNN model (pool variant: stride-1 convs + avg_pool2d for full Winograd) ── */
 
-mnist_model_cnn_pool *mnist_model_create_cnn_pool(void) {
-    mnist_model_cnn_pool *m = mem_params_alloc(sizeof(mnist_model_cnn_pool), NULL);
+mnist_model_cnn_pool *mnist_model_create_cnn_pool(struct mem_pool *params_pool) {
+    mnist_model_cnn_pool *m = _mem_pool_alloc(params_pool, sizeof(mnist_model_cnn_pool), NULL);
 
     float b1 = kaiming_bound(1, 3, 3);
-    m->conv1_w = tensor_uniform(4, (int[]){32, 1, 3, 3}, 1, b1);
-    m->conv1_b = tensor_zeros(1, (int[]){32}, 1);
+    m->conv1_w = tensor_uniform(params_pool, 4, (int[]){32, 1, 3, 3}, 1, b1);
+    m->conv1_b = tensor_zeros(params_pool, 1, (int[]){32}, 1);
 
     float b2 = kaiming_bound(32, 3, 3);
-    m->conv2_w = tensor_uniform(4, (int[]){64, 32, 3, 3}, 1, b2);
-    m->conv2_b = tensor_zeros(1, (int[]){64}, 1);
+    m->conv2_w = tensor_uniform(params_pool, 4, (int[]){64, 32, 3, 3}, 1, b2);
+    m->conv2_b = tensor_zeros(params_pool, 1, (int[]){64}, 1);
 
     float b3 = kaiming_bound(64, 3, 3);
-    m->conv3_w = tensor_uniform(4, (int[]){64, 64, 3, 3}, 1, b3);
-    m->conv3_b = tensor_zeros(1, (int[]){64}, 1);
+    m->conv3_w = tensor_uniform(params_pool, 4, (int[]){64, 64, 3, 3}, 1, b3);
+    m->conv3_b = tensor_zeros(params_pool, 1, (int[]){64}, 1);
 
-    m->fc1 = linear_create(3136, 128);
-    m->fc2 = linear_create(128, 10);
+    m->fc1 = linear_create(params_pool, 3136, 128);
+    m->fc2 = linear_create(params_pool, 128, 10);
 
     return m;
 }
 
-tensor *mnist_model_forward_cnn_pool(mnist_model_cnn_pool *m, const tensor *x) {
+tensor *mnist_model_forward_cnn_pool(struct mem_pool *scratch, mnist_model_cnn_pool *m, const tensor *x) {
     int N = tensor_shape(x, 0);
-    tensor *h = tensor_reshape((tensor*)x, 4, (int[]){N, 1, 28, 28});
+    tensor *h = tensor_reshape(scratch, (tensor*)x, 4, (int[]){N, 1, 28, 28});
 
-    h = tensor_conv2d(h, m->conv1_w, m->conv1_b, 1, 1);  /* Winograd: 28×28 */
-    h = tensor_relu(h);
+    h = tensor_conv2d(scratch, h, m->conv1_w, m->conv1_b, 1, 1);  /* Winograd: 28×28 */
+    h = tensor_relu(scratch, h);
 
-    h = tensor_conv2d(h, m->conv2_w, m->conv2_b, 1, 1);  /* Winograd: 28×28 */
-    h = tensor_relu(h);
-    h = tensor_avg_pool2d(h, 2, 2);                       /* 14×14 */
+    h = tensor_conv2d(scratch, h, m->conv2_w, m->conv2_b, 1, 1);  /* Winograd: 28×28 */
+    h = tensor_relu(scratch, h);
+    h = tensor_avg_pool2d(scratch, h, 2, 2);                       /* 14×14 */
 
-    h = tensor_conv2d(h, m->conv3_w, m->conv3_b, 1, 1);  /* Winograd: 14×14 */
-    h = tensor_relu(h);
-    h = tensor_avg_pool2d(h, 2, 2);                       /* 7×7 */
+    h = tensor_conv2d(scratch, h, m->conv3_w, m->conv3_b, 1, 1);  /* Winograd: 14×14 */
+    h = tensor_relu(scratch, h);
+    h = tensor_avg_pool2d(scratch, h, 2, 2);                       /* 7×7 */
 
-    h = tensor_reshape(h, 2, (int[]){N, -1});  /* (N, 3136) */
-    h = linear_forward(m->fc1, h);
-    h = tensor_relu(h);
-    h = tensor_dropout(h, 0.5f);
-    h = linear_forward(m->fc2, h);
+    h = tensor_reshape(scratch, h, 2, (int[]){N, -1});  /* (N, 3136) */
+    h = linear_forward(scratch, m->fc1, h);
+    h = tensor_relu(scratch, h);
+    h = tensor_dropout(scratch, h, 0.5f);
+    h = linear_forward(scratch, m->fc2, h);
     return h;
 }
 
@@ -264,9 +269,10 @@ tensor *mnist_model_forward_cnn_pool(mnist_model_cnn_pool *m, const tensor *x) {
  *  Training (generic backend, shared by MLP and CNN wrappers)
  * ================================================================ */
 
-typedef tensor *(*forward_fn_t)(void *, const tensor *);
+typedef tensor *(*forward_fn_t)(struct mem_pool *, void *, const tensor *);
 
 static void mnist_train_impl(
+    struct mem_pool *params_pool, struct mem_pool *scratch, struct mem_pool *data,
     tensor *train_images, tensor *train_labels,
     int epochs, int batch_size, float lr,
     int val_n, int patience,
@@ -277,7 +283,7 @@ static void mnist_train_impl(
     int n_batches  = (tr_n + batch_size - 1) / batch_size;
     int use_val    = val_n > 0;
 
-    adamw_opt *opt = adamw_create(params, n_params, lr,
+    adamw_opt *opt = adamw_create(params_pool, params, n_params, lr,
                                   0.9f, 0.999f, 1e-8f, 0.01f);
 
     /* early-stopping state */
@@ -321,8 +327,8 @@ static void mnist_train_impl(
             int bs    = (b == n_batches - 1) ? tr_n - start : batch_size;
 
             /* ── build batch tensors in scratch pool ── */
-            tensor *bx = _tensor_scratch_create(2, (int[]){bs, MNIST_PIXELS}, 0);
-            tensor *by = _tensor_scratch_create(1, (int[]){bs}, 0);
+            tensor *bx = tensor_scratch(scratch, 2, (int[]){bs, MNIST_PIXELS}, 0);
+            tensor *by = tensor_scratch(scratch, 1, (int[]){bs}, 0);
 
             float *xd = (float *)bx->data;
             int   *yd = (int   *)by->data;
@@ -336,11 +342,11 @@ static void mnist_train_impl(
             }
 
             /* ── forward ── */
-            tensor *logits = forward_fn(model, bx);
-            tensor *loss   = tensor_cross_entropy(logits, by, 1);
+            tensor *logits = forward_fn(scratch, model, bx);
+            tensor *loss   = tensor_cross_entropy(scratch, logits, by, 1);
 
             /* ── backward ── */
-            dnn_backward(loss);
+            dnn_backward(scratch, loss);
 
             float loss_val = ((float *)loss->data)[0];
             epoch_loss    += loss_val;
@@ -350,7 +356,7 @@ static void mnist_train_impl(
             adamw_zero_grad(opt);
 
             /* ── free scratch ── */
-            mem_pool_reset(_mem_pool_scratch());
+            mem_pool_reset(scratch);
 
             if (b > 0 && b % 100 == 0)
                 printf("    batch %4d/%d  loss %.6f\r", b, n_batches, loss_val);
@@ -375,15 +381,15 @@ static void mnist_train_impl(
             for (int s = tr_n; s < N; s += vbatch) {
                 int bs = (s + vbatch > N) ? N - s : vbatch;
 
-                tensor *bx = _tensor_scratch_create(2, (int[]){bs, MNIST_PIXELS}, 0);
-                tensor *by = _tensor_scratch_create(1, (int[]){bs}, 0);
+                tensor *bx = tensor_scratch(scratch, 2, (int[]){bs, MNIST_PIXELS}, 0);
+                tensor *by = tensor_scratch(scratch, 1, (int[]){bs}, 0);
 
                 memcpy(bx->data, img_data + (size_t)s * MNIST_PIXELS,
                        (size_t)bs * MNIST_PIXELS * sizeof(float));
                 memcpy(by->data, lbl_data + s,
                        (size_t)bs * sizeof(int));
 
-                tensor *logits = forward_fn(model, bx);
+                tensor *logits = forward_fn(scratch, model, bx);
                 float *ld = (float *)logits->data;
                 int   *yd = (int   *)by->data;
 
@@ -399,7 +405,7 @@ static void mnist_train_impl(
                     if (pred == yd[i]) correct++;
                 }
 
-                mem_pool_reset(_mem_pool_scratch());
+                mem_pool_reset(scratch);
             }
             dnn_no_grad_exit(ctx);
 
@@ -438,7 +444,7 @@ static void mnist_train_impl(
 
 /* ── MLP training wrapper ── */
 
-void mnist_train(mnist_model *m,
+void mnist_train(struct dnn_ctx *ctx, mnist_model *m,
                  tensor *train_images, tensor *train_labels,
                  int epochs, int batch_size, float lr,
                  int val_n, int patience) {
@@ -446,7 +452,7 @@ void mnist_train(mnist_model *m,
         m->fc1->weight, m->fc1->bias,
         m->fc2->weight, m->fc2->bias,
     };
-    mnist_train_impl(train_images, train_labels,
+    mnist_train_impl(ctx->params, ctx->scratch, ctx->data, train_images, train_labels,
                      epochs, batch_size, lr, val_n, patience,
                      params, 4, m,
                      (forward_fn_t)mnist_model_forward);
@@ -454,7 +460,7 @@ void mnist_train(mnist_model *m,
 
 /* ── CNN training wrapper ── */
 
-void mnist_train_cnn(mnist_model_cnn *m,
+void mnist_train_cnn(struct dnn_ctx *ctx, mnist_model_cnn *m,
                      tensor *train_images, tensor *train_labels,
                      int epochs, int batch_size, float lr,
                      int val_n, int patience) {
@@ -465,7 +471,7 @@ void mnist_train_cnn(mnist_model_cnn *m,
         m->fc1->weight, m->fc1->bias,
         m->fc2->weight, m->fc2->bias,
     };
-    mnist_train_impl(train_images, train_labels,
+    mnist_train_impl(ctx->params, ctx->scratch, ctx->data, train_images, train_labels,
                      epochs, batch_size, lr, val_n, patience,
                      params, 10, m,
                      (forward_fn_t)mnist_model_forward_cnn);
@@ -473,7 +479,7 @@ void mnist_train_cnn(mnist_model_cnn *m,
 
 /* ── CNN (pool variant) training wrapper ── */
 
-void mnist_train_cnn_pool(mnist_model_cnn_pool *m,
+void mnist_train_cnn_pool(struct dnn_ctx *ctx, mnist_model_cnn_pool *m,
                           tensor *train_images, tensor *train_labels,
                           int epochs, int batch_size, float lr,
                           int val_n, int patience) {
@@ -484,7 +490,7 @@ void mnist_train_cnn_pool(mnist_model_cnn_pool *m,
         m->fc1->weight, m->fc1->bias,
         m->fc2->weight, m->fc2->bias,
     };
-    mnist_train_impl(train_images, train_labels,
+    mnist_train_impl(ctx->params, ctx->scratch, ctx->data, train_images, train_labels,
                      epochs, batch_size, lr, val_n, patience,
                      params, 10, m,
                      (forward_fn_t)mnist_model_forward_cnn_pool);
@@ -494,8 +500,8 @@ void mnist_train_cnn_pool(mnist_model_cnn_pool *m,
  *  Evaluation
  * ================================================================ */
 
-float mnist_eval_generic(void *model,
-                          tensor *(*forward_fn)(void *, const tensor *),
+float mnist_eval_generic(struct mem_pool *scratch, void *model,
+                          tensor *(*forward_fn)(struct mem_pool *, void *, const tensor *),
                           tensor *images, tensor *labels) {
     int N = tensor_shape(images, 0);
 
@@ -511,8 +517,8 @@ float mnist_eval_generic(void *model,
         int bs = (start + batch_size > N) ? N - start : batch_size;
 
         /* slice batch */
-        tensor *bx = tensor_slice(images, 0, start, bs);
-        tensor *logits = forward_fn(model, bx);
+        tensor *bx = tensor_slice(scratch, images, 0, start, bs);
+        tensor *logits = forward_fn(scratch, model, bx);
         /* logits shape: [bs, 10] */
 
         float *ld = (float *)logits->data;
@@ -532,7 +538,7 @@ float mnist_eval_generic(void *model,
         }
 
         /* reset scratch for next batch (invalidates bx, logits) */
-        mem_pool_reset(_mem_pool_scratch());
+        mem_pool_reset(scratch);
     }
 
     dnn_no_grad_exit(ctx);

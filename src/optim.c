@@ -5,18 +5,18 @@
 #include <string.h>
 #include <math.h>
 
-sgd_opt *sgd_create(tensor **params, int n_params, float lr, float momentum) {
-    sgd_opt *opt = mem_params_alloc(sizeof(sgd_opt), NULL);
+sgd_opt *sgd_create(struct mem_pool *params_pool, tensor **params, int n_params, float lr, float momentum) {
+    sgd_opt *opt = _mem_pool_alloc(params_pool, sizeof(sgd_opt), NULL);
     opt->params   = params;
     opt->n_params = n_params;
     opt->lr       = lr;
     opt->momentum = momentum;
 
     /* allocate velocity buffers (one per param, same shape, zero-initialized) */
-    opt->velocities = mem_params_alloc(n_params * sizeof(tensor*), NULL);
+    opt->velocities = _mem_pool_alloc(params_pool, n_params * sizeof(tensor*), NULL);
     for (int i = 0; i < n_params; i++) {
         tensor *p = params[i];
-        tensor *v = tensor_zeros(p->ndim, p->shape, 0);
+        tensor *v = tensor_zeros(params_pool, p->ndim, p->shape, 0);
         opt->velocities[i] = v;
     }
 
@@ -65,9 +65,9 @@ void sgd_step(sgd_opt *opt) {
 
 /* ── AdamW ── */
 
-adamw_opt *adamw_create(tensor **params, int n_params, float lr,
+adamw_opt *adamw_create(struct mem_pool *params_pool, tensor **params, int n_params, float lr,
                          float beta1, float beta2, float eps, float weight_decay) {
-    adamw_opt *opt = mem_params_alloc(sizeof(adamw_opt), NULL);
+    adamw_opt *opt = _mem_pool_alloc(params_pool, sizeof(adamw_opt), NULL);
     opt->params   = params;
     opt->n_params = n_params;
     opt->lr       = lr;
@@ -76,13 +76,13 @@ adamw_opt *adamw_create(tensor **params, int n_params, float lr,
     opt->eps      = eps;
     opt->weight_decay = weight_decay;
     opt->t        = 0;
-    opt->m        = mem_params_alloc(n_params * sizeof(tensor*), NULL);
-    opt->v        = mem_params_alloc(n_params * sizeof(tensor*), NULL);
+    opt->m        = _mem_pool_alloc(params_pool, n_params * sizeof(tensor*), NULL);
+    opt->v        = _mem_pool_alloc(params_pool, n_params * sizeof(tensor*), NULL);
 
     for (int i = 0; i < n_params; i++) {
         tensor *p = params[i];
-        opt->m[i] = tensor_zeros(p->ndim, p->shape, 0);
-        opt->v[i] = tensor_zeros(p->ndim, p->shape, 0);
+        opt->m[i] = tensor_zeros(params_pool, p->ndim, p->shape, 0);
+        opt->v[i] = tensor_zeros(params_pool, p->ndim, p->shape, 0);
     }
     return opt;
 }
@@ -146,12 +146,12 @@ static float _lr_compute(const lr_scheduler *sched, int t) {
     }
 }
 
-lr_scheduler *lr_scheduler_create(adamw_opt *opt, int schedule,
+lr_scheduler *lr_scheduler_create(struct mem_pool *params_pool, adamw_opt *opt, int schedule,
                                    float base_lr,
                                    int warmup_iters, int total_iters,
                                    float min_lr,
                                    int step_size, float gamma) {
-    lr_scheduler *sched = mem_params_alloc(sizeof(lr_scheduler), NULL);
+    lr_scheduler *sched = _mem_pool_alloc(params_pool, sizeof(lr_scheduler), NULL);
     sched->opt          = opt;
     sched->schedule     = schedule;
     sched->base_lr      = base_lr;

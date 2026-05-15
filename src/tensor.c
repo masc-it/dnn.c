@@ -38,8 +38,8 @@ static void copy_strided_rec(const tensor *src, int dim, int src_off, float *dst
     }
 }
 
-static tensor *tensor_copy_strided(const tensor *t) {
-    tensor *out = _tensor_scratch_create(t->ndim, t->shape, t->requires_grad);
+static tensor *tensor_copy_strided(struct mem_pool *scratch, const tensor *t) {
+    tensor *out = tensor_scratch(scratch, t->ndim, t->shape, t->requires_grad);
     int dst_off = 0;
     copy_strided_rec(t, 0, t->offset, (float*)out->data, &dst_off);
     return out;
@@ -57,8 +57,8 @@ static int strides_contiguous(const int *shape, const int *strides, int ndim) {
     return 1;
 }
 
-static tensor *tensor_create_pool(int ndim, const int *shape, mem_pool *pool, int requires_grad) {
-    assert(pool && "tensor_create_pool: default pool not set");
+static tensor *tensor_create_pool(int ndim, const int *shape, struct mem_pool *pool, int requires_grad) {
+    assert(pool && "tensor_create_pool: pool is NULL");
     tensor *t = _mem_pool_alloc(pool, sizeof(tensor), NULL);
     t->ndim = ndim;
     memcpy(t->shape, shape, ndim * sizeof(int));
@@ -67,13 +67,16 @@ static tensor *tensor_create_pool(int ndim, const int *shape, mem_pool *pool, in
     t->data = _mem_pool_alloc(pool, n * sizeof(float), NULL);
     t->pool = pool;
     t->requires_grad = requires_grad ? 1 : 0;
-    t->contiguous = 1;  /* default_strides always produces packed layout */
+    t->contiguous = 1;
+    t->offset = 0;
+    t->parent = NULL;
+    t->grad_fn = NULL;
+    t->grad = NULL;
     return t;
 }
 
-tensor *_tensor_scratch_create(int ndim, const int *shape, int requires_grad) {
-    mem_pool *pool = _mem_pool_scratch();
-    assert(pool && "_tensor_scratch_create: scratch pool not set");
+tensor *tensor_scratch(struct mem_pool *pool, int ndim, const int *shape, int requires_grad) {
+    assert(pool && "tensor_scratch: pool is NULL");
     tensor *t = _mem_pool_alloc(pool, sizeof(tensor), NULL);
     t->ndim = ndim;
     memcpy(t->shape, shape, ndim * sizeof(int));
@@ -83,23 +86,6 @@ tensor *_tensor_scratch_create(int ndim, const int *shape, int requires_grad) {
     t->pool = pool;
     t->requires_grad = requires_grad ? 1 : 0;
     t->contiguous = 1;
-    return t;
-}
-
-tensor *tensor_zeros(int ndim, const int *shape, int requires_grad) {
-    return tensor_create_pool(ndim, shape, _mem_pool_params(), requires_grad);
-}
-
-tensor *tensor_scratch(mem_pool *pool, int ndim, const int *shape) {
-    tensor *t = _mem_pool_alloc(pool, sizeof(tensor), NULL);
-    t->ndim = ndim;
-    memcpy(t->shape, shape, ndim * sizeof(int));
-    default_strides(ndim, shape, t->strides);
-    int n = tensor_numel_(shape, ndim);
-    t->data = _mem_pool_alloc_nz(pool, (size_t)n * sizeof(float));
-    t->pool = pool;
-    t->requires_grad = 0;
-    t->contiguous = 1;
     t->offset = 0;
     t->parent = NULL;
     t->grad_fn = NULL;
@@ -107,12 +93,16 @@ tensor *tensor_scratch(mem_pool *pool, int ndim, const int *shape) {
     return t;
 }
 
-tensor *tensor_zeros_data(int ndim, const int *shape) {
-    return tensor_create_pool(ndim, shape, _mem_pool_data(), 0);
+tensor *tensor_zeros(struct mem_pool *pool, int ndim, const int *shape, int requires_grad) {
+    return tensor_create_pool(ndim, shape, pool, requires_grad);
 }
 
-tensor *tensor_randn(int ndim, const int *shape, int requires_grad) {
-    tensor *t = tensor_create_pool(ndim, shape, _mem_pool_params(), requires_grad);
+tensor *tensor_zeros_data(struct mem_pool *pool, int ndim, const int *shape) {
+    return tensor_create_pool(ndim, shape, pool, 0);
+}
+
+tensor *tensor_randn(struct mem_pool *pool, int ndim, const int *shape, int requires_grad) {
+    tensor *t = tensor_create_pool(ndim, shape, pool, requires_grad);
     int n = tensor_numel_(shape, ndim);
     float *p = (float*)t->data;
     for (int i = 0; i < n; i += 2) {
@@ -127,8 +117,8 @@ tensor *tensor_randn(int ndim, const int *shape, int requires_grad) {
     return t;
 }
 
-tensor *tensor_uniform(int ndim, const int *shape, int requires_grad, float bound) {
-    tensor *t = tensor_create_pool(ndim, shape, _mem_pool_params(), requires_grad);
+tensor *tensor_uniform(struct mem_pool *pool, int ndim, const int *shape, int requires_grad, float bound) {
+    tensor *t = tensor_create_pool(ndim, shape, pool, requires_grad);
     int n = tensor_numel_(shape, ndim);
     float *p = (float*)t->data;
     for (int i = 0; i < n; i++) {
@@ -138,15 +128,7 @@ tensor *tensor_uniform(int ndim, const int *shape, int requires_grad, float boun
     return t;
 }
 
-/* ── slice_backward ──
- *
- * Gradient for slice operation: scatter-add grad_output values back
- * into the parent tensor's gradient buffer at the correct positions.
- *
- * For each element at coordinate (d0, ..., d_{ndim-1}) in the slice,
- * the parent coordinate is (d0, ..., start+d_dim, ..., d_{ndim-1}).
- * We walk every element and scatter.
- */
+/* ── slice_backward ── */
 
 static void slice_backward(grad_fn *fn, tensor *grad_output) {
     tensor *parent = fn->inputs[0];
@@ -162,14 +144,12 @@ static void slice_backward(grad_fn *fn, tensor *grad_output) {
 
     int coord[DNN_MAX_DIMS];
     for (int flat = 0; flat < total; flat++) {
-        /* Decompose flat index into coordinates in slice space */
         int rem = flat;
         for (int d = grad_output->ndim - 1; d >= 0; d--) {
             coord[d] = rem % grad_output->shape[d];
             rem /= grad_output->shape[d];
         }
 
-        /* Map to parent offset */
         int p_off = parent->offset;
         for (int d = 0; d < parent->ndim; d++) {
             int c = coord[d];
@@ -177,7 +157,6 @@ static void slice_backward(grad_fn *fn, tensor *grad_output) {
             p_off += c * parent->strides[d];
         }
 
-        /* Compute grad_output offset */
         int g_off = grad_output->offset;
         for (int d = 0; d < grad_output->ndim; d++)
             g_off += coord[d] * grad_output->strides[d];
@@ -186,17 +165,7 @@ static void slice_backward(grad_fn *fn, tensor *grad_output) {
     }
 }
 
-/* ── reshape_backward ──
- *
- * Reshape is a view-only operation (same data buffer, new shape/strides).
- * The gradient flows directly: since the view shares the parent's data,
- * we accumulate grad_output into the parent's grad buffer at the
- * corresponding flat positions.
- *
- * For contiguous parent + contiguous output, they share the same
- * buffer layout, so we just add element-by-element.
- * For non-contiguous, we walk coordinates.
- */
+/* ── reshape_backward ── */
 
 static void reshape_backward(grad_fn *fn, tensor *grad_output) {
     tensor *parent = fn->inputs[0];
@@ -209,13 +178,11 @@ static void reshape_backward(grad_fn *fn, tensor *grad_output) {
     int total = tensor_numel(grad_output);
 
     if (grad_output->contiguous && parent->contiguous) {
-        /* Both contiguous: same flat layout, direct element-wise add */
         int poff = parent->offset;
         int goff = grad_output->offset;
         for (int i = 0; i < total; i++)
             pg[poff + i] += gd[goff + i];
     } else {
-        /* Strided fallback: walk grad_output coordinates, map to parent */
         int p_coord[DNN_MAX_DIMS];
         for (int flat = 0; flat < total; flat++) {
             int rem = flat;
@@ -226,13 +193,6 @@ static void reshape_backward(grad_fn *fn, tensor *grad_output) {
             int g_off = grad_output->offset;
             int p_off = parent->offset;
             for (int d = 0; d < parent->ndim; d++) {
-                /* For reshape, the logical coordinate in the output
-                 * maps to the same flat index in the parent.
-                 * But with different shapes, we need to compute the
-                 * parent flat index from the output's logical coord
-                 * using the parent's strides.
-                 * Since reshape doesn't change the data layout (when
-                 * contiguous), the flat index is the same. */
                 g_off += p_coord[d] * grad_output->strides[d];
                 p_off += p_coord[d] * parent->strides[d];
             }
@@ -241,9 +201,9 @@ static void reshape_backward(grad_fn *fn, tensor *grad_output) {
     }
 }
 
-tensor *tensor_slice(tensor *t, int dim, int start, int len) {
+tensor *tensor_slice(struct mem_pool *scratch, tensor *t, int dim, int start, int len) {
     assert(dim < t->ndim && start >= 0 && start + len <= t->shape[dim]);
-    tensor *v = mem_scratch_alloc(sizeof(tensor), t);
+    tensor *v = _mem_pool_alloc(scratch, sizeof(tensor), t);
     v->shape[dim] = len;
     v->offset = t->offset + start * t->strides[dim];
     v->parent = t;
@@ -254,15 +214,15 @@ tensor *tensor_slice(tensor *t, int dim, int start, int len) {
 
     /* ── Autograd ── */
     if (dnn_grad_enabled() && tensor_requires_grad(t)) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = slice_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = t;
         fn->n_saved = 2;
-        fn->saved_tensors = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
-        int *saved_dim   = mem_scratch_alloc(sizeof(int), NULL);
-        int *saved_start = mem_scratch_alloc(sizeof(int), NULL);
+        fn->saved_tensors = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
+        int *saved_dim   = _mem_pool_alloc(scratch, sizeof(int), NULL);
+        int *saved_start = _mem_pool_alloc(scratch, sizeof(int), NULL);
         *saved_dim   = dim;
         *saved_start = start;
         fn->saved_tensors[0] = (tensor*)saved_dim;
@@ -274,9 +234,9 @@ tensor *tensor_slice(tensor *t, int dim, int start, int len) {
     return v;
 }
 
-tensor *tensor_transpose(tensor *t, int d1, int d2) {
+tensor *tensor_transpose(struct mem_pool *scratch, tensor *t, int d1, int d2) {
     assert(d1 < t->ndim && d2 < t->ndim);
-    tensor *v = mem_scratch_alloc(sizeof(tensor), t);
+    tensor *v = _mem_pool_alloc(scratch, sizeof(tensor), t);
     v->shape[d1] = t->shape[d2]; v->shape[d2] = t->shape[d1];
     v->strides[d1] = t->strides[d2]; v->strides[d2] = t->strides[d1];
     v->parent = t;
@@ -287,9 +247,8 @@ tensor *tensor_transpose(tensor *t, int d1, int d2) {
     return v;
 }
 
-tensor *tensor_reshape(tensor *t, int ndim, const int *shape) {
+tensor *tensor_reshape(struct mem_pool *scratch, tensor *t, int ndim, const int *shape) {
     assert(ndim <= DNN_MAX_DIMS && "ndim exceeds DNN_MAX_DIMS");
-    /* resolve -1: infer the missing dimension */
     int resolved[DNN_MAX_DIMS];
     int inferred = -1;
     int product  = 1;
@@ -314,43 +273,39 @@ tensor *tensor_reshape(tensor *t, int ndim, const int *shape) {
     }
 
     if (tensor_is_contiguous(t)) {
-        /* view: keep parent, override shape/strides */
-        tensor *v = mem_scratch_alloc(sizeof(tensor), t);
+        tensor *v = _mem_pool_alloc(scratch, sizeof(tensor), t);
         v->ndim = ndim;
         memcpy(v->shape, shape, ndim * sizeof(int));
         default_strides(ndim, shape, v->strides);
         v->offset = t->offset;
         v->parent = t;
-        v->contiguous = 1;  /* default_strides always packed */
+        v->contiguous = 1;
         v->grad_fn = NULL;
         v->grad = NULL;
         v->pool = NULL;
 
-        /* ── Autograd ── */
         if (dnn_grad_enabled() && tensor_requires_grad(t)) {
-            grad_fn *fn = _grad_fn_create();
+            grad_fn *fn = _grad_fn_create(scratch);
             fn->backward = reshape_backward;
             fn->n_inputs = 1;
-            fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+            fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
             fn->inputs[0] = t;
             fn->n_saved = 0;
             v->requires_grad = 1;
             v->grad_fn = fn;
         }
-
         return v;
     }
-    /* non-contiguous: copy to new contiguous tensor with new shape */
-    return tensor_reshape(tensor_copy_strided(t), ndim, shape);
+    return tensor_reshape(scratch, tensor_copy_strided(scratch, t), ndim, shape);
 }
 
-tensor *tensor_contiguous(tensor *t) {
+tensor *tensor_contiguous(struct mem_pool *scratch, tensor *t) {
     if (tensor_is_contiguous(t)) return t;
-    return tensor_copy_strided(t);
+    return tensor_copy_strided(scratch, t);
 }
 
-tensor *tensor_flatten(tensor *t) {
-    return tensor_reshape(t, 1, (int[]){-1});
+tensor *tensor_flatten(struct mem_pool *scratch, tensor *t) {
+    return tensor_reshape(scratch, t, 1, (int[]){-1});
 }
 
 /* ── Accessors ── */
@@ -380,7 +335,9 @@ int tensor_is_leaf(const tensor *t) {
 
 void tensor_retain_grad(tensor *t) {
     if (!t->grad) {
-        t->grad = mem_params_alloc(tensor_numel(t) * sizeof(float), NULL);
+        tensor *base = t;
+        while (base->parent) base = base->parent;
+        t->grad = _mem_pool_alloc(base->pool, tensor_numel(t) * sizeof(float), NULL);
     }
 }
 
@@ -403,7 +360,6 @@ int tensor_requires_grad(const tensor *t) {
 
 void tensor_set_requires_grad(tensor *t, int req) {
     t->requires_grad = req ? 1 : 0;
-    /* grad buffer NOT allocated here — allocated lazily in backward */
 }
 
 void tensor_print(const tensor *t) {

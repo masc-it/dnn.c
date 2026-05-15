@@ -16,7 +16,7 @@
  * Autograd wired — backward flows gradients through the inverse layout transform.
  */
 
-tensor *tensor_split_heads(tensor *t, int H);
-tensor *tensor_merge_heads(tensor *t);
+tensor *tensor_split_heads(struct mem_pool *scratch, tensor *t, int H);
+tensor *tensor_merge_heads(struct mem_pool *scratch, tensor *t);
 
 #endif /* DNN_MULTIHEAD_H */

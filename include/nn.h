@@ -17,8 +17,8 @@ typedef struct linear {
     int     out_features;
 } linear;
 
-linear  *linear_create(int in_features, int out_features);
-tensor  *linear_forward(linear *l, const tensor *input);
+linear  *linear_create(struct mem_pool *params, int in_features, int out_features);
+tensor  *linear_forward(struct mem_pool *scratch, linear *l, const tensor *input);
 
 /* ── SwiGLU FFN block ──
  *
@@ -38,8 +38,8 @@ typedef struct swiglu_ffn {
     int     intermediate_size;
 } swiglu_ffn;
 
-swiglu_ffn *swiglu_ffn_create(int d_model, int intermediate_size);
-tensor     *swiglu_ffn_forward(swiglu_ffn *ffn, const tensor *x);
+swiglu_ffn *swiglu_ffn_create(struct mem_pool *params_pool, int d_model, int intermediate_size);
+tensor     *swiglu_ffn_forward(struct mem_pool *scratch, swiglu_ffn *ffn, const tensor *x);
 
 /* ── Parameter count helpers ── */
 long long linear_num_parameters(linear *l);

@@ -2,6 +2,7 @@
 #include "pool.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include <assert.h>
 
 
@@ -25,8 +26,10 @@ void dnn_no_grad_exit(dnn_grad_ctx ctx) {
 
 /* ── grad_fn lifecycle ── */
 
-grad_fn *_grad_fn_create(void) {
-    return mem_scratch_alloc(sizeof(grad_fn), NULL);
+grad_fn *_grad_fn_create(struct mem_pool *pool) {
+    grad_fn *fn = _mem_pool_alloc(pool, sizeof(grad_fn), NULL);
+    fn->pool = pool;
+    return fn;
 }
 
 /* ── Gradient buffer management ── */
@@ -34,13 +37,15 @@ grad_fn *_grad_fn_create(void) {
 float *_grad_ensure(tensor *t) {
     tensor *base = t;
     while (base->parent) base = base->parent;
+    if (!base->pool) {
+        fprintf(stderr, "_grad_ensure: tensor %p has NULL pool (ndim=%d, shape=", (void*)base, base->ndim);
+        for (int i = 0; i < base->ndim; i++) fprintf(stderr, "%s%d", i?",":"", base->shape[i]);
+        fprintf(stderr, ", requires_grad=%d, grad_fn=%p)\n", base->requires_grad, (void*)base->grad_fn);
+        assert(base->pool && "_grad_ensure: tensor has NULL pool");
+    }
     if (!base->grad) {
         int n = tensor_numel(base);
-        /* leaf params: persistent grads.  intermediates: ephemeral, reclaimed on scratch reset */
-        if (base->requires_grad && !base->grad_fn)
-            base->grad = mem_params_alloc(n * sizeof(float), NULL);
-        else
-            base->grad = mem_scratch_alloc(n * sizeof(float), NULL);
+        base->grad = _mem_pool_alloc(base->pool, n * sizeof(float), NULL);
     }
     return base->grad;
 }
@@ -52,9 +57,7 @@ static int _in_list(tensor *t, tensor **list, int n) {
     return 0;
 }
 
-/* Count reachable grad_fn nodes via DFS. Uses scratch-allocated seen array.
- * Parent-chain tensors are NOT prematurely added to seen — the recursive
- * _count_reachable call adds them naturally. */
+/* Count reachable grad_fn nodes via DFS. Uses scratch-allocated seen array. */
 static int _count_reachable(tensor *t, tensor **seen, int *n_seen) {
     if (!t->grad_fn) return 0;
     if (_in_list(t, seen, *n_seen)) return 0;
@@ -73,10 +76,6 @@ static int _count_reachable(tensor *t, tensor **seen, int *n_seen) {
     return count;
 }
 
-/* Fill pre-allocated topo array via DFS. seen array prevents duplicates.
- * Parent-chain tensors are NOT prematurely added to seen — the recursive
- * _build_topo_from call adds them naturally, matching original realloc-based
- * traversal order. */
 static void _build_topo_from(tensor *t, tensor **topo, int *n,
                               tensor **seen, int *n_seen) {
     if (!t->grad_fn) return;
@@ -98,48 +97,39 @@ static void _build_topo_from(tensor *t, tensor **topo, int *n,
     topo[(*n)++] = t;
 }
 
-void dnn_backward(tensor *loss) {
+void dnn_backward(struct mem_pool *scratch, tensor *loss) {
     assert(loss);
 
-    /* First pass: count reachable grad_fn nodes.
-       Temp seen array from scratch — no heap alloc. */
-    tensor **tmp = mem_scratch_alloc(256 * sizeof(tensor*), NULL);
+    /* First pass: count reachable grad_fn nodes */
+    tensor **tmp = _mem_pool_alloc(scratch, 256 * sizeof(tensor*), NULL);
     int n_tmp = 0;
     int n_nodes = _count_reachable(loss, tmp, &n_tmp);
 
-    /* Allocate exact-size topo array from scratch pool */
-    tensor **topo = mem_scratch_alloc(n_nodes * sizeof(tensor*), NULL);
-
-    /* Second pass: fill topo order using fresh seen array */
-    tensor **seen = mem_scratch_alloc(256 * sizeof(tensor*), NULL);
+    tensor **topo = _mem_pool_alloc(scratch, n_nodes * sizeof(tensor*), NULL);
+    tensor **seen = _mem_pool_alloc(scratch, 256 * sizeof(tensor*), NULL);
     int n_seen = 0, n = 0;
     _build_topo_from(loss, topo, &n, seen, &n_seen);
     assert(n == n_nodes && "dnn_backward: topo count mismatch");
 
-    /* allocate and set loss gradient to all-ones (grad of sum(loss)) */
+    /* allocate and set loss gradient to all-ones */
     if (!loss->grad) {
-        if (loss->requires_grad && !loss->grad_fn)
-            loss->grad = mem_params_alloc(tensor_numel(loss) * sizeof(float), NULL);
-        else
-            loss->grad = mem_scratch_alloc(tensor_numel(loss) * sizeof(float), NULL);
+        loss->grad = _mem_pool_alloc(loss->pool, tensor_numel(loss) * sizeof(float), NULL);
     }
     int numel = tensor_numel(loss);
     for (int i = 0; i < numel; i++) loss->grad[i] = 1.0f;
 
-    /* reverse topological order: call each grad_fn with its output gradient */
+    /* reverse topological order */
     for (int i = n - 1; i >= 0; i--) {
         tensor *t = topo[i];
         grad_fn *fn = t->grad_fn;
         if (!fn) continue;
-        if (!t->grad) continue;  /* no gradient flowed to this node */
+        if (!t->grad) continue;
 
-        /* wrap t->grad in a minimal tensor so backward fn can read shape/strides */
         tensor gv;
         memset(&gv, 0, sizeof(gv));
         gv.data   = (void*)t->grad;
         gv.ndim   = t->ndim;
         memcpy(gv.shape, t->shape, t->ndim * sizeof(int));
-        /* contiguous strides so _flat_off reads grad elements in order */
         int stride = 1;
         for (int d = t->ndim - 1; d >= 0; d--) {
             gv.strides[d] = stride;
@@ -150,6 +140,4 @@ void dnn_backward(tensor *loss) {
 
         fn->backward(fn, &gv);
     }
-
-    /* No free — all allocations are from scratch pool, reclaimed on reset */
 }

@@ -61,7 +61,7 @@ static void embedding_backward(grad_fn *fn, tensor *grad_output) {
  *
  *   Returns a new tensor [N, d_model] from scratch pool.
  */
-tensor *tensor_embedding(const tensor *table, const tensor *ids) {
+tensor *tensor_embedding(struct mem_pool *scratch, const tensor *table, const tensor *ids) {
     assert(table && ids);
     assert(table->ndim == 2 && "embedding: table must be 2D");
     assert(ids->ndim == 1 && "embedding: ids must be 1D");
@@ -73,7 +73,7 @@ tensor *tensor_embedding(const tensor *table, const tensor *ids) {
     int   *id_data = (int*)ids->data;
     float *td      = (float*)table->data;
 
-    tensor *out = _tensor_scratch_create(2, (int[]){N, d_model}, 0);
+    tensor *out = tensor_scratch(scratch, 2, (int[]){N, d_model}, 0);
     float  *od  = (float*)out->data;
 
     /* forward: copy rows from table indexed by ids */
@@ -95,13 +95,13 @@ tensor *tensor_embedding(const tensor *table, const tensor *ids) {
 
     /* autograd tape */
     if (dnn_grad_enabled() && tensor_requires_grad(table)) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = embedding_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)table;
         fn->n_saved = 1;
-        fn->saved_tensors = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->saved_tensors = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->saved_tensors[0] = (tensor*)ids;
         out->requires_grad = 1;
         out->grad_fn = fn;

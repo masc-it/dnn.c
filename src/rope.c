@@ -90,7 +90,7 @@ static void rope_backward(grad_fn *fn, tensor *grad_output) {
 
 /* ── tensor_rope ── */
 
-tensor *tensor_rope(tensor *x, const tensor *freqs_cos, const tensor *freqs_sin) {
+tensor *tensor_rope(struct mem_pool *scratch, tensor *x, const tensor *freqs_cos, const tensor *freqs_sin) {
     assert(x);
     assert(freqs_cos && freqs_sin);
     assert(tensor_is_contiguous(x) && "tensor_rope: x must be contiguous");
@@ -117,23 +117,23 @@ tensor *tensor_rope(tensor *x, const tensor *freqs_cos, const tensor *freqs_sin)
 
     /* Create lightweight view tensor sharing x's data buffer.
      * Copied from x, but without a new data allocation. */
-    tensor *out = mem_scratch_alloc(sizeof(tensor), x);
+    tensor *out = _mem_pool_alloc(scratch, sizeof(tensor), x);
     out->data        = x->data;
     out->offset      = x->offset;
-    out->pool        = NULL;       /* not owner of data */
-    out->parent      = NULL;
+    out->pool        = x->pool;    /* inherit pool from input (for _grad_ensure) */
+    out->parent      = x;          /* view: parent chain for _grad_ensure */
     out->grad_fn     = NULL;
     out->grad        = NULL;
 
     /* Wire autograd */
     if (dnn_grad_enabled() && tensor_requires_grad(x)) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = rope_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = x;
         fn->n_saved = 2;
-        fn->saved_tensors = mem_scratch_alloc(2 * sizeof(tensor*), NULL);
+        fn->saved_tensors = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
         fn->saved_tensors[0] = (tensor*)freqs_cos;
         fn->saved_tensors[1] = (tensor*)freqs_sin;
         out->requires_grad = 1;
@@ -145,7 +145,7 @@ tensor *tensor_rope(tensor *x, const tensor *freqs_cos, const tensor *freqs_sin)
 
 /* ── tensor_rope_freqs_init ── */
 
-void tensor_rope_freqs_init(tensor **freqs_cos, tensor **freqs_sin,
+void tensor_rope_freqs_init(struct mem_pool *params, tensor **freqs_cos, tensor **freqs_sin,
                              int dim, int max_seq_len, float base) {
     assert(dim > 0 && dim % 2 == 0 && "dim must be positive and even");
     assert(max_seq_len > 0);
@@ -154,8 +154,8 @@ void tensor_rope_freqs_init(tensor **freqs_cos, tensor **freqs_sin,
     int d_half = dim / 2;
     int shape[2] = {max_seq_len, d_half};
 
-    *freqs_cos = tensor_zeros(2, shape, 0);
-    *freqs_sin = tensor_zeros(2, shape, 0);
+    *freqs_cos = tensor_zeros(params, 2, shape, 0);
+    *freqs_sin = tensor_zeros(params, 2, shape, 0);
 
     float *cos_data = (float*)(*freqs_cos)->data;
     float *sin_data = (float*)(*freqs_sin)->data;

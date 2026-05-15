@@ -67,8 +67,8 @@ static void attention_backward(grad_fn *fn, tensor *grad_output) {
     float *vg = need_v ? _grad_ensure(v) : NULL;
 
     /* Scratch buffers per batch-head iteration */
-    float *dS = mem_scratch_alloc((size_t)N * N * sizeof(float), NULL);
-    float *dP = mem_scratch_alloc((size_t)N * N * sizeof(float), NULL);
+    float *dS = _mem_pool_alloc(fn->pool, (size_t)N * N * sizeof(float), NULL);
+    float *dP = _mem_pool_alloc(fn->pool, (size_t)N * N * sizeof(float), NULL);
 
     (void)mask_present;  /* reserved for future mask-gradient path */
 
@@ -223,7 +223,7 @@ static void attention_backward(grad_fn *fn, tensor *grad_output) {
  *   Autograd wired: saves P (causal softmax output) and scale for backward.
  */
 
-tensor *tensor_attention(tensor *q, tensor *k, tensor *v, tensor *mask) {
+tensor *tensor_attention(struct mem_pool *scratch, tensor *q, tensor *k, tensor *v, tensor *mask) {
     assert(q && k && v);
     assert(q->ndim == 4 && k->ndim == 4 && v->ndim == 4);
     assert(tensor_is_contiguous(q) && tensor_is_contiguous(k) && tensor_is_contiguous(v));
@@ -235,11 +235,11 @@ tensor *tensor_attention(tensor *q, tensor *k, tensor *v, tensor *mask) {
     float scale = 1.0f / sqrtf((float)d);
 
     /* Output: [B, H, N, d] */
-    tensor *out = _tensor_scratch_create(4, (int[]){B, H, N, d}, 0);
+    tensor *out = tensor_scratch(scratch, 4, (int[]){B, H, N, d}, 0);
     float *od = (float*)out->data;
 
     /* Allocate P (causal softmax output) in scratch — saved for backward */
-    tensor *P = _tensor_scratch_create(4, (int[]){B, H, N, N}, 0);
+    tensor *P = tensor_scratch(scratch, 4, (int[]){B, H, N, N}, 0);
     float *Pd = (float*)P->data;
 
     float *qd = (float*)q->data;
@@ -247,7 +247,7 @@ tensor *tensor_attention(tensor *q, tensor *k, tensor *v, tensor *mask) {
     float *vd = (float*)v->data;
 
     /* Temp scores buffer: [N, N] reused per batch-head */
-    float *scores = mem_scratch_alloc((size_t)N * N * sizeof(float), NULL);
+    float *scores = _mem_pool_alloc(scratch, (size_t)N * N * sizeof(float), NULL);
 
     for (int b = 0; b < B; b++) {
         for (int h = 0; h < H; h++) {
@@ -382,24 +382,24 @@ tensor *tensor_attention(tensor *q, tensor *k, tensor *v, tensor *mask) {
     /* ── Autograd tape ── */
     if (dnn_grad_enabled() &&
         (tensor_requires_grad(q) || tensor_requires_grad(k) || tensor_requires_grad(v))) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = attention_backward;
         fn->n_inputs = mask ? 4 : 3;
-        fn->inputs = mem_scratch_alloc((mask ? 4 : 3) * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, (mask ? 4 : 3) * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)q;
         fn->inputs[1] = (tensor*)k;
         fn->inputs[2] = (tensor*)v;
         if (mask) fn->inputs[3] = (tensor*)mask;
 
         fn->n_saved = 3;
-        fn->saved_tensors = mem_scratch_alloc(3 * sizeof(tensor*), NULL);
+        fn->saved_tensors = _mem_pool_alloc(scratch, 3 * sizeof(tensor*), NULL);
         fn->saved_tensors[0] = P;
 
-        float *scale_saved = mem_scratch_alloc(sizeof(float), NULL);
+        float *scale_saved = _mem_pool_alloc(scratch, sizeof(float), NULL);
         *scale_saved = scale;
         fn->saved_tensors[1] = (tensor*)scale_saved;
 
-        int *mask_flag = mem_scratch_alloc(sizeof(int), NULL);
+        int *mask_flag = _mem_pool_alloc(scratch, sizeof(int), NULL);
         *mask_flag = (mask != NULL) ? 1 : 0;
         fn->saved_tensors[2] = (tensor*)mask_flag;
 

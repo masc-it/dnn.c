@@ -88,7 +88,7 @@ static int _match_special(tokenizer *tok, const char *text, int pos,
 
 /* ── Encode ── */
 
-int *tokenizer_encode(tokenizer *tok, const char *text, int *len) {
+int *tokenizer_encode(struct mem_pool *data_pool, tokenizer *tok, const char *text, int *len) {
     if (!text || text[0] == '\0') {
         *len = 0;
         return NULL;
@@ -100,7 +100,7 @@ int *tokenizer_encode(tokenizer *tok, const char *text, int *len) {
      * Actual count ≤ this (specials compress multi-byte strings to 1 ID). */
     int max_ids = text_len + 2;
 
-    int *ids = (int *)mem_data_alloc((size_t)max_ids * sizeof(int), NULL);
+    int *ids = (int *)_mem_pool_alloc(data_pool, (size_t)max_ids * sizeof(int), NULL);
     int out = 0;
 
     ids[out++] = tok->bos_id;
@@ -155,9 +155,9 @@ char *tokenizer_decode(tokenizer *tok, const int *ids, int len) {
 
 /* ── Tensor pipeline ── */
 
-tensor *tokenizer_text_to_tensor(tokenizer *tok, const char *text) {
+tensor *tokenizer_text_to_tensor(struct mem_pool *data_pool, tokenizer *tok, const char *text) {
     int len;
-    int *ids = tokenizer_encode(tok, text, &len);
+    int *ids = tokenizer_encode(data_pool, tok, text, &len);
     if (!ids || len <= 0) {
         return NULL;
     }
@@ -165,7 +165,7 @@ tensor *tokenizer_text_to_tensor(tokenizer *tok, const char *text) {
     /* tensor_zeros_data allocates float-sized elements; sizeof(float)=4
      * matches sizeof(int) so ints fit in the same buffer. */
     int shape[] = {1, len};
-    tensor *t = tensor_zeros_data(2, shape);
+    tensor *t = tensor_zeros_data(data_pool, 2, shape);
     memcpy(t->data, ids, (size_t)len * sizeof(int));
     return t;
 }

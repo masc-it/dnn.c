@@ -105,10 +105,8 @@ static void shuffle_int(int *arr, int n) {
 
 int main(void) {
     /* ── Pools ── */
-    mem_pool params  = mem_pool_create(128 * 1024 * 1024);  /* model + opt state */
-    mem_pool scratch = mem_pool_create((size_t)4 * 1024 * 1024 * 1024);  /* activations (B=16, N=514, d=128, 4 layers) */
-    mem_pool data    = mem_pool_create(10 * 1024 * 1024);   /* batch data */
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx ctx;
+    dnn_ctx_init(&ctx, 128*1024*1024, (size_t)4*1024*1024*1024, 10*1024*1024);
 
     /* ── Load dataset ── */
     printf("Loading dataset...\n");
@@ -131,7 +129,7 @@ int main(void) {
     /* set seed for reproducibility */
     srand(42);
 
-    decoder_lm *lm = decoder_lm_create(VOCAB_SIZE, D_MODEL, N_LAYERS,
+    decoder_lm *lm = decoder_lm_create(ctx.params, VOCAB_SIZE, D_MODEL, N_LAYERS,
                                         N_HEADS, D_K, INTERMEDIATE);
     {
         long long n = decoder_lm_num_parameters(lm);
@@ -143,7 +141,7 @@ int main(void) {
     printf("  Weights initialized: Normal(0,0.02), residual branches scaled by 1/sqrt(2*%d).\n", N_LAYERS);
 
     /* ── Enable RoPE ── */
-    decoder_lm_enable_rope(lm, ds.seq_len, 10000.0f);
+    decoder_lm_enable_rope(ctx.params, lm, ds.seq_len, 10000.0f);
     printf("  RoPE enabled (base=10000.0, max_seq=%d).\n", ds.seq_len);
 
     /* ── Collect all trainable params ── */
@@ -180,7 +178,7 @@ int main(void) {
     printf("  %d param groups.\n", n_params);
 
     /* ── Create optimizer ── */
-    adamw_opt *opt = adamw_create(all_params, n_params, LR,
+    adamw_opt *opt = adamw_create(ctx.params, all_params, n_params, LR,
                                    0.9f, 0.999f, 1e-8f, 1e-4f);
 
     /* ── Training loop ── */
@@ -196,7 +194,7 @@ int main(void) {
     int total_training_steps  = n_batches * MAX_EPOCHS;
     int warmup_steps          = n_batches;  /* warmup over 1 epoch */
 
-    lr_scheduler *sched = lr_scheduler_create(opt, LR_SCHEDULE_LINEAR_WARMUP_COSINE,
+    lr_scheduler *sched = lr_scheduler_create(ctx.params, opt, LR_SCHEDULE_LINEAR_WARMUP_COSINE,
                                                 LR, warmup_steps, total_training_steps,
                                                 MIN_LR,
                                                 0, 0);
@@ -231,7 +229,7 @@ int main(void) {
             int bs    = end - start;
 
             /* ── Build batch tensor ── */
-            tensor *input_ids = tensor_zeros_data(2, (int[]){bs, N});
+            tensor *input_ids = tensor_zeros_data(ctx.data, 2, (int[]){bs, N});
             int *id_data = (int *)input_ids->data;
 
             for (int i = 0; i < bs; i++) {
@@ -242,7 +240,7 @@ int main(void) {
 
             /* ── Train step ── */
             float grad_norm;
-            tensor *loss = decoder_lm_train_step(lm, input_ids, opt, 1.0f, &grad_norm);
+            tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 1.0f, &grad_norm);
             float loss_val = ((float *)loss->data)[0];
 
             /* Advance LR scheduler after each training step */
@@ -268,13 +266,13 @@ int main(void) {
 
             /* ── Generate sample every GEN_EVERY batches ── */
             if ((b + 1) % GEN_EVERY == 0) {
-                mem_pool_reset(&scratch);
+                mem_pool_reset(ctx.scratch);
 
                 int n_out;
-                tensor *prompt = tensor_zeros_data(2, (int[]){1, 1});
+                tensor *prompt = tensor_zeros_data(ctx.data, 2, (int[]){1, 1});
                 ((int*)prompt->data)[0] = TOKENIZER_BOS_ID;  /* <|im_start|> */
 
-                int *gen_ids = decoder_lm_generate(lm, prompt, GEN_NEW_TOKENS,
+                int *gen_ids = decoder_lm_generate(ctx.scratch, ctx.data, lm, prompt, GEN_NEW_TOKENS,
                                                     0.0f, 1, &n_out);
 
                 tokenizer tok = tokenizer_with_chat_template();
@@ -284,8 +282,8 @@ int main(void) {
             }
 
             /* free scratch + data */
-            mem_pool_reset(&scratch);
-            mem_pool_reset(&data);
+            mem_pool_reset(ctx.scratch);
+            mem_pool_reset(ctx.data);
         }
 
         struct timespec epoch_t1;
@@ -303,16 +301,16 @@ int main(void) {
 
     /* ── Final generation ── */
     {
-        mem_pool_reset(&scratch);
-        mem_pool_reset(&data);
+        mem_pool_reset(ctx.scratch);
+        mem_pool_reset(ctx.data);
 
         printf("\nFinal generation:\n");
 
         int n_out;
-        tensor *prompt = tensor_zeros_data(2, (int[]){1, 1});
+        tensor *prompt = tensor_zeros_data(ctx.data, 2, (int[]){1, 1});
         ((int*)prompt->data)[0] = TOKENIZER_BOS_ID;
 
-        int *gen_ids = decoder_lm_generate(lm, prompt, GEN_NEW_TOKENS * 2,
+        int *gen_ids = decoder_lm_generate(ctx.scratch, ctx.data, lm, prompt, GEN_NEW_TOKENS * 2,
                                             0.0f, 1, &n_out);
 
         tokenizer tok = tokenizer_with_chat_template();
@@ -327,9 +325,7 @@ int main(void) {
     adamw_free(opt);
 
 cleanup:
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+    dnn_ctx_destroy(&ctx);
 
     printf("Done.\n");
     return ds.data ? 0 : 1;

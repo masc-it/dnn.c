@@ -19,7 +19,8 @@ typedef struct {
     tensor  **velocities;  /* one per param, same shape, allocated in params pool */
 } sgd_opt;
 
-sgd_opt *sgd_create(tensor **params, int n_params, float lr, float momentum);
+sgd_opt *sgd_create(struct mem_pool *params_pool,
+                     tensor **params, int n_params, float lr, float momentum);
 void     sgd_free(sgd_opt *opt);
 void     sgd_step(sgd_opt *opt);
 void     sgd_zero_grad(sgd_opt *opt);
@@ -46,7 +47,8 @@ typedef struct adamw_opt {
     tensor  **m, **v;      /* first and second moment buffers */
 } adamw_opt;
 
-adamw_opt *adamw_create(tensor **params, int n_params, float lr,
+adamw_opt *adamw_create(struct mem_pool *params_pool,
+                         tensor **params, int n_params, float lr,
                          float beta1, float beta2, float eps, float weight_decay);
 void       adamw_free(adamw_opt *opt);
 void       adamw_step(adamw_opt *opt);
@@ -129,7 +131,8 @@ typedef struct {
  *
  * Stores a pointer to the optimizer; does NOT own it.
  */
-lr_scheduler *lr_scheduler_create(struct adamw_opt *opt, int schedule,
+lr_scheduler *lr_scheduler_create(struct mem_pool *params_pool,
+                                   struct adamw_opt *opt, int schedule,
                                    float base_lr,
                                    int warmup_iters, int total_iters,
                                    float min_lr,

@@ -176,7 +176,7 @@ static void ln_backward(grad_fn *fn, tensor *grad_output) {
 
 /* ── layer_norm forward ── */
 
-tensor *tensor_layer_norm(const tensor *x, const tensor *weight,
+tensor *tensor_layer_norm(struct mem_pool *scratch, const tensor *x, const tensor *weight,
                           const tensor *bias, float eps) {
     assert(x);
     assert(tensor_is_contiguous(x) && "tensor_layer_norm: x must be contiguous");
@@ -188,8 +188,8 @@ tensor *tensor_layer_norm(const tensor *x, const tensor *weight,
     float *xd = tensor_data_ptr((tensor*)x);
 
     /* mean and rstd per slice (allocated in scratch, valid until backward runs) */
-    float *mean = mem_scratch_alloc(n * sizeof(float), NULL);
-    float *rstd = mem_scratch_alloc(n * sizeof(float), NULL);
+    float *mean = _mem_pool_alloc(scratch, n * sizeof(float), NULL);
+    float *rstd = _mem_pool_alloc(scratch, n * sizeof(float), NULL);
 
     /* pass 1 (fused): Welford online mean + M2 → rstd
      *
@@ -218,7 +218,7 @@ tensor *tensor_layer_norm(const tensor *x, const tensor *weight,
     }
 
     /* pass 3: compute output = γ * ((x - μ) * rstd) + β */
-    tensor *out = _tensor_scratch_create(ndim, x->shape, 0);
+    tensor *out = tensor_scratch(scratch, ndim, x->shape, 0);
     float *od   = (float*)out->data;
     float *wd   = weight ? tensor_data_ptr((tensor*)weight) : NULL;
     float *bd   = bias   ? tensor_data_ptr((tensor*)bias)   : NULL;
@@ -257,14 +257,14 @@ tensor *tensor_layer_norm(const tensor *x, const tensor *weight,
         (tensor_requires_grad(x) ||
          (weight && tensor_requires_grad(weight)) ||
          (bias   && tensor_requires_grad(bias)))) {
-        grad_fn *fn = _grad_fn_create();
+        grad_fn *fn = _grad_fn_create(scratch);
         fn->backward = ln_backward;
         fn->n_inputs = 1;
-        fn->inputs = mem_scratch_alloc(1 * sizeof(tensor*), NULL);
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
         fn->inputs[0] = (tensor*)x;
 
         fn->n_saved = 4;
-        fn->saved_tensors = mem_scratch_alloc(4 * sizeof(tensor*), NULL);
+        fn->saved_tensors = _mem_pool_alloc(scratch, 4 * sizeof(tensor*), NULL);
         fn->saved_tensors[0] = (tensor*)weight;  /* may be NULL */
         fn->saved_tensors[1] = (tensor*)bias;    /* may be NULL */
         fn->saved_tensors[2] = (tensor*)mean;

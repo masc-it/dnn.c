@@ -17,7 +17,8 @@
  *     H_out = (H + 2*pad - kH) / stride + 1
  *     W_out = (W + 2*pad - kW) / stride + 1
  */
-tensor *tensor_conv2d(tensor *input, tensor *weight, tensor *bias,
+tensor *tensor_conv2d(struct mem_pool *scratch,
+                      tensor *input, tensor *weight, tensor *bias,
                       int stride, int pad);
 
 #endif /* DNN_CONV_H */

@@ -7,10 +7,8 @@
 
 int main(void) {
     /* ── pools ── */
-    mem_pool params  = mem_pool_create(10 * 1024 * 1024);     /* model (CNN: ~7MB) */
-    mem_pool scratch = mem_pool_create(192 * 1024 * 1024);    /* scratch (CNN batch=128: ~160MB peak with P1) */
-    mem_pool data    = mem_pool_create(210 * 1024 * 1024);    /* MNIST data (~210MB) */
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx ctx;
+    dnn_ctx_init(&ctx, 10*1024*1024, 192*1024*1024, 210*1024*1024);
 
     /* ── MNIST CNN ── */
 
@@ -20,8 +18,8 @@ int main(void) {
     }
 
     printf("Loading training data...\n");
-    tensor *train_images = mnist_load_images(MNIST_DATA_DIR "/train-images-idx3-ubyte");
-    tensor *train_labels = mnist_load_labels(MNIST_DATA_DIR "/train-labels-idx1-ubyte");
+    tensor *train_images = mnist_load_images(ctx.data, MNIST_DATA_DIR "/train-images-idx3-ubyte");
+    tensor *train_labels = mnist_load_labels(ctx.data, MNIST_DATA_DIR "/train-labels-idx1-ubyte");
     if (!train_images || !train_labels) {
         fprintf(stderr, "Failed to load training data.\n");
         goto cleanup;
@@ -29,18 +27,18 @@ int main(void) {
     printf("  %d images loaded.\n", MNIST_TRAIN_N);
 
     printf("Loading test data...\n");
-    tensor *test_images = mnist_load_images(MNIST_DATA_DIR "/t10k-images-idx3-ubyte");
-    tensor *test_labels = mnist_load_labels(MNIST_DATA_DIR "/t10k-labels-idx1-ubyte");
+    tensor *test_images = mnist_load_images(ctx.data, MNIST_DATA_DIR "/t10k-images-idx3-ubyte");
+    tensor *test_labels = mnist_load_labels(ctx.data, MNIST_DATA_DIR "/t10k-labels-idx1-ubyte");
     if (!test_images || !test_labels) {
         fprintf(stderr, "Failed to load test data.\n");
         goto cleanup;
     }
     printf("  %d images loaded.\n", MNIST_TEST_N);
 
-    mem_pool_reset(&params);
-    mem_pool_reset(&scratch);
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
 
-    mnist_model_cnn *m_cnn = mnist_model_create_cnn();
+    mnist_model_cnn *m_cnn = mnist_model_create_cnn(ctx.params);
     
     {
         /* count CNN params — no generic helper for mnist_model_cnn */
@@ -54,19 +52,17 @@ int main(void) {
     }
 
     printf("Training CNN (AdamW, lr=0.001, batch=128, max_epochs=1, patience=3):\n");
-    mnist_train_cnn(m_cnn, train_images, train_labels, 1, 128, 0.001f, 5000, 3);
+    mnist_train_cnn(&ctx, m_cnn, train_images, train_labels, 1, 128, 0.001f, 5000, 3);
 
     printf("\nEvaluating CNN:\n");
-    float cnn_train_acc = mnist_eval_cnn(m_cnn, train_images, train_labels);
-    float cnn_test_acc  = mnist_eval_cnn(m_cnn, test_images, test_labels);
+    float cnn_train_acc = mnist_eval_cnn(ctx.scratch, m_cnn, train_images, train_labels);
+    float cnn_test_acc  = mnist_eval_cnn(ctx.scratch, m_cnn, test_images, test_labels);
     printf("  Train accuracy: %.4f\n", cnn_train_acc);
     printf("  Test accuracy:  %.4f\n", cnn_test_acc);
 
     printf("\nAll done.\n");
 
 cleanup:
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+    dnn_ctx_destroy(&ctx);
     return 0;
 }
