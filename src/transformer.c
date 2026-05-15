@@ -10,6 +10,7 @@
 #include "tensor_int.h"
 #include "autograd.h"
 #include "optim.h"
+#include "tokenizer.h"
 #include "simd.h"
 #include <assert.h>
 #include <string.h>
@@ -434,7 +435,17 @@ tensor *transformer_block_forward_cached(transformer_block *block,
                         0.0f, scores, S);
 #endif
 
-            /* Softmax over last dim — no causal mask, all past visible
+            /* ── Causal mask: row i attends only to positions ≤ old_seq + i ── */
+            {
+                int old_seq = S - N_new;
+                for (int i = 0; i < N_new; i++) {
+                    float *row = scores + i * S;
+                    for (int j = old_seq + i + 1; j < S; j++)
+                        row[j] = -INFINITY;
+                }
+            }
+
+            /* Softmax over last dim — causal mask applied above
              * Fused online max + sum_exp + NEON SIMD.
              */
             for (int i = 0; i < N_new; i++) {
@@ -609,6 +620,8 @@ int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
         int d_k = lm->blocks[0]->d_k;
         int H   = lm->blocks[0]->n_heads;
 
+        size_t cache_mark = mem_pool_mark(_mem_pool_params());
+
         /* Create KV-caches for each layer.
          * IMPORTANT: allocate pointer array from params pool — scratch
          * gets reset between iterations and caches must survive. */
@@ -654,7 +667,7 @@ int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
 
                 output[cur_len++] = next_id;
 
-                if (next_id == 258) goto done_generate;  /* EOS */
+                if (next_id == TOKENIZER_EOS_ID) goto done_generate;
             } else {
                 /* Free scratch between non-last prompt tokens */
                 mem_pool_reset(_mem_pool_scratch());
@@ -689,10 +702,11 @@ int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
             }
 
             output[cur_len++] = next_id;
-            if (next_id == 258) goto done_generate;
+            if (next_id == TOKENIZER_EOS_ID) goto done_generate;
         }
 
 done_generate:
+        mem_pool_release(_mem_pool_params(), cache_mark);
         ;
 
     } else {
@@ -722,7 +736,7 @@ done_generate:
             }
 
             output[cur_len++] = next_id;
-            if (next_id == 258) goto done_nocache;
+            if (next_id == TOKENIZER_EOS_ID) goto done_nocache;
         }
 done_nocache:
         ;

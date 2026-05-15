@@ -90,6 +90,23 @@ tensor *tensor_zeros(int ndim, const int *shape, int requires_grad) {
     return tensor_create_pool(ndim, shape, _mem_pool_params(), requires_grad);
 }
 
+tensor *tensor_scratch(mem_pool *pool, int ndim, const int *shape) {
+    tensor *t = _mem_pool_alloc(pool, sizeof(tensor), NULL);
+    t->ndim = ndim;
+    memcpy(t->shape, shape, ndim * sizeof(int));
+    default_strides(ndim, shape, t->strides);
+    int n = tensor_numel_(shape, ndim);
+    t->data = _mem_pool_alloc_nz(pool, (size_t)n * sizeof(float));
+    t->pool = pool;
+    t->requires_grad = 0;
+    t->contiguous = 1;
+    t->offset = 0;
+    t->parent = NULL;
+    t->grad_fn = NULL;
+    t->grad = NULL;
+    return t;
+}
+
 tensor *tensor_zeros_data(int ndim, const int *shape) {
     return tensor_create_pool(ndim, shape, _mem_pool_data(), 0);
 }

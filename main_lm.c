@@ -84,15 +84,21 @@ static void shuffle_int(int *arr, int n) {
 }
 
 /* ── Config ── */
-#define D_MODEL        128
+#define D_MODEL        256
 #define N_HEADS         4
-#define D_K            32   /* D_MODEL / N_HEADS */
-#define INTERMEDIATE   256  /* 2x D_MODEL */
-#define N_LAYERS         4
+#define D_K            64   /* D_MODEL / N_HEADS */
+#define INTERMEDIATE   512  /* 2x D_MODEL */
+#define N_LAYERS         2
 #define VOCAB_SIZE     261
 #define BATCH_SIZE      16
 #define MAX_EPOCHS      10
-#define LR            5e-4f
+#define LR            8e-4f
+#define MIN_LR            6e-5f
+#define OVERFIT         1    /* 1 = train on 10 batches only for overfit test */
+#if OVERFIT
+#  undef  MAX_EPOCHS
+#  define MAX_EPOCHS 1000
+#endif
 #define LOG_EVERY       10
 #define GEN_EVERY       30
 #define GEN_NEW_TOKENS  64
@@ -182,6 +188,9 @@ int main(void) {
     int n_seqs     = ds.num_sequences;
     int batch_size = BATCH_SIZE;
     int n_batches  = (n_seqs + batch_size - 1) / batch_size;
+#if OVERFIT
+    if (n_batches > 10) n_batches = 10;
+#endif
 
     /* ── Create LR scheduler (warmup + cosine) ── */
     int total_training_steps  = n_batches * MAX_EPOCHS;
@@ -189,10 +198,10 @@ int main(void) {
 
     lr_scheduler *sched = lr_scheduler_create(opt, LR_SCHEDULE_LINEAR_WARMUP_COSINE,
                                                 LR, warmup_steps, total_training_steps,
-                                                1e-5f,  /* min_lr */
+                                                MIN_LR,
                                                 0, 0);
     printf("  LR scheduler: warmup=%d steps, cosine decay over %d steps, base_lr=%.2e, min_lr=%.2e\n",
-           warmup_steps, total_training_steps, LR, 1e-5f);
+           warmup_steps, total_training_steps, LR, MIN_LR);
 
     printf("\nTraining (AdamW, lr=%.4f, batch=%d, max_epochs=%d):\n",
            LR, batch_size, MAX_EPOCHS);
@@ -204,9 +213,11 @@ int main(void) {
     int total_steps = 0;
 
     for (int epoch = 0; epoch < MAX_EPOCHS; epoch++) {
-        /* shuffle sequences */
+        /* shuffle sequences (fixed subset in overfit mode) */
         for (int i = 0; i < n_seqs; i++) indices[i] = i;
+#if !OVERFIT
         shuffle_int(indices, n_seqs);
+#endif
 
         double epoch_loss = 0.0;
         int    epoch_batches = 0;
@@ -215,7 +226,9 @@ int main(void) {
 
         for (int b = 0; b < n_batches; b++) {
             int start = b * batch_size;
-            int bs    = (b == n_batches - 1) ? n_seqs - start : batch_size;
+            int end   = start + batch_size;
+            if (end > n_seqs) end = n_seqs;
+            int bs    = end - start;
 
             /* ── Build batch tensor ── */
             tensor *input_ids = tensor_zeros_data(2, (int[]){bs, N});

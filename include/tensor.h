@@ -26,6 +26,9 @@ tensor *tensor_zeros_data(int ndim, const int *shape);
 tensor *tensor_randn(int ndim, const int *shape, int requires_grad);
 tensor *tensor_uniform(int ndim, const int *shape, int requires_grad, float bound);
 
+/* ── Scratch intermediate (no-grad, from explicit pool) ── */
+tensor *tensor_scratch(struct mem_pool *pool, int ndim, const int *shape);
+
 /* ── Views ── */
 tensor *tensor_slice(tensor *t, int dim, int start, int len);
 tensor *tensor_transpose(tensor *t, int d1, int d2);
