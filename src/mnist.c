@@ -155,7 +155,8 @@ mnist_model *mnist_model_create(struct mem_pool *params_pool) {
     return m;
 }
 
-tensor *mnist_model_forward(struct mem_pool *scratch, mnist_model *m, const tensor *x) {
+tensor *mnist_model_forward(struct mem_pool *scratch, struct module *base, const tensor *x) {
+    mnist_model *m = (mnist_model *)base;
     assert(m && x);
     assert(x->ndim >= 2);
     assert(x->shape[x->ndim - 1] == MNIST_PIXELS);
@@ -190,7 +191,8 @@ mnist_model_cnn *mnist_model_create_cnn(struct mem_pool *params_pool) {
     return m;
 }
 
-tensor *mnist_model_forward_cnn(struct mem_pool *scratch, mnist_model_cnn *m, const tensor *x) {
+tensor *mnist_model_forward_cnn(struct mem_pool *scratch, struct module *base, const tensor *x) {
+    mnist_model_cnn *m = (mnist_model_cnn *)base;
     int N = tensor_shape(x, 0);
     tensor *h = tensor_reshape(scratch, (tensor*)x, 4, (int[]){N, 1, 28, 28});
 
@@ -234,7 +236,8 @@ mnist_model_cnn_pool *mnist_model_create_cnn_pool(struct mem_pool *params_pool) 
     return m;
 }
 
-tensor *mnist_model_forward_cnn_pool(struct mem_pool *scratch, mnist_model_cnn_pool *m, const tensor *x) {
+tensor *mnist_model_forward_cnn_pool(struct mem_pool *scratch, struct module *base, const tensor *x) {
+    mnist_model_cnn_pool *m = (mnist_model_cnn_pool *)base;
     int N = tensor_shape(x, 0);
     tensor *h = tensor_reshape(scratch, (tensor*)x, 4, (int[]){N, 1, 28, 28});
 
@@ -261,7 +264,7 @@ tensor *mnist_model_forward_cnn_pool(struct mem_pool *scratch, mnist_model_cnn_p
  *  Training (generic backend, shared by MLP and CNN wrappers)
  * ================================================================ */
 
-typedef tensor *(*forward_fn_t)(struct mem_pool *, void *, const tensor *);
+typedef tensor *(*forward_fn_t)(struct mem_pool *, struct module *, const tensor *);
 
 static void mnist_train_impl(
     struct mem_pool *params_pool, struct mem_pool *scratch, struct mem_pool *data,
@@ -269,7 +272,7 @@ static void mnist_train_impl(
     int epochs, int batch_size, float lr,
     int val_n, int patience,
     tensor **params, int n_params,
-    void *model, forward_fn_t forward_fn) {
+    struct module *model, forward_fn_t forward_fn) {
     int N          = tensor_shape(train_images, 0);
     int tr_n       = N - val_n;          /* training sample count */
     int n_batches  = (tr_n + batch_size - 1) / batch_size;
@@ -444,8 +447,8 @@ void mnist_train(struct dnn_ctx *ctx, mnist_model *m,
     tensor **params = module_parameters(&m->base, &n_params);
     mnist_train_impl(ctx->params, ctx->scratch, ctx->data, train_images, train_labels,
                      epochs, batch_size, lr, val_n, patience,
-                     params, n_params, m,
-                     (forward_fn_t)mnist_model_forward);
+                     params, n_params, &m->base,
+                     mnist_model_forward);
 }
 
 /* ── CNN training wrapper ── */
@@ -458,8 +461,8 @@ void mnist_train_cnn(struct dnn_ctx *ctx, mnist_model_cnn *m,
     tensor **params = module_parameters(&m->base, &n_params);
     mnist_train_impl(ctx->params, ctx->scratch, ctx->data, train_images, train_labels,
                      epochs, batch_size, lr, val_n, patience,
-                     params, n_params, m,
-                     (forward_fn_t)mnist_model_forward_cnn);
+                     params, n_params, &m->base,
+                     mnist_model_forward_cnn);
 }
 
 /* ── CNN (pool variant) training wrapper ── */
@@ -472,17 +475,17 @@ void mnist_train_cnn_pool(struct dnn_ctx *ctx, mnist_model_cnn_pool *m,
     tensor **params = module_parameters(&m->base, &n_params);
     mnist_train_impl(ctx->params, ctx->scratch, ctx->data, train_images, train_labels,
                      epochs, batch_size, lr, val_n, patience,
-                     params, n_params, m,
-                     (forward_fn_t)mnist_model_forward_cnn_pool);
+                     params, n_params, &m->base,
+                     mnist_model_forward_cnn_pool);
 }
 
 /* ================================================================
  *  Evaluation
  * ================================================================ */
 
-float mnist_eval_generic(struct mem_pool *scratch, void *model,
-                          tensor *(*forward_fn)(struct mem_pool *, void *, const tensor *),
-                          tensor *images, tensor *labels) {
+float mnist_eval(struct mem_pool *scratch, struct module *model,
+                  tensor *(*forward_fn)(struct mem_pool *, struct module *, const tensor *),
+                  tensor *images, tensor *labels) {
     int N = tensor_shape(images, 0);
 
     dnn_grad_ctx ctx = dnn_no_grad_enter();

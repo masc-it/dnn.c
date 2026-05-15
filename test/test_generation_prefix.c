@@ -37,43 +37,8 @@ static tensor *make_int_tensor(int ndim, const int *shape, const int *data) {
     return t;
 }
 
-/* Collect all trainable params into a flat array (for AdamW) */
 static tensor **collect_params(decoder_lm *lm, int *n_out) {
-    tensor *all[256];
-    int n = 0;
-
-    all[n++] = lm->embedding_table;
-    all[n++] = lm->norm_weight;
-    all[n++] = lm->norm_bias;
-    /* lm_head->weight excluded — weight tying via transposed view of embedding_table */
-    all[n++] = lm->lm_head->bias;
-
-    for (int i = 0; i < lm->n_layers; i++) {
-        transformer_block *b = lm->blocks[i];
-        all[n++] = b->q_proj->weight;
-        all[n++] = b->q_proj->bias;
-        all[n++] = b->k_proj->weight;
-        all[n++] = b->k_proj->bias;
-        all[n++] = b->v_proj->weight;
-        all[n++] = b->v_proj->bias;
-        all[n++] = b->out_proj->weight;
-        all[n++] = b->out_proj->bias;
-        all[n++] = b->attn_norm_weight;
-        all[n++] = b->attn_norm_bias;
-        all[n++] = b->ffn_norm_weight;
-        all[n++] = b->ffn_norm_bias;
-        all[n++] = b->ffn->gate_proj->weight;
-        all[n++] = b->ffn->gate_proj->bias;
-        all[n++] = b->ffn->up_proj->weight;
-        all[n++] = b->ffn->up_proj->bias;
-        all[n++] = b->ffn->down_proj->weight;
-        all[n++] = b->ffn->down_proj->bias;
-    }
-
-    *n_out = n;
-    tensor **arr = _mem_pool_alloc(ctx.params, n * sizeof(tensor*), NULL);
-    memcpy(arr, all, n * sizeof(tensor*));
-    return arr;
+    return module_parameters(&lm->base, n_out);
 }
 
 /* Train a decoder_lm for a few steps */

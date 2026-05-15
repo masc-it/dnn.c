@@ -72,10 +72,8 @@ typedef struct {
     int        n_heads;
     int        d_k;
     int        d_model;
-    tensor    *attn_norm_weight;    /* [d_model], learnable, init 1 */
-    tensor    *attn_norm_bias;      /* [d_model], learnable, init 0 */
-    tensor    *ffn_norm_weight;     /* [d_model], learnable, init 1 */
-    tensor    *ffn_norm_bias;       /* [d_model], learnable, init 0 */
+    layer_norm *attn_norm;         /* pre-attention layer norm */
+    layer_norm *ffn_norm;          /* pre-FFN layer norm */
     swiglu_ffn *ffn;               /* d_model → intermediate → d_model */
     /* RoPE frequency tables (borrowed from decoder_lm, not owned) */
     tensor    *freqs_cos;           /* [max_seq_len, d_k/2], NULL = no RoPE */
@@ -100,11 +98,10 @@ tensor            *transformer_block_forward(struct mem_pool *scratch,
 
 typedef struct {
     module               base;                /* first field */
-    tensor             *embedding_table;      /* [vocab_size, d_model] */
-    transformer_block **blocks;               /* [n_layers] */
+    embedding           *embed;               /* token embedding table */
+    transformer_block  **blocks;              /* [n_layers] */
     int                  n_layers;
-    tensor              *norm_weight;         /* [d_model], final layer norm, init 1 */
-    tensor              *norm_bias;           /* [d_model], final layer norm, init 0 */
+    layer_norm          *norm;                /* final layer norm */
     linear              *lm_head;             /* d_model → vocab_size */
     int                  d_model;
     int                  vocab_size;

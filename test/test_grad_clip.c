@@ -306,23 +306,8 @@ static void test_clip_in_training_step(void) {
     decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
 
-    tensor *all[256];
-    int np = 0;
-    all[np++] = lm->embedding_table; all[np++] = lm->norm_weight; all[np++] = lm->norm_bias;
-    /* lm_head->weight excluded — weight tying via transposed view of embedding_table */
-    all[np++] = lm->lm_head->bias;
-    for (int i = 0; i < lm->n_layers; i++) {
-        transformer_block *b = lm->blocks[i];
-        all[np++] = b->q_proj->weight; all[np++] = b->q_proj->bias;
-        all[np++] = b->k_proj->weight; all[np++] = b->k_proj->bias;
-        all[np++] = b->v_proj->weight; all[np++] = b->v_proj->bias;
-        all[np++] = b->out_proj->weight; all[np++] = b->out_proj->bias;
-        all[np++] = b->attn_norm_weight; all[np++] = b->attn_norm_bias;
-        all[np++] = b->ffn_norm_weight; all[np++] = b->ffn_norm_bias;
-        all[np++] = b->ffn->gate_proj->weight; all[np++] = b->ffn->gate_proj->bias;
-        all[np++] = b->ffn->up_proj->weight; all[np++] = b->ffn->up_proj->bias;
-        all[np++] = b->ffn->down_proj->weight; all[np++] = b->ffn->down_proj->bias;
-    }
+    int np;
+    tensor **all = module_parameters(&lm->base, &np);
 
     adamw_opt *opt = adamw_create(ctx.params, all, np, 0.001f,
                                    0.9f, 0.999f, 1e-8f, 0.01f);
@@ -352,23 +337,8 @@ static void test_clip_reduces_norm_during_training(void) {
     srand(42);
     decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                         d_k, intermediate);
-    tensor *all[256];
-    int np = 0;
-    all[np++] = lm->embedding_table; all[np++] = lm->norm_weight; all[np++] = lm->norm_bias;
-    /* lm_head->weight excluded — weight tying via transposed view of embedding_table */
-    all[np++] = lm->lm_head->bias;
-    for (int i = 0; i < lm->n_layers; i++) {
-        transformer_block *b = lm->blocks[i];
-        all[np++] = b->q_proj->weight; all[np++] = b->q_proj->bias;
-        all[np++] = b->k_proj->weight; all[np++] = b->k_proj->bias;
-        all[np++] = b->v_proj->weight; all[np++] = b->v_proj->bias;
-        all[np++] = b->out_proj->weight; all[np++] = b->out_proj->bias;
-        all[np++] = b->attn_norm_weight; all[np++] = b->attn_norm_bias;
-        all[np++] = b->ffn_norm_weight; all[np++] = b->ffn_norm_bias;
-        all[np++] = b->ffn->gate_proj->weight; all[np++] = b->ffn->gate_proj->bias;
-        all[np++] = b->ffn->up_proj->weight; all[np++] = b->ffn->up_proj->bias;
-        all[np++] = b->ffn->down_proj->weight; all[np++] = b->ffn->down_proj->bias;
-    }
+    int np;
+    tensor **all = module_parameters(&lm->base, &np);
 
     adamw_opt *opt = adamw_create(ctx.params, all, np, 0.001f,
                                    0.9f, 0.999f, 1e-8f, 0.01f);

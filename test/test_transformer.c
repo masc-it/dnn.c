@@ -58,18 +58,18 @@ static void test_block_create(void) {
     assert(block->ffn->intermediate_size == 8);
 
     /* Norm params */
-    assert(tensor_shape(block->attn_norm_weight, 0) == 4);
-    assert(tensor_shape(block->attn_norm_bias,   0) == 4);
-    assert(tensor_shape(block->ffn_norm_weight,  0) == 4);
-    assert(tensor_shape(block->ffn_norm_bias,    0) == 4);
+    assert(tensor_shape(block->attn_norm->weight, 0) == 4);
+    assert(tensor_shape(block->attn_norm->bias,   0) == 4);
+    assert(tensor_shape(block->ffn_norm->weight,  0) == 4);
+    assert(tensor_shape(block->ffn_norm->bias,    0) == 4);
 
     /* All params require grad */
     assert(tensor_requires_grad(block->q_proj->weight));
     assert(tensor_requires_grad(block->k_proj->weight));
     assert(tensor_requires_grad(block->v_proj->weight));
     assert(tensor_requires_grad(block->out_proj->weight));
-    assert(tensor_requires_grad(block->attn_norm_weight));
-    assert(tensor_requires_grad(block->ffn_norm_weight));
+    assert(tensor_requires_grad(block->attn_norm->weight));
+    assert(tensor_requires_grad(block->ffn_norm->weight));
     assert(tensor_requires_grad(block->ffn->gate_proj->weight));
 
     printf("OK\n");
@@ -100,10 +100,10 @@ static void test_backward_all_params(void) {
     assert(tensor_grad(block->v_proj->bias)       && "v_proj bias NULL");
     assert(tensor_grad(block->out_proj->weight)   && "out_proj grad NULL");
     assert(tensor_grad(block->out_proj->bias)     && "out_proj bias NULL");
-    assert(tensor_grad(block->attn_norm_weight)   && "attn_norm_weight grad NULL");
-    assert(tensor_grad(block->attn_norm_bias)     && "attn_norm_bias grad NULL");
-    assert(tensor_grad(block->ffn_norm_weight)    && "ffn_norm_weight grad NULL");
-    assert(tensor_grad(block->ffn_norm_bias)      && "ffn_norm_bias grad NULL");
+    assert(tensor_grad(block->attn_norm->weight)   && "attn_norm_weight grad NULL");
+    assert(tensor_grad(block->attn_norm->bias)     && "attn_norm_bias grad NULL");
+    assert(tensor_grad(block->ffn_norm->weight)    && "ffn_norm_weight grad NULL");
+    assert(tensor_grad(block->ffn_norm->bias)      && "ffn_norm_bias grad NULL");
     assert(tensor_grad(block->ffn->gate_proj->weight) && "gate_proj grad NULL");
     assert(tensor_grad(block->ffn->gate_proj->bias)   && "gate_proj bias NULL");
     assert(tensor_grad(block->ffn->up_proj->weight)   && "up_proj grad NULL");
@@ -366,10 +366,10 @@ static void test_ref_forward_backward(void) {
         assert(isfinite(od[i]) && "output non-finite");
 
     /* Check norm params got gradients */
-    float *g_anw = tensor_grad(block->attn_norm_weight);
-    float *g_anb = tensor_grad(block->attn_norm_bias);
-    float *g_fnw = tensor_grad(block->ffn_norm_weight);
-    float *g_fnb = tensor_grad(block->ffn_norm_bias);
+    float *g_anw = tensor_grad(block->attn_norm->weight);
+    float *g_anb = tensor_grad(block->attn_norm->bias);
+    float *g_fnw = tensor_grad(block->ffn_norm->weight);
+    float *g_fnb = tensor_grad(block->ffn_norm->bias);
     assert(g_anw && g_anb && g_fnw && g_fnb);
     for (int i = 0; i < 4; i++) {
         assert(isfinite(g_anw[i]));

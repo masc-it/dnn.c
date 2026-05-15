@@ -41,10 +41,10 @@ static void test_lm_create(void) {
     assert(lm->n_layers   == n_layers);
 
     /* Embedding table shape */
-    assert(tensor_ndim(lm->embedding_table) == 2);
-    assert(tensor_shape(lm->embedding_table, 0) == vocab);
-    assert(tensor_shape(lm->embedding_table, 1) == d_model);
-    assert(tensor_requires_grad(lm->embedding_table));
+    assert(tensor_ndim(lm->embed->weight) == 2);
+    assert(tensor_shape(lm->embed->weight, 0) == vocab);
+    assert(tensor_shape(lm->embed->weight, 1) == d_model);
+    assert(tensor_requires_grad(lm->embed->weight));
 
     /* Blocks exist */
     assert(lm->blocks != NULL);
@@ -56,9 +56,9 @@ static void test_lm_create(void) {
     }
 
     /* Final norm */
-    assert(tensor_shape(lm->norm_weight, 0) == d_model);
-    assert(tensor_shape(lm->norm_bias,   0) == d_model);
-    assert(tensor_requires_grad(lm->norm_weight));
+    assert(tensor_shape(lm->norm->weight, 0) == d_model);
+    assert(tensor_shape(lm->norm->bias,   0) == d_model);
+    assert(tensor_requires_grad(lm->norm->weight));
 
     /* LM head */
     assert(lm->lm_head->in_features  == d_model);
@@ -106,9 +106,9 @@ static void test_forward_basic(void) {
     /* All major param groups get grads.
      * lm_head->weight is a transposed view of embedding_table (weight tying),
      * so its grad is on the embedding_table root. */
-    assert(tensor_grad(lm->embedding_table)  && "embedding grad NULL");
-    assert(tensor_grad(lm->norm_weight)      && "norm_weight grad NULL");
-    assert(tensor_grad(lm->norm_bias)        && "norm_bias grad NULL");
+    assert(tensor_grad(lm->embed->weight)  && "embedding grad NULL");
+    assert(tensor_grad(lm->norm->weight)      && "norm_weight grad NULL");
+    assert(tensor_grad(lm->norm->bias)        && "norm_bias grad NULL");
     assert(tensor_grad(lm->lm_head->bias)    && "lm_head bias grad NULL");
 
     /* All block params get grads */
@@ -118,15 +118,15 @@ static void test_forward_basic(void) {
         assert(tensor_grad(b->k_proj->weight) && "block k_proj grad NULL");
         assert(tensor_grad(b->v_proj->weight) && "block v_proj grad NULL");
         assert(tensor_grad(b->out_proj->weight) && "block out_proj grad NULL");
-        assert(tensor_grad(b->attn_norm_weight) && "block attn_norm_weight grad NULL");
-        assert(tensor_grad(b->ffn_norm_weight) && "block ffn_norm_weight grad NULL");
+        assert(tensor_grad(b->attn_norm->weight) && "block attn_norm_weight grad NULL");
+        assert(tensor_grad(b->ffn_norm->weight) && "block ffn_norm_weight grad NULL");
         assert(tensor_grad(b->ffn->gate_proj->weight) && "block gate_proj grad NULL");
         assert(tensor_grad(b->ffn->up_proj->weight) && "block up_proj grad NULL");
         assert(tensor_grad(b->ffn->down_proj->weight) && "block down_proj grad NULL");
     }
 
     /* All grads finite */
-    float *eg = tensor_grad(lm->embedding_table);
+    float *eg = tensor_grad(lm->embed->weight);
     for (int i = 0; i < vocab * d_model; i++) assert(isfinite(eg[i]));
 
     printf("OK (shape correct, grads flow to all %d param groups, finite)\n",
@@ -162,7 +162,7 @@ static void test_embedding_grad_sparsity(void) {
     tensor *logits = decoder_lm_forward(ctx.scratch, lm, input_ids);
     dnn_backward(ctx.scratch, logits);
 
-    float *eg = tensor_grad(lm->embedding_table);
+    float *eg = tensor_grad(lm->embed->weight);
     assert(eg != NULL && "embedding grad NULL");
 
     /* All rows get grads due to weight tying (lm_head backward).
@@ -220,11 +220,11 @@ static void test_numerical_grad(void) {
 
     /* For numerical grad we check embedding_table (weight-tying with lm_head).
      * lm_head.weight is a transposed view sharing embedding_table's data/grad. */
-    int n_emb = tensor_numel(lm->embedding_table);
+    int n_emb = tensor_numel(lm->embed->weight);
     float *emb_orig = malloc(n_emb * sizeof(float));
-    memcpy(emb_orig, tensor_data_ptr(lm->embedding_table), n_emb * sizeof(float));
+    memcpy(emb_orig, tensor_data_ptr(lm->embed->weight), n_emb * sizeof(float));
 
-    float *emb_grad_auto = tensor_grad(lm->embedding_table);
+    float *emb_grad_auto = tensor_grad(lm->embed->weight);
     assert(emb_grad_auto != NULL);
 
     for (int idx = 0; idx < n_emb && n_passed < n_checks; idx += n_emb / n_checks) {
@@ -235,8 +235,8 @@ static void test_numerical_grad(void) {
         srand(42);
         decoder_lm *lm1 = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                              d_k, intermediate);
-        memcpy(tensor_data_ptr(lm1->embedding_table), emb_orig, n_emb * sizeof(float));
-        float *e1d = tensor_data_ptr(lm1->embedding_table);
+        memcpy(tensor_data_ptr(lm1->embed->weight), emb_orig, n_emb * sizeof(float));
+        float *e1d = tensor_data_ptr(lm1->embed->weight);
         e1d[idx] += h;
 
         tensor *ids1 = make_int_tensor(2, (int[]){B, N}, input_data);
@@ -253,8 +253,8 @@ static void test_numerical_grad(void) {
         srand(42);
         decoder_lm *lm2 = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
                                              d_k, intermediate);
-        memcpy(tensor_data_ptr(lm2->embedding_table), emb_orig, n_emb * sizeof(float));
-        float *e2d = tensor_data_ptr(lm2->embedding_table);
+        memcpy(tensor_data_ptr(lm2->embed->weight), emb_orig, n_emb * sizeof(float));
+        float *e2d = tensor_data_ptr(lm2->embed->weight);
         e2d[idx] -= h;
 
         tensor *ids2 = make_int_tensor(2, (int[]){B, N}, input_data);
@@ -333,10 +333,10 @@ static void test_batch(void) {
     assert(tensor_shape(logits, 2) == vocab);
 
     dnn_backward(ctx.scratch, logits);
-    assert(tensor_grad(lm->embedding_table) && "batch: embedding grad");
+    assert(tensor_grad(lm->embed->weight) && "batch: embedding grad");
     assert(tensor_grad(lm->blocks[0]->q_proj->weight) && "batch: block q_proj grad");
 
-    float *eg = tensor_grad(lm->embedding_table);
+    float *eg = tensor_grad(lm->embed->weight);
     for (int i = 0; i < vocab * d_model; i++) assert(isfinite(eg[i]));
 
     printf("OK (B=2, grads flow)\n");
@@ -362,7 +362,7 @@ static void test_seq_len(void) {
     tensor *o1 = decoder_lm_forward(ctx.scratch, lm, ids1);
     assert(tensor_shape(o1, 0) == 1 && tensor_shape(o1, 1) == 1 && tensor_shape(o1, 2) == vocab);
     dnn_backward(ctx.scratch, o1);
-    assert(tensor_grad(lm->embedding_table) && "N=1: grads flow");
+    assert(tensor_grad(lm->embed->weight) && "N=1: grads flow");
     printf("  N=1 OK ");
 
     mem_pool_reset(ctx.scratch);
@@ -374,7 +374,7 @@ static void test_seq_len(void) {
     tensor *o7 = decoder_lm_forward(ctx.scratch, lm, ids7);
     assert(tensor_shape(o7, 0) == 1 && tensor_shape(o7, 1) == 7 && tensor_shape(o7, 2) == vocab);
     dnn_backward(ctx.scratch, o7);
-    assert(tensor_grad(lm->embedding_table) && "N=7: grads flow");
+    assert(tensor_grad(lm->embed->weight) && "N=7: grads flow");
     printf("N=7 OK ");
 
     printf("\n");
@@ -395,11 +395,11 @@ static void test_weight_tying(void) {
                                         d_k, intermediate);
 
     /* Test that embedding table and lm_head are different tensors by default */
-    assert(lm->embedding_table != lm->lm_head->weight &&
+    assert(lm->embed->weight != lm->lm_head->weight &&
            "embedding and lm_head must be separate tensors (no weight tying)");
 
     /* Both are in params pool and require grad */
-    assert(tensor_requires_grad(lm->embedding_table));
+    assert(tensor_requires_grad(lm->embed->weight));
     assert(tensor_requires_grad(lm->lm_head->weight));
 
     /* Shared memory layout: embedding is [vocab, d_model], lm_head is [d_model, vocab].
@@ -433,7 +433,7 @@ static void test_embedding_duplicate_ids(void) {
     tensor *logits = decoder_lm_forward(ctx.scratch, lm, input_ids);
     dnn_backward(ctx.scratch, logits);
 
-    float *eg = tensor_grad(lm->embedding_table);
+    float *eg = tensor_grad(lm->embed->weight);
     float *eg_row2 = eg + 2 * d_model;
     float *eg_row5 = eg + 5 * d_model;
 

@@ -305,34 +305,8 @@ static void test_scheduler_with_training(void) {
     decoder_lm *lm = decoder_lm_create(ctx.params, 8, 8, 2, 2, 4, 16);
 
     /* Collect params */
-    tensor *all_params[256];
-    int n_params = 0;
-    all_params[n_params++] = lm->embedding_table;
-    all_params[n_params++] = lm->norm_weight;
-    all_params[n_params++] = lm->norm_bias;
-    /* lm_head->weight excluded — weight tying via transposed view of embedding_table */
-    all_params[n_params++] = lm->lm_head->bias;
-    for (int i = 0; i < lm->n_layers; i++) {
-        transformer_block *b = lm->blocks[i];
-        all_params[n_params++] = b->q_proj->weight;
-        all_params[n_params++] = b->q_proj->bias;
-        all_params[n_params++] = b->k_proj->weight;
-        all_params[n_params++] = b->k_proj->bias;
-        all_params[n_params++] = b->v_proj->weight;
-        all_params[n_params++] = b->v_proj->bias;
-        all_params[n_params++] = b->out_proj->weight;
-        all_params[n_params++] = b->out_proj->bias;
-        all_params[n_params++] = b->attn_norm_weight;
-        all_params[n_params++] = b->attn_norm_bias;
-        all_params[n_params++] = b->ffn_norm_weight;
-        all_params[n_params++] = b->ffn_norm_bias;
-        all_params[n_params++] = b->ffn->gate_proj->weight;
-        all_params[n_params++] = b->ffn->gate_proj->bias;
-        all_params[n_params++] = b->ffn->up_proj->weight;
-        all_params[n_params++] = b->ffn->up_proj->bias;
-        all_params[n_params++] = b->ffn->down_proj->weight;
-        all_params[n_params++] = b->ffn->down_proj->bias;
-    }
+    int n_params;
+    tensor **all_params = module_parameters(&lm->base, &n_params);
 
     adamw_opt *opt = adamw_create(ctx.params, all_params, n_params, 0.01f,
                                    0.9f, 0.999f, 1e-8f, 0.01f);

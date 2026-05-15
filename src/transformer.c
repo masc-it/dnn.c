@@ -134,20 +134,11 @@ transformer_block *transformer_block_create(struct mem_pool *params_pool, int d_
     block->out_proj = linear_create(params_pool, n_heads * d_k, d_model);
     module_add_child(&block->base, "out_proj", &block->out_proj->base);
 
-    /* Pre-norm params: init γ=1, β=0 */
-    block->attn_norm_weight = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
-    block->attn_norm_bias   = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
-    float *wn = tensor_data_ptr(block->attn_norm_weight);
-    for (int i = 0; i < d_model; i++) wn[i] = 1.0f;
-    module_param(&block->base, "attn_norm_weight", block->attn_norm_weight);
-    module_param(&block->base, "attn_norm_bias",   block->attn_norm_bias);
-
-    block->ffn_norm_weight = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
-    block->ffn_norm_bias   = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
-    float *wf = tensor_data_ptr(block->ffn_norm_weight);
-    for (int i = 0; i < d_model; i++) wf[i] = 1.0f;
-    module_param(&block->base, "ffn_norm_weight", block->ffn_norm_weight);
-    module_param(&block->base, "ffn_norm_bias",   block->ffn_norm_bias);
+    /* Pre-attention and pre-FFN layer norms */
+    block->attn_norm = layer_norm_create(params_pool, d_model, 1e-5f);
+    module_add_child(&block->base, "attn_norm", &block->attn_norm->base);
+    block->ffn_norm = layer_norm_create(params_pool, d_model, 1e-5f);
+    module_add_child(&block->base, "ffn_norm", &block->ffn_norm->base);
 
     block->ffn = swiglu_ffn_create(params_pool, d_model, intermediate_size);
     module_add_child(&block->base, "ffn", &block->ffn->base);
@@ -166,8 +157,7 @@ tensor *transformer_block_forward(struct mem_pool *scratch, transformer_block *b
 
     /* ── Attention sublayer (pre-norm) ── */
     tensor *residual = (tensor*)x;
-    tensor *h = tensor_layer_norm(scratch, x, block->attn_norm_weight,
-                                   block->attn_norm_bias, 1e-5f);
+    tensor *h = layer_norm_forward(scratch, block->attn_norm, x);
 
     /* QKV projections: [B, N, d_model] → [B, N, n_heads * d_k] */
     tensor *Q = linear_forward(scratch, block->q_proj, h);
@@ -203,8 +193,7 @@ tensor *transformer_block_forward(struct mem_pool *scratch, transformer_block *b
 
     /* ── FFN sublayer (pre-norm) ── */
     residual = x_after_attn;
-    h = tensor_layer_norm(scratch, x_after_attn, block->ffn_norm_weight,
-                           block->ffn_norm_bias, 1e-5f);
+    h = layer_norm_forward(scratch, block->ffn_norm, x_after_attn);
 
     tensor *ffn_out = swiglu_ffn_forward(scratch, block->ffn, h);
 
@@ -228,10 +217,9 @@ decoder_lm *decoder_lm_create(struct mem_pool *params_pool, int vocab_size, int 
     lm->vocab_size = vocab_size;
     lm->n_layers   = n_layers;
 
-    /* Embedding table: [vocab_size, d_model], uniform init */
-    float bound = 1.0f / sqrtf((float)d_model);
-    lm->embedding_table = tensor_uniform(params_pool, 2, (int[]){vocab_size, d_model}, 1, bound);
-    module_param(&lm->base, "embedding_table", lm->embedding_table);
+    /* Embedding table */
+    lm->embed = embedding_create(params_pool, vocab_size, d_model);
+    module_add_child(&lm->base, "embed", &lm->embed->base);
 
     /* Transformer blocks */
     lm->blocks = _mem_pool_alloc(params_pool, n_layers * sizeof(transformer_block*), NULL);
@@ -248,29 +236,25 @@ decoder_lm *decoder_lm_create(struct mem_pool *params_pool, int vocab_size, int 
         module_add_child(&lm->base, name, &lm->blocks[i]->base);
     }
 
-    /* Final layer norm: γ=1, β=0 */
-    lm->norm_weight = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
-    lm->norm_bias   = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
-    float *wn = tensor_data_ptr(lm->norm_weight);
-    for (int i = 0; i < d_model; i++) wn[i] = 1.0f;
-    module_param(&lm->base, "norm_weight", lm->norm_weight);
-    module_param(&lm->base, "norm_bias",   lm->norm_bias);
+    /* Final layer norm */
+    lm->norm = layer_norm_create(params_pool, d_model, 1e-5f);
+    module_add_child(&lm->base, "norm", &lm->norm->base);
 
     /* LM head: d_model → vocab_size (weight tied to embedding) */
     lm->lm_head = _mem_pool_alloc(params_pool, sizeof(linear), NULL);
     module_init(&lm->lm_head->base, params_pool, "linear");
     lm->lm_head->in_features  = d_model;
     lm->lm_head->out_features = vocab_size;
-    /* weight = transpose(embedding_table) — persistent copy in params pool */
+    /* weight = transpose(embedding) — persistent copy in params pool */
     {
-        tensor *tmp = tensor_transpose(params_pool, lm->embedding_table, 0, 1);
+        tensor *tmp = tensor_transpose(params_pool, lm->embed->weight, 0, 1);
         lm->lm_head->weight = _mem_pool_alloc(params_pool, sizeof(tensor), tmp);
         lm->lm_head->weight->pool = params_pool;
     }
     lm->lm_head->bias = tensor_zeros(params_pool, 1, (int[]){vocab_size}, 1);
-    /* bias is the only param of lm_head — weight is tied to embedding_table
+    /* bias is the only param of lm_head — weight is tied to embedding
        (shares data buffer), so it's NOT registered as a separate param.
-       The optimizer sees it via embedding_table. */
+       The optimizer sees it via embedding->weight. */
     module_param(&lm->lm_head->base, "bias", lm->lm_head->bias);
     module_add_child(&lm->base, "lm_head", &lm->lm_head->base);
 
@@ -290,7 +274,7 @@ tensor *decoder_lm_forward(struct mem_pool *scratch, decoder_lm *lm, const tenso
     tensor *flat_ids = tensor_flatten(scratch, (tensor*)input_ids);  /* view, no data copy */
 
     /* Embed: [B*N] → [B*N, d_model] */
-    tensor *h = tensor_embedding(scratch, lm->embedding_table, flat_ids);
+    tensor *h = embedding_forward(scratch, NULL, lm->embed, flat_ids);
 
     /* Reshape to [B, N, d_model] */
     h = tensor_reshape(scratch, h, 3, (int[]){B, N, D});
@@ -301,7 +285,7 @@ tensor *decoder_lm_forward(struct mem_pool *scratch, decoder_lm *lm, const tenso
     }
 
     /* Final layer norm */
-    h = tensor_layer_norm(scratch, h, lm->norm_weight, lm->norm_bias, 1e-5f);
+    h = layer_norm_forward(scratch, lm->norm, h);
 
     /* LM head: [B, N, d_model] → [B, N, vocab_size] */
     tensor *logits = linear_forward(scratch, lm->lm_head, h);
@@ -387,8 +371,7 @@ tensor *transformer_block_forward_cached(struct mem_pool *scratch,
     int d_k   = block->d_k;
 
     /* Pre-norm */
-    tensor *h = tensor_layer_norm(scratch, x, block->attn_norm_weight,
-                                   block->attn_norm_bias, 1e-5f);
+    tensor *h = layer_norm_forward(scratch, block->attn_norm, x);
 
     /* QKV projections */
     tensor *Q = linear_forward(scratch, block->q_proj, h);  /* [B, N_new, H*d_k] */
@@ -564,8 +547,7 @@ tensor *transformer_block_forward_cached(struct mem_pool *scratch,
     tensor *x_after_attn = tensor_add(scratch, x, attn_proj);
 
     /* ── FFN sublayer (pre-norm) ── */
-    h = tensor_layer_norm(scratch, x_after_attn, block->ffn_norm_weight,
-                           block->ffn_norm_bias, 1e-5f);
+    h = layer_norm_forward(scratch, block->ffn_norm, x_after_attn);
     tensor *ffn_out = swiglu_ffn_forward(scratch, block->ffn, h);
 
     /* Second residual */
@@ -671,7 +653,7 @@ int *decoder_lm_generate(struct mem_pool *scratch_pool, struct mem_pool *data_po
             ((int*)single_id_data->data)[0] = output[p];
 
             /* Embed: [1] → [1, d_model], then reshape to [1, 1, d_model] */
-            tensor *flat_emb = tensor_embedding(scratch_pool, lm->embedding_table, single_id_data);
+            tensor *flat_emb = embedding_forward(scratch_pool, NULL, lm->embed, single_id_data);
             tensor *h = tensor_reshape(scratch_pool, flat_emb, 3, (int[]){1, 1, d_model});
 
             /* Pass through all transformer blocks with cache */
@@ -681,7 +663,7 @@ int *decoder_lm_generate(struct mem_pool *scratch_pool, struct mem_pool *data_po
 
             /* Final norm + lm_head (only needed for last prompt token's logits) */
             if (p == prompt_len - 1) {
-                h = tensor_layer_norm(scratch_pool, h, lm->norm_weight, lm->norm_bias, 1e-5f);
+                h = layer_norm_forward(scratch_pool, lm->norm, h);
                 tensor *logits = linear_forward(scratch_pool, lm->lm_head, h);  /* [1, 1, vocab] */
                 float *ld = tensor_data_ptr(logits);
 
@@ -710,14 +692,14 @@ int *decoder_lm_generate(struct mem_pool *scratch_pool, struct mem_pool *data_po
         while (cur_len < max_len) {
             ((int*)single_id_data->data)[0] = output[cur_len - 1];
 
-            tensor *flat_emb = tensor_embedding(scratch_pool, lm->embedding_table, single_id_data);
+            tensor *flat_emb = embedding_forward(scratch_pool, NULL, lm->embed, single_id_data);
             tensor *h = tensor_reshape(scratch_pool, flat_emb, 3, (int[]){1, 1, d_model});
 
             for (int i = 0; i < lm->n_layers; i++) {
                 h = transformer_block_forward_cached(scratch_pool, lm->blocks[i], h, caches[i]);
             }
 
-            h = tensor_layer_norm(scratch_pool, h, lm->norm_weight, lm->norm_bias, 1e-5f);
+            h = layer_norm_forward(scratch_pool, lm->norm, h);
             tensor *logits = linear_forward(scratch_pool, lm->lm_head, h);
             float *ld = tensor_data_ptr(logits);
 
@@ -802,14 +784,35 @@ static float _randn(void) {
     return sqrtf(-2.0f * logf(u1 + 1e-10f)) * cosf(6.283185307179586f * u2);
 }
 
-/* Re-initialize a linear layer: weight ~ Normal(0, std), bias = 0 */
-static void _init_linear(linear *l, float std) {
-    int nw = tensor_numel(l->weight);
-    float *wd = tensor_data_ptr(l->weight);
-    for (int i = 0; i < nw; i++) wd[i] = _randn() * std;
 
-    /* zero bias */
+
+static void _init_linear(linear *l, float std) {
+    /* Weight may be a transposed view (tied weights) — skip if non-contiguous.
+       Bias is always contiguous. */
+    if (tensor_is_contiguous(l->weight)) {
+        int nw = tensor_numel(l->weight);
+        float *wd = tensor_data_ptr(l->weight);
+        for (int i = 0; i < nw; i++) wd[i] = _randn() * std;
+    }
     memset(tensor_data_ptr(l->bias), 0, (size_t)tensor_numel(l->bias) * sizeof(float));
+}
+
+/* Recursively walk module tree, init linear weights.
+   Residual branches (out_proj, down_proj) get scaled std. */
+static void _init_module_weights(module *m, float std, float residual_std) {
+    for (module_item *item = m->items_head; item; item = item->next) {
+        if (item->kind == MODULE_ITEM_CHILD) {
+            module *child = item->as.child;
+            if (strcmp(child->type_name, "linear") == 0) {
+                float s = (strstr(item->name, "out_proj") ||
+                           strstr(item->name, "down_proj"))
+                          ? residual_std : std;
+                _init_linear((linear *)child, s);
+            } else {
+                _init_module_weights(child, std, residual_std);
+            }
+        }
+    }
 }
 
 void decoder_lm_init_weights(decoder_lm *lm) {
@@ -817,26 +820,15 @@ void decoder_lm_init_weights(decoder_lm *lm) {
     float std = 0.02f;
     float residual_std = std / sqrtf(2.0f * (float)lm->n_layers);
 
-    /* Embedding table */
-    int ne = tensor_numel(lm->embedding_table);
-    float *ed = tensor_data_ptr(lm->embedding_table);
+    /* Embedding table: Normal(0, std) */
+    int ne = tensor_numel(lm->embed->weight);
+    float *ed = tensor_data_ptr(lm->embed->weight);
     for (int i = 0; i < ne; i++) ed[i] = _randn() * std;
 
-    /* Each transformer block */
-    for (int i = 0; i < lm->n_layers; i++) {
-        transformer_block *b = lm->blocks[i];
-        _init_linear(b->q_proj,        std);
-        _init_linear(b->k_proj,        std);
-        _init_linear(b->v_proj,        std);
-        _init_linear(b->out_proj,      residual_std);  /* residual branch */
-        _init_linear(b->ffn->gate_proj, std);
-        _init_linear(b->ffn->up_proj,   std);
-        _init_linear(b->ffn->down_proj, residual_std);  /* residual branch */
-    }
-
-    /* LM head: weight tied to embedding (already initialized), zero bias */
-    memset(tensor_data_ptr(lm->lm_head->bias), 0,
-           (size_t)tensor_numel(lm->lm_head->bias) * sizeof(float));
+    /* Walk all children recursively — inits all linears (weight + bias).
+       lm_head weight is a tied view of embed->weight (already inited),
+       so _init_linear skips it and only zeroes the bias. */
+    _init_module_weights(&lm->base, std, residual_std);
 
     /* Layer norm γ=1, β=0 — already correct after decoder_lm_create, skip */
 }

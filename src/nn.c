@@ -1,5 +1,6 @@
 #include "nn.h"
 #include "ops.h"
+#include "norm.h"
 #include "conv.h"
 #include "autograd.h"
 #include "pool.h"
@@ -114,4 +115,65 @@ tensor *conv2d_forward(struct mem_pool *scratch, conv2d *c, const tensor *input)
     assert(input);
     return tensor_conv2d(scratch, (tensor*)input, c->weight, c->bias,
                           c->stride, c->padding);
+}
+
+/* ── LayerNorm ── */
+
+layer_norm *layer_norm_create(struct mem_pool *params, int d, float eps) {
+    assert(d > 0);
+
+    layer_norm *ln = _mem_pool_alloc(params, sizeof(layer_norm), NULL);
+    module_init(&ln->base, params, "layer_norm");
+
+    ln->d   = d;
+    ln->eps = eps;
+
+    ln->weight = tensor_zeros(params, 1, (int[]){d}, 1);
+    ln->bias   = tensor_zeros(params, 1, (int[]){d}, 1);
+    float *wd = tensor_data_ptr(ln->weight);
+    for (int i = 0; i < d; i++) wd[i] = 1.0f;
+
+    module_param(&ln->base, "weight", ln->weight);
+    module_param(&ln->base, "bias",   ln->bias);
+    return ln;
+}
+
+tensor *layer_norm_forward(struct mem_pool *scratch, layer_norm *ln, const tensor *x) {
+    assert(ln);
+    assert(x);
+    return tensor_layer_norm(scratch, x, ln->weight, ln->bias, ln->eps);
+}
+
+long long layer_norm_num_parameters(layer_norm *ln) {
+    return module_num_parameters(&ln->base);
+}
+
+/* ── Embedding ── */
+
+embedding *embedding_create(struct mem_pool *params, int vocab_size, int d_model) {
+    assert(vocab_size > 0 && d_model > 0);
+
+    embedding *emb = _mem_pool_alloc(params, sizeof(embedding), NULL);
+    module_init(&emb->base, params, "embedding");
+
+    emb->vocab_size = vocab_size;
+    emb->d_model    = d_model;
+
+    float bound = 1.0f / sqrtf((float)d_model);
+    emb->weight = tensor_uniform(params, 2, (int[]){vocab_size, d_model}, 1, bound);
+
+    module_param(&emb->base, "weight", emb->weight);
+    return emb;
+}
+
+tensor *embedding_forward(struct mem_pool *scratch, struct mem_pool *data,
+                           embedding *emb, const tensor *ids) {
+    assert(emb);
+    assert(ids);
+    (void)data;
+    return tensor_embedding(scratch, emb->weight, ids);
+}
+
+long long embedding_num_parameters(embedding *emb) {
+    return module_num_parameters(&emb->base);
 }

@@ -23,44 +23,7 @@ static tensor *make_int_tensor(int ndim, const int *shape, const int *data) {
 }
 
 static tensor **collect_params(decoder_lm *lm, int *n_out) {
-    /* Collect all trainable params into a flat array.
-     * We over-allocate; exact count determined during traversal. */
-    tensor *all[256];
-    int n = 0;
-
-    all[n++] = lm->embedding_table;
-    all[n++] = lm->norm_weight;
-    all[n++] = lm->norm_bias;
-    /* lm_head->weight excluded — weight-tying via transposed view of embedding_table,
-     * so embedding_table is the sole optimizer param for that shared data. */
-    all[n++] = lm->lm_head->bias;
-
-    for (int i = 0; i < lm->n_layers; i++) {
-        transformer_block *b = lm->blocks[i];
-        all[n++] = b->q_proj->weight;
-        all[n++] = b->q_proj->bias;
-        all[n++] = b->k_proj->weight;
-        all[n++] = b->k_proj->bias;
-        all[n++] = b->v_proj->weight;
-        all[n++] = b->v_proj->bias;
-        all[n++] = b->out_proj->weight;
-        all[n++] = b->out_proj->bias;
-        all[n++] = b->attn_norm_weight;
-        all[n++] = b->attn_norm_bias;
-        all[n++] = b->ffn_norm_weight;
-        all[n++] = b->ffn_norm_bias;
-        all[n++] = b->ffn->gate_proj->weight;
-        all[n++] = b->ffn->gate_proj->bias;
-        all[n++] = b->ffn->up_proj->weight;
-        all[n++] = b->ffn->up_proj->bias;
-        all[n++] = b->ffn->down_proj->weight;
-        all[n++] = b->ffn->down_proj->bias;
-    }
-
-    *n_out = n;
-    tensor **arr = _mem_pool_alloc(ctx.params, n * sizeof(tensor*), NULL);
-    memcpy(arr, all, n * sizeof(tensor*));
-    return arr;
+    return module_parameters(&lm->base, n_out);
 }
 
 /* ── Test: train step runs and loss is finite ── */
@@ -116,7 +79,7 @@ static void test_gradients_flow(void) {
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ids);
 
     /* Before step, no grads exist */
-    assert(tensor_grad(lm->embedding_table) == NULL);
+    assert(tensor_grad(lm->embed->weight) == NULL);
 
     tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
 
@@ -127,11 +90,11 @@ static void test_gradients_flow(void) {
     /* Check a representative set.
      * lm_head->weight is a transposed view of embedding_table (weight tying),
      * so grad is on embedding_table root. */
-    assert(tensor_grad(lm->embedding_table) != NULL);
-    assert(tensor_grad(lm->norm_weight) != NULL);
+    assert(tensor_grad(lm->embed->weight) != NULL);
+    assert(tensor_grad(lm->norm->weight) != NULL);
 
     /* Check grads are finite */
-    float *eg = tensor_grad(lm->embedding_table);
+    float *eg = tensor_grad(lm->embed->weight);
     for (int i = 0; i < vocab * d_model; i++) assert(isfinite(eg[i]));
 
     /* Check all block params have grad buffers (allocated during backward) */
@@ -141,8 +104,8 @@ static void test_gradients_flow(void) {
     assert(tensor_grad(b0->k_proj->weight) != NULL);
     assert(tensor_grad(b0->v_proj->weight) != NULL);
     assert(tensor_grad(b0->out_proj->weight) != NULL);
-    assert(tensor_grad(b0->attn_norm_weight) != NULL);
-    assert(tensor_grad(b0->ffn_norm_weight) != NULL);
+    assert(tensor_grad(b0->attn_norm->weight) != NULL);
+    assert(tensor_grad(b0->ffn_norm->weight) != NULL);
     assert(tensor_grad(b0->ffn->gate_proj->weight) != NULL);
     assert(tensor_grad(b0->ffn->up_proj->weight) != NULL);
     assert(tensor_grad(b0->ffn->down_proj->weight) != NULL);
@@ -182,7 +145,7 @@ static void test_params_update(void) {
     /* Snapshot initial embeddings */
     int emb_n = vocab * d_model;
     float *emb_init = malloc(emb_n * sizeof(float));
-    memcpy(emb_init, tensor_data_ptr(lm->embedding_table), emb_n * sizeof(float));
+    memcpy(emb_init, tensor_data_ptr(lm->embed->weight), emb_n * sizeof(float));
 
     int n_params;
     tensor **all_params = collect_params(lm, &n_params);
@@ -195,7 +158,7 @@ static void test_params_update(void) {
     decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
 
     /* Embedding table should have changed */
-    float *emb_final = tensor_data_ptr(lm->embedding_table);
+    float *emb_final = tensor_data_ptr(lm->embed->weight);
     float max_diff = 0.0f;
     for (int i = 0; i < emb_n; i++) {
         float d = fabsf(emb_final[i] - emb_init[i]);

@@ -63,13 +63,13 @@ tensor *mnist_load_labels(struct mem_pool *data, const char *path);
 /* ── Model lifecycle ── */
 
 mnist_model    *mnist_model_create(struct mem_pool *params_pool);
-tensor         *mnist_model_forward(struct mem_pool *scratch, mnist_model *m, const tensor *x);
+tensor         *mnist_model_forward(struct mem_pool *scratch, struct module *base, const tensor *x);
 
 mnist_model_cnn *mnist_model_create_cnn(struct mem_pool *params_pool);
-tensor          *mnist_model_forward_cnn(struct mem_pool *scratch, mnist_model_cnn *m, const tensor *x);
+tensor          *mnist_model_forward_cnn(struct mem_pool *scratch, struct module *base, const tensor *x);
 
 mnist_model_cnn_pool *mnist_model_create_cnn_pool(struct mem_pool *params_pool);
-tensor               *mnist_model_forward_cnn_pool(struct mem_pool *scratch, mnist_model_cnn_pool *m, const tensor *x);
+tensor               *mnist_model_forward_cnn_pool(struct mem_pool *scratch, struct module *base, const tensor *x);
 
 /* ── Training / eval ── */
 
@@ -97,31 +97,11 @@ void   mnist_train_cnn_pool(struct dnn_ctx *ctx, mnist_model_cnn_pool *m,
 
 /* Compute accuracy (0.0 – 1.0) on given dataset. Runs in no-grad mode.
  *
- * forward_fn — model-specific forward function (e.g. mnist_model_forward
- *              or mnist_model_forward_cnn).  Receives the model pointer
- *              and input tensor, returns logits [N, 10].
+ *   forward_fn — model forward function, receives module* and input, returns logits [N, 10].
+ *   model must be castable to module* (module base is first field).
  */
-float  mnist_eval_generic(struct mem_pool *scratch, void *model,
-                          tensor *(*forward_fn)(struct mem_pool *, void *, const tensor *),
-                          tensor *images, tensor *labels);
-
-static inline float mnist_eval(struct mem_pool *scratch, mnist_model *m, tensor *images, tensor *labels) {
-    return mnist_eval_generic(scratch, m,
-        (tensor *(*)(struct mem_pool *, void *, const tensor *))mnist_model_forward,
-        images, labels);
-}
-
-static inline float mnist_eval_cnn(struct mem_pool *scratch, mnist_model_cnn *m, tensor *images, tensor *labels) {
-    return mnist_eval_generic(scratch, m,
-        (tensor *(*)(struct mem_pool *, void *, const tensor *))mnist_model_forward_cnn,
-        images, labels);
-}
-
-static inline float mnist_eval_cnn_pool(struct mem_pool *scratch, mnist_model_cnn_pool *m,
-                                         tensor *images, tensor *labels) {
-    return mnist_eval_generic(scratch, m,
-        (tensor *(*)(struct mem_pool *, void *, const tensor *))mnist_model_forward_cnn_pool,
-        images, labels);
-}
+float  mnist_eval(struct mem_pool *scratch, struct module *model,
+                  tensor *(*forward_fn)(struct mem_pool *, struct module *, const tensor *),
+                  tensor *images, tensor *labels);
 
 #endif /* MNIST_H */

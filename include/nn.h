@@ -44,6 +44,42 @@ typedef struct swiglu_ffn {
 swiglu_ffn *swiglu_ffn_create(struct mem_pool *params_pool, int d_model, int intermediate_size);
 tensor     *swiglu_ffn_forward(struct mem_pool *scratch, swiglu_ffn *ffn, const tensor *x);
 
+/* ── LayerNorm ──
+ *
+ *   y = γ * (x - μ) / √(σ² + ε) + β
+ *
+ *   weight — [d], init 1
+ *   bias   — [d], init 0
+ *   eps    — small constant for numerical stability
+ */
+typedef struct layer_norm {
+    module  base;
+    tensor *weight;
+    tensor *bias;
+    float   eps;
+    int     d;
+} layer_norm;
+
+layer_norm *layer_norm_create(struct mem_pool *params, int d, float eps);
+tensor     *layer_norm_forward(struct mem_pool *scratch, layer_norm *ln, const tensor *x);
+
+/* ── Embedding ──
+ *
+ *   out = table[ids]
+ *
+ *   weight — [vocab_size, d_model], uniform init
+ */
+typedef struct embedding {
+    module  base;
+    tensor *weight;
+    int     vocab_size;
+    int     d_model;
+} embedding;
+
+embedding *embedding_create(struct mem_pool *params, int vocab_size, int d_model);
+tensor    *embedding_forward(struct mem_pool *scratch, struct mem_pool *data,
+                             embedding *emb, const tensor *ids);
+
 /* ── Conv2D layer ──
  *
  *   y = conv2d(x, weight, bias, stride, padding)
@@ -69,5 +105,7 @@ tensor  *conv2d_forward(struct mem_pool *scratch, conv2d *c, const tensor *input
 /* ── Parameter count helpers ── */
 long long linear_num_parameters(linear *l);
 long long swiglu_ffn_num_parameters(swiglu_ffn *ffn);
+long long layer_norm_num_parameters(layer_norm *ln);
+long long embedding_num_parameters(embedding *emb);
 
 #endif /* DNN_NN_H */

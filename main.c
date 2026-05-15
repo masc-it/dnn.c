@@ -51,8 +51,10 @@ int main(void) {
     mnist_train_cnn(&ctx, m_cnn, train_images, train_labels, 1, 128, 0.001f, 5000, 3);
 
     printf("\nEvaluating CNN:\n");
-    float cnn_train_acc = mnist_eval_cnn(ctx.scratch, m_cnn, train_images, train_labels);
-    float cnn_test_acc  = mnist_eval_cnn(ctx.scratch, m_cnn, test_images, test_labels);
+    float cnn_train_acc = mnist_eval(ctx.scratch, &m_cnn->base, mnist_model_forward_cnn,
+                                      train_images, train_labels);
+    float cnn_test_acc  = mnist_eval(ctx.scratch, &m_cnn->base, mnist_model_forward_cnn,
+                                      test_images, test_labels);
     printf("  Train accuracy: %.4f\n", cnn_train_acc);
     printf("  Test accuracy:  %.4f\n", cnn_test_acc);
 
