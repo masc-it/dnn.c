@@ -127,9 +127,7 @@ tensor *decoder_lm_train_step(struct mem_pool *scratch_pool, struct mem_pool *da
     int *td = (int *)target->data;
     int *id = (int *)input_ids->data;
     for (int b = 0; b < B; b++) {
-        for (int n = 1; n < N; n++) {
-            td[b * (N - 1) + (n - 1)] = id[b * N + n];
-        }
+        memcpy(td + b * (N - 1), id + b * N + 1, (size_t)(N - 1) * sizeof(int));
     }
 
     /* ── Loss: cross-entropy over vocab dim ── */
