@@ -1,6 +1,7 @@
 #ifndef MNIST_H
 #define MNIST_H
 
+#include "module.h"
 #include "dnn.h"
 
 /* ── Constants ── */
@@ -18,15 +19,17 @@
 
 /* MLP: 784 → 256 → 10 */
 typedef struct {
-    linear *fc1;  /* 784 → 256 */
-    linear *fc2;  /* 256 → 10  */
+    module  base;   /* first field */
+    linear *fc1;    /* 784 → 256 */
+    linear *fc2;    /* 256 → 10  */
 } mnist_model;
 
 /* CNN: convs 1→32→64→64 + FC 3136→128→10 (stride-2 for downsampling) */
 typedef struct {
-    tensor  *conv1_w, *conv1_b;   /*  1→32, 3×3, pad=1, s1 → 28×28 */
-    tensor  *conv2_w, *conv2_b;   /* 32→64, 3×3, pad=1, s2 → 14×14 */
-    tensor  *conv3_w, *conv3_b;   /* 64→64, 3×3, pad=1, s2 →  7×7  */
+    module   base;                 /* first field */
+    conv2d  *conv1;               /*  1→32, 3×3, pad=1, s1 → 28×28 */
+    conv2d  *conv2;               /* 32→64, 3×3, pad=1, s2 → 14×14 */
+    conv2d  *conv3;               /* 64→64, 3×3, pad=1, s2 →  7×7  */
     linear  *fc1;                 /* 3136 → 128 */
     linear  *fc2;                 /* 128  → 10  */
 } mnist_model_cnn;
@@ -36,9 +39,10 @@ typedef struct {
  *   28 → conv1 → 28 → conv2 → 28 → pool → 14 → conv3 → 14 → pool → 7
  */
 typedef struct {
-    tensor  *conv1_w, *conv1_b;   /*  1→32, 3×3, pad=1, s1 → 28×28 */
-    tensor  *conv2_w, *conv2_b;   /* 32→64, 3×3, pad=1, s1 → 28×28 */
-    tensor  *conv3_w, *conv3_b;   /* 64→64, 3×3, pad=1, s1 → 14×14 */
+    module   base;                 /* first field */
+    conv2d  *conv1;               /*  1→32, 3×3, pad=1, s1 → 28×28 */
+    conv2d  *conv2;               /* 32→64, 3×3, pad=1, s1 → 28×28 */
+    conv2d  *conv3;               /* 64→64, 3×3, pad=1, s1 → 14×14 */
     linear  *fc1;                 /* 3136 → 128 */
     linear  *fc2;                 /* 128  → 10  */
 } mnist_model_cnn_pool;

@@ -2,6 +2,7 @@
 #define DNN_TRANSFORMER_H
 
 #include "tensor.h"
+#include "module.h"
 #include "nn.h"
 #include "optim.h"
 
@@ -63,6 +64,7 @@ tensor *kv_cache_get_V(struct mem_pool *scratch, kv_cache *kvc);
  */
 
 typedef struct {
+    module    base;                 /* first field */
     linear    *q_proj;              /* d_model → n_heads * d_k */
     linear    *k_proj;              /* d_model → n_heads * d_k */
     linear    *v_proj;              /* d_model → n_heads * d_k */
@@ -97,14 +99,15 @@ tensor            *transformer_block_forward(struct mem_pool *scratch,
  */
 
 typedef struct {
-    tensor             *embedding_table;  /* [vocab_size, d_model] */
-    transformer_block **blocks;           /* [n_layers] */
-    int                 n_layers;
-    tensor             *norm_weight;      /* [d_model], final layer norm, init 1 */
-    tensor             *norm_bias;        /* [d_model], final layer norm, init 0 */
-    linear             *lm_head;          /* d_model → vocab_size */
-    int                 d_model;
-    int                 vocab_size;
+    module               base;                /* first field */
+    tensor             *embedding_table;      /* [vocab_size, d_model] */
+    transformer_block **blocks;               /* [n_layers] */
+    int                  n_layers;
+    tensor              *norm_weight;         /* [d_model], final layer norm, init 1 */
+    tensor              *norm_bias;           /* [d_model], final layer norm, init 0 */
+    linear              *lm_head;             /* d_model → vocab_size */
+    int                  d_model;
+    int                  vocab_size;
 } decoder_lm;
 
 /* Create decoder-only LM.

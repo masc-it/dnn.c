@@ -44,6 +44,28 @@ typedef struct swiglu_ffn {
 swiglu_ffn *swiglu_ffn_create(struct mem_pool *params_pool, int d_model, int intermediate_size);
 tensor     *swiglu_ffn_forward(struct mem_pool *scratch, swiglu_ffn *ffn, const tensor *x);
 
+/* ── Conv2D layer ──
+ *
+ *   y = conv2d(x, weight, bias, stride, padding)
+ *
+ *   weight shape: [out_channels, in_channels, kH, kW]
+ *   bias   shape: [out_channels]
+ */
+typedef struct conv2d {
+    module  base;
+    tensor *weight;
+    tensor *bias;
+    int     in_channels;
+    int     out_channels;
+    int     kernel_size;
+    int     stride;
+    int     padding;
+} conv2d;
+
+conv2d  *conv2d_create(struct mem_pool *params, int in_channels, int out_channels,
+                       int kernel_size, int stride, int padding);
+tensor  *conv2d_forward(struct mem_pool *scratch, conv2d *c, const tensor *input);
+
 /* ── Parameter count helpers ── */
 long long linear_num_parameters(linear *l);
 long long swiglu_ffn_num_parameters(swiglu_ffn *ffn);

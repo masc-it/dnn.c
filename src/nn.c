@@ -1,5 +1,6 @@
 #include "nn.h"
 #include "ops.h"
+#include "conv.h"
 #include "autograd.h"
 #include "pool.h"
 #include <assert.h>
@@ -77,15 +78,40 @@ tensor *swiglu_ffn_forward(struct mem_pool *scratch, swiglu_ffn *ffn, const tens
 }
 
 long long linear_num_parameters(linear *l) {
-    assert(l);
-    long long n = tensor_numel(l->weight);
-    if (l->bias) n += tensor_numel(l->bias);
-    return n;
+    return module_num_parameters(&l->base);
 }
 
 long long swiglu_ffn_num_parameters(swiglu_ffn *ffn) {
-    assert(ffn);
-    return linear_num_parameters(ffn->gate_proj)
-         + linear_num_parameters(ffn->up_proj)
-         + linear_num_parameters(ffn->down_proj);
+    return module_num_parameters(&ffn->base);
+}
+
+/* ── Conv2D ── */
+
+conv2d *conv2d_create(struct mem_pool *params, int in_channels, int out_channels,
+                       int kernel_size, int stride, int padding) {
+    assert(in_channels > 0 && out_channels > 0 && kernel_size > 0);
+
+    conv2d *c = _mem_pool_alloc(params, sizeof(conv2d), NULL);
+    module_init(&c->base, params, "conv2d");
+
+    c->in_channels  = in_channels;
+    c->out_channels = out_channels;
+    c->kernel_size  = kernel_size;
+    c->stride       = stride;
+    c->padding      = padding;
+
+    float bound = sqrtf(6.0f / (float)(in_channels * kernel_size * kernel_size));
+    c->weight = tensor_uniform(params, 4, (int[]){out_channels, in_channels, kernel_size, kernel_size}, 1, bound);
+    c->bias   = tensor_zeros(params, 1, (int[]){out_channels}, 1);
+
+    module_param(&c->base, "weight", c->weight);
+    module_param(&c->base, "bias",   c->bias);
+    return c;
+}
+
+tensor *conv2d_forward(struct mem_pool *scratch, conv2d *c, const tensor *input) {
+    assert(c);
+    assert(input);
+    return tensor_conv2d(scratch, (tensor*)input, c->weight, c->bias,
+                          c->stride, c->padding);
 }

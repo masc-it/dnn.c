@@ -213,9 +213,8 @@ static int test_cnn_model(void) {
     printf("  total fwd+bwd: %.2f ms\n", t5 - t0);
 
     /* check grads on all params */
-    tensor *params[] = {m->conv1_w, m->conv1_b, m->conv2_w, m->conv2_b,
-                        m->conv3_w, m->conv3_b, m->fc1->weight, m->fc1->bias,
-                        m->fc2->weight, m->fc2->bias};
+    int n_p;
+    tensor **params = module_parameters(&m->base, &n_p);
     int grads_ok = 1;
     for (int i = 0; i < 10; i++) {
         float *g = tensor_grad(params[i]);
@@ -230,17 +229,17 @@ static int test_cnn_model(void) {
     printf("  after reshape: (%d,%d,%d,%d)\n",
            tensor_shape(h,0),tensor_shape(h,1),tensor_shape(h,2),tensor_shape(h,3));
 
-    h = tensor_conv2d(ctx.scratch, h, m->conv1_w, m->conv1_b, 1, 1);
+    h = conv2d_forward(ctx.scratch, m->conv1, h);
     printf("  after conv1: (%d,%d,%d,%d)\n",
            tensor_shape(h,0),tensor_shape(h,1),tensor_shape(h,2),tensor_shape(h,3));
 
     h = tensor_relu(ctx.scratch, h);
-    h = tensor_conv2d(ctx.scratch, h, m->conv2_w, m->conv2_b, 2, 1);
+    h = conv2d_forward(ctx.scratch, m->conv2, h);
     printf("  after conv2: (%d,%d,%d,%d)\n",
            tensor_shape(h,0),tensor_shape(h,1),tensor_shape(h,2),tensor_shape(h,3));
 
     h = tensor_relu(ctx.scratch, h);
-    h = tensor_conv2d(ctx.scratch, h, m->conv3_w, m->conv3_b, 2, 1);
+    h = conv2d_forward(ctx.scratch, m->conv3, h);
     printf("  after conv3: (%d,%d,%d,%d)\n",
            tensor_shape(h,0),tensor_shape(h,1),tensor_shape(h,2),tensor_shape(h,3));
 
@@ -269,10 +268,9 @@ static int test_cnn_timing(void) {
     mem_pool_reset(ctx.scratch);
 
     mnist_model_cnn *m = mnist_model_create_cnn(ctx.params);
-    tensor *params[] = {m->conv1_w, m->conv1_b, m->conv2_w, m->conv2_b,
-                        m->conv3_w, m->conv3_b, m->fc1->weight, m->fc1->bias,
-                        m->fc2->weight, m->fc2->bias};
-    adamw_opt *opt = adamw_create(ctx.params, params, 10, 0.001f, 0.9f, 0.999f, 1e-8f, 0.01f);
+    int n_p;
+    tensor **params = module_parameters(&m->base, &n_p);
+    adamw_opt *opt = adamw_create(ctx.params, params, n_p, 0.001f, 0.9f, 0.999f, 1e-8f, 0.01f);
 
     int N = 128;
     int n_batches = 10;

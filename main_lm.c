@@ -132,8 +132,9 @@ int main(void) {
     decoder_lm *lm = decoder_lm_create(ctx.params, VOCAB_SIZE, D_MODEL, N_LAYERS,
                                         N_HEADS, D_K, INTERMEDIATE);
     {
-        long long n = decoder_lm_num_parameters(lm);
+        long long n = module_num_parameters(&lm->base);
         printf("  model created.  Parameters: %lld (%.2fM)\n", n, n / 1e6);
+        module_summary(&lm->base, 0, 0);
     }
 
     /* ── Init weights (GPT-2 style, overrides uniform default) ── */
@@ -145,35 +146,8 @@ int main(void) {
     printf("  RoPE enabled (base=10000.0, max_seq=%d).\n", ds.seq_len);
 
     /* ── Collect all trainable params ── */
-    tensor *all_params[256];
-    int n_params = 0;
-
-    all_params[n_params++] = lm->embedding_table;       /* includes tied lm_head weight */
-    all_params[n_params++] = lm->norm_weight;
-    all_params[n_params++] = lm->norm_bias;
-    all_params[n_params++] = lm->lm_head->bias;
-
-    for (int i = 0; i < lm->n_layers; i++) {
-        transformer_block *b = lm->blocks[i];
-        all_params[n_params++] = b->q_proj->weight;
-        all_params[n_params++] = b->q_proj->bias;
-        all_params[n_params++] = b->k_proj->weight;
-        all_params[n_params++] = b->k_proj->bias;
-        all_params[n_params++] = b->v_proj->weight;
-        all_params[n_params++] = b->v_proj->bias;
-        all_params[n_params++] = b->out_proj->weight;
-        all_params[n_params++] = b->out_proj->bias;
-        all_params[n_params++] = b->attn_norm_weight;
-        all_params[n_params++] = b->attn_norm_bias;
-        all_params[n_params++] = b->ffn_norm_weight;
-        all_params[n_params++] = b->ffn_norm_bias;
-        all_params[n_params++] = b->ffn->gate_proj->weight;
-        all_params[n_params++] = b->ffn->gate_proj->bias;
-        all_params[n_params++] = b->ffn->up_proj->weight;
-        all_params[n_params++] = b->ffn->up_proj->bias;
-        all_params[n_params++] = b->ffn->down_proj->weight;
-        all_params[n_params++] = b->ffn->down_proj->bias;
-    }
+    int n_params;
+    tensor **all_params = module_parameters(&lm->base, &n_params);
 
     printf("  %d param groups.\n", n_params);
 

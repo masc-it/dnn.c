@@ -52,19 +52,19 @@ int main(void) {
     tensor *h = tensor_reshape(ctx.scratch, (tensor*)x, 4, (int[]){N, 1, 28, 28});
 
     t0 = now_ms();
-    h = tensor_conv2d(ctx.scratch, h, m->conv1_w, m->conv1_b, 1, 1);
+    h = conv2d_forward(ctx.scratch, m->conv1, h);
     t1 = now_ms(); printf("  conv1:   %6.2f ms\n", t1 - t0); t0 = t1;
 
     h = tensor_relu(ctx.scratch, h);
     t1 = now_ms(); printf("  relu1:   %6.2f ms\n", t1 - t0); t0 = t1;
 
-    h = tensor_conv2d(ctx.scratch, h, m->conv2_w, m->conv2_b, 2, 1);
+    h = conv2d_forward(ctx.scratch, m->conv2, h);
     t1 = now_ms(); printf("  conv2:   %6.2f ms\n", t1 - t0); t0 = t1;
 
     h = tensor_relu(ctx.scratch, h);
     t1 = now_ms(); printf("  relu2:   %6.2f ms\n", t1 - t0); t0 = t1;
 
-    h = tensor_conv2d(ctx.scratch, h, m->conv3_w, m->conv3_b, 2, 1);
+    h = conv2d_forward(ctx.scratch, m->conv3, h);
     t1 = now_ms(); printf("  conv3:   %6.2f ms\n", t1 - t0); t0 = t1;
 
     h = tensor_relu(ctx.scratch, h);
@@ -88,13 +88,13 @@ int main(void) {
 
     /* forward without timing */
     h = tensor_reshape(ctx.scratch, (tensor*)x, 4, (int[]){N, 1, 28, 28});
-    h = tensor_conv2d(ctx.scratch, h, m->conv1_w, m->conv1_b, 1, 1);
+    h = conv2d_forward(ctx.scratch, m->conv1, h);
     h = tensor_relu(ctx.scratch, h);
     tensor *c1 = h;
-    h = tensor_conv2d(ctx.scratch, h, m->conv2_w, m->conv2_b, 2, 1);
+    h = conv2d_forward(ctx.scratch, m->conv2, h);
     h = tensor_relu(ctx.scratch, h);
     tensor *c2 = h;
-    h = tensor_conv2d(ctx.scratch, h, m->conv3_w, m->conv3_b, 2, 1);
+    h = conv2d_forward(ctx.scratch, m->conv3, h);
     h = tensor_relu(ctx.scratch, h);
     tensor *c3 = h;
     h = tensor_reshape(ctx.scratch, h, 2, (int[]){N, -1});

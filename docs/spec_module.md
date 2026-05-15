@@ -73,7 +73,8 @@ typedef struct module {
 /* Initialize header. params pool owns the containing module struct. */
 void module_init(module *m, struct mem_pool *params, const char *type_name);
 
-/* Register direct parameter tensor. t must be stable in params pool. */
+/* Register direct parameter tensor. t must be stable in params pool,
+   non-view (parent == NULL), and contiguous. */
 void module_param(module *m, const char *name, tensor *t);
 
 /* Register child submodule. Sets child->parent = m. */
@@ -83,7 +84,8 @@ void module_add_child(module *m, const char *name, module *child);
 Rules:
 
 - `name` required and must outlive module (string literal or pool-owned generated string).
-- `module_add_child()` asserts `child->parent == NULL`.
+- `module_param()` asserts `t->pool == m->pool`, `t->parent == NULL`, and `tensor_is_contiguous(t)`.
+- `module_add_child()` asserts `child != m`, `child->pool == m->pool`, and `child->parent == NULL`.
 - Registration after introspection is invalid. Helpers assert current module and ancestors have no `flat_params` cache.
 - Module tree is immutable after construction / first `module_parameters()`.
 

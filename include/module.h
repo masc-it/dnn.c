@@ -73,4 +73,40 @@ long long module_num_parameters(module *m);
 /* Zero grad buffers for all unique recursive params. */
 void module_zero_grad(module *m);
 
+/* ── Inspection ── */
+
+/* Print module tree to stdout.
+ *
+ *   m      — root module
+ *   indent — initial indent level (0 for root)
+ *   detail — if non-zero, print direct param tensor names + shapes
+ */
+void module_summary(module *m, int indent, int detail);
+
+/* Find a parameter tensor by its full state path, e.g. "blocks.0.q_proj.weight".
+ * Returns NULL if not found. */
+tensor *module_find_param(module *m, const char *name);
+
+/* ── State dict save/load ── */
+
+#define MODULE_STATE_MAX_NAME 4096
+
+/* Save all registered named params to a binary file.
+ * Format: magic(4) + version(4) + header_size(4) + n_entries(4) +
+ *   entries[n_entries] of {name_len(4), name, ndim(4), shape[], numel(4), data}.
+ * All ints are uint32 little-endian. */
+void module_save(module *m, const char *path);
+
+/* Load weights into an already-constructed model.
+ *
+ *   strict != 0:
+ *     - unknown file key asserts
+ *     - missing live key asserts
+ *   strict == 0:
+ *     - unknown file key skipped
+ *     - missing live key left unchanged
+ *   Shape mismatch for a matched key always asserts. */
+void module_load(module *m, const char *path, int strict);
+
+
 #endif /* DNN_MODULE_H */

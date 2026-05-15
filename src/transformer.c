@@ -13,6 +13,7 @@
 #include <assert.h>
 #include <string.h>
 #include <math.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 /* BLAS for fast matmul in cached attention */
@@ -118,27 +119,38 @@ transformer_block *transformer_block_create(struct mem_pool *params_pool, int d_
     assert(d_model == n_heads * d_k && "d_model must equal n_heads * d_k");
 
     transformer_block *block = _mem_pool_alloc(params_pool, sizeof(transformer_block), NULL);
+    module_init(&block->base, params_pool, "transformer_block");
+
     block->d_model  = d_model;
     block->n_heads  = n_heads;
     block->d_k      = d_k;
 
     block->q_proj   = linear_create(params_pool, d_model, n_heads * d_k);
+    module_add_child(&block->base, "q_proj", &block->q_proj->base);
     block->k_proj   = linear_create(params_pool, d_model, n_heads * d_k);
+    module_add_child(&block->base, "k_proj", &block->k_proj->base);
     block->v_proj   = linear_create(params_pool, d_model, n_heads * d_k);
+    module_add_child(&block->base, "v_proj", &block->v_proj->base);
     block->out_proj = linear_create(params_pool, n_heads * d_k, d_model);
+    module_add_child(&block->base, "out_proj", &block->out_proj->base);
 
     /* Pre-norm params: init γ=1, β=0 */
     block->attn_norm_weight = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
     block->attn_norm_bias   = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
     float *wn = tensor_data_ptr(block->attn_norm_weight);
     for (int i = 0; i < d_model; i++) wn[i] = 1.0f;
+    module_param(&block->base, "attn_norm_weight", block->attn_norm_weight);
+    module_param(&block->base, "attn_norm_bias",   block->attn_norm_bias);
 
     block->ffn_norm_weight = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
     block->ffn_norm_bias   = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
     float *wf = tensor_data_ptr(block->ffn_norm_weight);
     for (int i = 0; i < d_model; i++) wf[i] = 1.0f;
+    module_param(&block->base, "ffn_norm_weight", block->ffn_norm_weight);
+    module_param(&block->base, "ffn_norm_bias",   block->ffn_norm_bias);
 
     block->ffn = swiglu_ffn_create(params_pool, d_model, intermediate_size);
+    module_add_child(&block->base, "ffn", &block->ffn->base);
 
     /* RoPE disabled by default */
     block->freqs_cos = NULL;
@@ -210,6 +222,8 @@ decoder_lm *decoder_lm_create(struct mem_pool *params_pool, int vocab_size, int 
     assert(d_model == n_heads * d_k && "d_model must equal n_heads * d_k");
 
     decoder_lm *lm = _mem_pool_alloc(params_pool, sizeof(decoder_lm), NULL);
+    module_init(&lm->base, params_pool, "decoder_lm");
+
     lm->d_model    = d_model;
     lm->vocab_size = vocab_size;
     lm->n_layers   = n_layers;
@@ -217,12 +231,21 @@ decoder_lm *decoder_lm_create(struct mem_pool *params_pool, int vocab_size, int 
     /* Embedding table: [vocab_size, d_model], uniform init */
     float bound = 1.0f / sqrtf((float)d_model);
     lm->embedding_table = tensor_uniform(params_pool, 2, (int[]){vocab_size, d_model}, 1, bound);
+    module_param(&lm->base, "embedding_table", lm->embedding_table);
 
     /* Transformer blocks */
     lm->blocks = _mem_pool_alloc(params_pool, n_layers * sizeof(transformer_block*), NULL);
     for (int i = 0; i < n_layers; i++) {
         lm->blocks[i] = transformer_block_create(params_pool, d_model, n_heads, d_k,
                                                    intermediate_size);
+        /* Build names like "blocks.0", "blocks.1", ... */
+        char name_buf[32];
+        int r = snprintf(name_buf, sizeof(name_buf), "blocks.%d", i);
+        (void)r;
+        /* Names are stable pointers — pool-allocated copy */
+        size_t len = (size_t)r + 1;
+        char *name = _mem_pool_alloc(params_pool, len, name_buf);
+        module_add_child(&lm->base, name, &lm->blocks[i]->base);
     }
 
     /* Final layer norm: γ=1, β=0 */
@@ -230,9 +253,12 @@ decoder_lm *decoder_lm_create(struct mem_pool *params_pool, int vocab_size, int 
     lm->norm_bias   = tensor_zeros(params_pool, 1, (int[]){d_model}, 1);
     float *wn = tensor_data_ptr(lm->norm_weight);
     for (int i = 0; i < d_model; i++) wn[i] = 1.0f;
+    module_param(&lm->base, "norm_weight", lm->norm_weight);
+    module_param(&lm->base, "norm_bias",   lm->norm_bias);
 
     /* LM head: d_model → vocab_size (weight tied to embedding) */
     lm->lm_head = _mem_pool_alloc(params_pool, sizeof(linear), NULL);
+    module_init(&lm->lm_head->base, params_pool, "linear");
     lm->lm_head->in_features  = d_model;
     lm->lm_head->out_features = vocab_size;
     /* weight = transpose(embedding_table) — persistent copy in params pool */
@@ -242,6 +268,11 @@ decoder_lm *decoder_lm_create(struct mem_pool *params_pool, int vocab_size, int 
         lm->lm_head->weight->pool = params_pool;
     }
     lm->lm_head->bias = tensor_zeros(params_pool, 1, (int[]){vocab_size}, 1);
+    /* bias is the only param of lm_head — weight is tied to embedding_table
+       (shares data buffer), so it's NOT registered as a separate param.
+       The optimizer sees it via embedding_table. */
+    module_param(&lm->lm_head->base, "bias", lm->lm_head->bias);
+    module_add_child(&lm->base, "lm_head", &lm->lm_head->base);
 
     return lm;
 }
@@ -754,32 +785,11 @@ done_nocache:
 /* ── Parameter count ── */
 
 long long transformer_block_num_parameters(transformer_block *block) {
-    assert(block);
-    long long n = 0;
-    n += linear_num_parameters(block->q_proj);
-    n += linear_num_parameters(block->k_proj);
-    n += linear_num_parameters(block->v_proj);
-    n += linear_num_parameters(block->out_proj);
-    n += tensor_numel(block->attn_norm_weight);
-    n += tensor_numel(block->attn_norm_bias);
-    n += tensor_numel(block->ffn_norm_weight);
-    n += tensor_numel(block->ffn_norm_bias);
-    n += swiglu_ffn_num_parameters(block->ffn);
-    return n;
+    return module_num_parameters(&block->base);
 }
 
 long long decoder_lm_num_parameters(decoder_lm *lm) {
-    assert(lm);
-    long long n = 0;
-    n += tensor_numel(lm->embedding_table);
-    for (int i = 0; i < lm->n_layers; i++)
-        n += transformer_block_num_parameters(lm->blocks[i]);
-    n += tensor_numel(lm->norm_weight);
-    n += tensor_numel(lm->norm_bias);
-    /* lm_head weight is shared with embedding_table (weight tying) */
-    /* count only the bias separately */
-    n += tensor_numel(lm->lm_head->bias);
-    return n;
+    return module_num_parameters(&lm->base);
 }
 
 
