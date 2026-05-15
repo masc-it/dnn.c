@@ -1,107 +1,4 @@
-#include "dnn.h"
-#include "transformer.h"
-#include "optim.h"
-#include "tokenizer.h"
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <math.h>
-#include <assert.h>
-#include <time.h>
-
-/* ── Binary dataset loader ──
- *
- * Reads promessi.bin format:
- *   Header (64 bytes): magic(4) + version(4) + vocab_size(4)
- *                       + num_sequences(4) + seq_len(4) + reserved(44)
- *   Data: num_sequences × seq_len × int32_t token IDs
- */
-
-typedef struct {
-    int   num_sequences;
-    int   seq_len;
-    int   vocab_size;
-    int  *data;          /* [num_sequences, seq_len] flat int32 IDs */
-    long  data_n;        /* num_sequences * seq_len */
-} lm_dataset;
-
-static lm_dataset load_dataset(const char *path) {
-    lm_dataset ds;
-    memset(&ds, 0, sizeof(ds));
-
-    FILE *f = fopen(path, "rb");
-    if (!f) { perror("fopen"); return ds; }
-
-    unsigned char hdr[64];
-    if (fread(hdr, 1, 64, f) < 64) {
-        fprintf(stderr, "load_dataset: short header\n");
-        fclose(f);
-        return ds;
-    }
-
-    unsigned int magic = ((unsigned int)hdr[0] << 24)
-                       | ((unsigned int)hdr[1] << 16)
-                       | ((unsigned int)hdr[2] << 8)
-                       |  (unsigned int)hdr[3];
-    if (magic != TOKENIZER_DATA_MAGIC) {
-        fprintf(stderr, "load_dataset: bad magic 0x%08X (expected 0x%08X)\n",
-                magic, TOKENIZER_DATA_MAGIC);
-        fclose(f);
-        return ds;
-    }
-
-    /* read little-endian int32 fields from header */
-    ds.vocab_size    = (int)hdr[8]  | ((int)hdr[9]  << 8)
-                     | ((int)hdr[10] << 16) | ((int)hdr[11] << 24);
-    ds.num_sequences = (int)hdr[12] | ((int)hdr[13] << 8)
-                     | ((int)hdr[14] << 16) | ((int)hdr[15] << 24);
-    ds.seq_len       = (int)hdr[16] | ((int)hdr[17] << 8)
-                     | ((int)hdr[18] << 16) | ((int)hdr[19] << 24);
-
-    long data_bytes = (long)ds.num_sequences * (long)ds.seq_len * 4;
-    ds.data_n = (long)ds.num_sequences * (long)ds.seq_len;
-
-    ds.data = (int *)malloc(data_bytes);
-    if (!ds.data) { fprintf(stderr, "load_dataset: malloc(%ld) failed\n", data_bytes); fclose(f); return ds; }
-
-    if ((long)fread(ds.data, 1, data_bytes, f) < data_bytes) {
-        fprintf(stderr, "load_dataset: short data read\n");
-        free(ds.data); ds.data = NULL;
-        fclose(f);
-        return ds;
-    }
-
-    fclose(f);
-    return ds;
-}
-
-/* Fisher-Yates shuffle */
-static void shuffle_int(int *arr, int n) {
-    for (int i = n - 1; i > 0; i--) {
-        int j = rand() % (i + 1);
-        int t = arr[i]; arr[i] = arr[j]; arr[j] = t;
-    }
-}
-
-/* ── Config ── */
-#define D_MODEL        256
-#define N_HEADS         4
-#define D_K            64   /* D_MODEL / N_HEADS */
-#define INTERMEDIATE   512  /* 2x D_MODEL */
-#define N_LAYERS         2
-#define VOCAB_SIZE     261
-#define BATCH_SIZE      16
-#define MAX_EPOCHS      10
-#define LR            8e-4f
-#define MIN_LR            6e-5f
-#define OVERFIT         1    /* 1 = train on 10 batches only for overfit test */
-#if OVERFIT
-#  undef  MAX_EPOCHS
-#  define MAX_EPOCHS 1000
-#endif
-#define LOG_EVERY       10
-#define GEN_EVERY       30
-#define GEN_NEW_TOKENS  64
+#include "promessi.h"
 
 int main(void) {
     /* ── Pools ── */
@@ -132,7 +29,7 @@ int main(void) {
     decoder_lm *lm = decoder_lm_create(ctx.params, VOCAB_SIZE, D_MODEL, N_LAYERS,
                                         N_HEADS, D_K, INTERMEDIATE);
     {
-        long long n = module_num_parameters(&lm->base);
+        long long n = decoder_lm_num_parameters(lm);
         printf("  model created.  Parameters: %lld (%.2fM)\n", n, n / 1e6);
         module_summary(&lm->base, 0, 0);
     }

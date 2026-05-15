@@ -27,7 +27,7 @@ BENCH_BINS = $(patsubst $(BENCHDIR)/%.c, $(BUILDDIR)/%, $(BENCH_SRCS))
 
 LIB      = $(BUILDDIR)/libdnn.a
 
-.PHONY: all clean test bench main_lm main_prep_data run_lm
+.PHONY: all clean test bench main_prep_data promessi_lm
 .PHONY: mnist_mlp mnist_cnn mnist_cnn_pool
 .PHONY: run_mnist_mlp run_mnist_cnn run_mnist_cnn_pool
 .PHONY: bench_conv2d bench_matmul bench_ops bench_multihead bench_transformer bench_all
@@ -56,10 +56,8 @@ $(TEST_OBJDIR)/%: $(TESTDIR)/%.c $(LIB) | $(TEST_OBJDIR)
 	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(OMPFLAGS) $(CPPFLAGS) $< $(LDFLAGS) $(LDLIBS) -o $@
 
 
-run_lm: $(BUILDDIR)/main_lm $(LIB)
-	./$(BUILDDIR)/main_lm
-
 # MNIST examples live in examples/mnist/.
+# LM examples live in examples/promessi_lm/.
 
 MNIST_EXAMPLES := examples/mnist
 
@@ -76,17 +74,18 @@ run_mnist_cnn_pool: mnist_cnn_pool
 	$(BUILDDIR)/mnist_cnn_pool
 	$(MNIST_EXAMPLES)/mnist_cnn_pool
 
-main_lm: $(BUILDDIR)/main_lm
-	$(BUILDDIR)/main_lm
-
 main_prep_data: $(BUILDDIR)/main_prep_data
 	$(BUILDDIR)/main_prep_data
 
 $(BUILDDIR)/main_prep_data: main_prep_data.c $(LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(OMPFLAGS) $(CPPFLAGS) $< $(LDFLAGS) $(LDLIBS) -o $@
 
-$(BUILDDIR)/main_lm: main_lm.c $(LIB) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(OMPFLAGS) $(CPPFLAGS) $< $(LDFLAGS) $(LDLIBS) -o $@
+# Promessi Sposi LM example (build + run)
+PROMESSI_EXAMPLES := examples/promessi_lm
+
+promessi_lm: $(LIB)
+	$(MAKE) -C $(PROMESSI_EXAMPLES) $@
+	$(BUILDDIR)/promessi_lm
 
 # pattern rule for building bench binaries
 $(BUILDDIR)/bench_%: $(BENCHDIR)/bench_%.c $(LIB) | $(BUILDDIR)
