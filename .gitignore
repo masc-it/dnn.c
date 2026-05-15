@@ -7,7 +7,6 @@ obj/
 # Editor / OS droppings
 .DS_Store
 *.o
-*ubyte
 .venv
 data/
 build/
