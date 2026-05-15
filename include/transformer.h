@@ -205,6 +205,17 @@ int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
  */
 void decoder_lm_enable_rope(decoder_lm *lm, int max_seq_len, float base);
 
+/* ── Weight initialization ── 
+ *
+ * GPT-2 style init for decoder-only transformer:
+ *   Embedding table, Q/K/V, FFN gate/up, LM head: Normal(0, 0.02)
+ *   Attention out_proj, FFN down_proj (residual branches): Normal(0, 0.02 / sqrt(2*n_layers))
+ *   All biases: zero
+ *   Layer norm γ/β: unchanged (1/0 from decoder_lm_create)
+ *
+ * Call after decoder_lm_create(), before or after decoder_lm_enable_rope(). */
+void decoder_lm_init_weights(decoder_lm *lm);
+
 /* ── Parameter count ── */
 long long transformer_block_num_parameters(transformer_block *block);
 long long decoder_lm_num_parameters(decoder_lm *lm);

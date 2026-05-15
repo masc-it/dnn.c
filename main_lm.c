@@ -132,6 +132,10 @@ int main(void) {
         printf("  model created.  Parameters: %lld (%.2fM)\n", n, n / 1e6);
     }
 
+    /* ── Init weights (GPT-2 style, overrides uniform default) ── */
+    decoder_lm_init_weights(lm);
+    printf("  Weights initialized: Normal(0,0.02), residual branches scaled by 1/sqrt(2*%d).\n", N_LAYERS);
+
     /* ── Enable RoPE ── */
     decoder_lm_enable_rope(lm, ds.seq_len, 10000.0f);
     printf("  RoPE enabled (base=10000.0, max_seq=%d).\n", ds.seq_len);
@@ -140,10 +144,9 @@ int main(void) {
     tensor *all_params[256];
     int n_params = 0;
 
-    all_params[n_params++] = lm->embedding_table;
+    all_params[n_params++] = lm->embedding_table;       /* includes tied lm_head weight */
     all_params[n_params++] = lm->norm_weight;
     all_params[n_params++] = lm->norm_bias;
-    all_params[n_params++] = lm->lm_head->weight;
     all_params[n_params++] = lm->lm_head->bias;
 
     for (int i = 0; i < lm->n_layers; i++) {

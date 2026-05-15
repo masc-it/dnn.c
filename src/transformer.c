@@ -232,8 +232,17 @@ decoder_lm *decoder_lm_create(int vocab_size, int d_model,
     float *wn = tensor_data_ptr(lm->norm_weight);
     for (int i = 0; i < d_model; i++) wn[i] = 1.0f;
 
-    /* LM head: d_model → vocab_size */
-    lm->lm_head = linear_create(d_model, vocab_size);
+    /* LM head: d_model → vocab_size (weight tied to embedding) */
+    lm->lm_head = mem_params_alloc(sizeof(linear), NULL);
+    lm->lm_head->in_features  = d_model;
+    lm->lm_head->out_features = vocab_size;
+    /* weight = transpose(embedding_table) — persistent copy in params pool */
+    {
+        tensor *tmp = tensor_transpose(lm->embedding_table, 0, 1);
+        lm->lm_head->weight = mem_params_alloc(sizeof(tensor), tmp);
+        lm->lm_head->weight->pool = _mem_pool_params();
+    }
+    lm->lm_head->bias = tensor_zeros(1, (int[]){vocab_size}, 1);
 
     return lm;
 }
@@ -387,17 +396,28 @@ tensor *transformer_block_forward_cached(transformer_block *block,
     float *kd = (float*)K_full->data;
     float *vd = (float*)V_full->data;
 
+    int q_sN = Qh->strides[2];
+    int k_sN = K_full->strides[2];
+    int v_sN = V_full->strides[2];
+    int o_sN = attn_out->strides[2];
+
     /* Temp scores [N_new, S] */
     float *scores = mem_scratch_alloc((size_t)N_new * S * sizeof(float), NULL);
 
     for (int b = 0; b < B; b++) {
         for (int h = 0; h < H; h++) {
-            int bh = b * H + h;
-
-            float *q_slice = qd + bh * N_new * d_k;
-            float *k_slice = kd + bh * S * d_k;
-            float *v_slice = vd + bh * S * d_k;
-            float *o_slice = od + bh * N_new * d_k;
+            float *q_slice = qd + Qh->offset
+                           + b * Qh->strides[0]
+                           + h * Qh->strides[1];
+            float *k_slice = kd + K_full->offset
+                           + b * K_full->strides[0]
+                           + h * K_full->strides[1];
+            float *v_slice = vd + V_full->offset
+                           + b * V_full->strides[0]
+                           + h * V_full->strides[1];
+            float *o_slice = od + attn_out->offset
+                           + b * attn_out->strides[0]
+                           + h * attn_out->strides[1];
 
             /* scores = Q @ K^T * scale  [N_new, S] */
 #if NO_CBLAS
@@ -405,12 +425,12 @@ tensor *transformer_block_forward_cached(transformer_block *block,
                 for (int j = 0; j < S; j++) {
                     float sum = 0.0f;
                     for (int kk = 0; kk < d_k; kk++)
-                        sum += q_slice[i * d_k + kk] * k_slice[j * d_k + kk];
+                        sum += q_slice[i * q_sN + kk] * k_slice[j * k_sN + kk];
                     scores[i * S + j] = sum * scale;
                 }
 #else
             cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                        N_new, S, d_k, scale, q_slice, d_k, k_slice, d_k,
+                        N_new, S, d_k, scale, q_slice, q_sN, k_slice, k_sN,
                         0.0f, scores, S);
 #endif
 
@@ -479,13 +499,13 @@ tensor *transformer_block_forward_cached(transformer_block *block,
                 for (int j = 0; j < d_k; j++) {
                     float sum = 0.0f;
                     for (int kk = 0; kk < S; kk++)
-                        sum += scores[i * S + kk] * v_slice[kk * d_k + j];
-                    o_slice[i * d_k + j] = sum;
+                        sum += scores[i * S + kk] * v_slice[kk * v_sN + j];
+                    o_slice[i * o_sN + j] = sum;
                 }
 #else
             cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                        N_new, d_k, S, 1.0f, scores, S, v_slice, d_k,
-                        0.0f, o_slice, d_k);
+                        N_new, d_k, S, 1.0f, scores, S, v_slice, v_sN,
+                        0.0f, o_slice, o_sN);
 #endif
         }
     }
@@ -741,8 +761,59 @@ long long decoder_lm_num_parameters(decoder_lm *lm) {
         n += transformer_block_num_parameters(lm->blocks[i]);
     n += tensor_numel(lm->norm_weight);
     n += tensor_numel(lm->norm_bias);
-    n += linear_num_parameters(lm->lm_head);
+    /* lm_head weight is shared with embedding_table (weight tying) */
+    /* count only the bias separately */
+    n += tensor_numel(lm->lm_head->bias);
     return n;
+}
+
+
+/* ── Weight initialization (GPT-2 style) ── */
+
+/* Box-Muller normal random sample */
+static float _randn(void) {
+    float u1 = (float)rand() / (float)RAND_MAX;
+    float u2 = (float)rand() / (float)RAND_MAX;
+    return sqrtf(-2.0f * logf(u1 + 1e-10f)) * cosf(6.283185307179586f * u2);
+}
+
+/* Re-initialize a linear layer: weight ~ Normal(0, std), bias = 0 */
+static void _init_linear(linear *l, float std) {
+    int nw = tensor_numel(l->weight);
+    float *wd = tensor_data_ptr(l->weight);
+    for (int i = 0; i < nw; i++) wd[i] = _randn() * std;
+
+    /* zero bias */
+    memset(tensor_data_ptr(l->bias), 0, (size_t)tensor_numel(l->bias) * sizeof(float));
+}
+
+void decoder_lm_init_weights(decoder_lm *lm) {
+    assert(lm);
+    float std = 0.02f;
+    float residual_std = std / sqrtf(2.0f * (float)lm->n_layers);
+
+    /* Embedding table */
+    int ne = tensor_numel(lm->embedding_table);
+    float *ed = tensor_data_ptr(lm->embedding_table);
+    for (int i = 0; i < ne; i++) ed[i] = _randn() * std;
+
+    /* Each transformer block */
+    for (int i = 0; i < lm->n_layers; i++) {
+        transformer_block *b = lm->blocks[i];
+        _init_linear(b->q_proj,        std);
+        _init_linear(b->k_proj,        std);
+        _init_linear(b->v_proj,        std);
+        _init_linear(b->out_proj,      residual_std);  /* residual branch */
+        _init_linear(b->ffn->gate_proj, std);
+        _init_linear(b->ffn->up_proj,   std);
+        _init_linear(b->ffn->down_proj, residual_std);  /* residual branch */
+    }
+
+    /* LM head: weight tied to embedding (already initialized), zero bias */
+    memset(tensor_data_ptr(lm->lm_head->bias), 0,
+           (size_t)tensor_numel(lm->lm_head->bias) * sizeof(float));
+
+    /* Layer norm γ=1, β=0 — already correct after decoder_lm_create, skip */
 }
 
 
