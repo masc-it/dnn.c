@@ -65,15 +65,21 @@ static void attention_backward(grad_fn *fn, tensor *grad_output) {
     float *kg = need_k ? _grad_ensure(k) : NULL;
     float *vg = need_v ? _grad_ensure(v) : NULL;
 
-    /* Scratch buffers per batch-head iteration */
-    float *dS = _mem_pool_alloc(fn->pool, (size_t)N * N * sizeof(float), NULL);
-    float *dP = _mem_pool_alloc(fn->pool, (size_t)N * N * sizeof(float), NULL);
+    /* Scratch buffers per OpenMP worker.  mem_pool is not thread-safe, so
+     * allocate outside the parallel region and index by omp_get_thread_num(). */
+    int n_workers = omp_get_max_threads();
+    float *dS_buf = _mem_pool_alloc(fn->pool, (size_t)n_workers * N * N * sizeof(float), NULL);
+    float *dP_buf = _mem_pool_alloc(fn->pool, (size_t)n_workers * N * N * sizeof(float), NULL);
 
     (void)mask_present;  /* reserved for future mask-gradient path */
 
+#pragma omp parallel for collapse(2) if (B * H >= 2)
     for (int b = 0; b < B; b++) {
         for (int h = 0; h < H; h++) {
             int bh = b * H + h;
+            int tid = omp_get_thread_num();
+            float *dS = dS_buf + (size_t)tid * N * N;
+            float *dP = dP_buf + (size_t)tid * N * N;
 
             float *q_slice = qd + bh * N * d;
             float *k_slice = kd + bh * N * d;
@@ -245,12 +251,16 @@ tensor *tensor_attention(struct mem_pool *scratch, tensor *q, tensor *k, tensor 
     float *kd = (float*)k->data;
     float *vd = (float*)v->data;
 
-    /* Temp scores buffer: [N, N] reused per batch-head */
-    float *scores = _mem_pool_alloc(scratch, (size_t)N * N * sizeof(float), NULL);
+    /* Temp scores buffer per OpenMP worker. */
+    int n_workers = omp_get_max_threads();
+    float *scores_buf = _mem_pool_alloc(scratch, (size_t)n_workers * N * N * sizeof(float), NULL);
 
+#pragma omp parallel for collapse(2) if (B * H >= 2)
     for (int b = 0; b < B; b++) {
         for (int h = 0; h < H; h++) {
             int bh = b * H + h;
+            int tid = omp_get_thread_num();
+            float *scores = scores_buf + (size_t)tid * N * N;
 
             float *q_slice = qd + bh * N * d;
             float *k_slice = kd + bh * N * d;

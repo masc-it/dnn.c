@@ -11,6 +11,25 @@
 
 /* ── add_backward ── */
 
+static int _is_lastdim_bias(const tensor *bias, const tensor *out) {
+    return bias->ndim == 1 && out->ndim >= 2 && bias->shape[0] == out->shape[out->ndim - 1];
+}
+
+static void _bias_add_grad(float *bg, const tensor *bias, const tensor *grad_output) {
+    int C = bias->shape[0];
+    int rows = tensor_numel(grad_output) / C;
+    float *gd = tensor_data_ptr((tensor*)grad_output);
+    int boff = bias->offset;
+#pragma omp parallel for if (C * rows >= 4096)
+    for (int c = 0; c < C; c++) {
+        float sum = 0.0f;
+#pragma omp simd reduction(+:sum)
+        for (int r = 0; r < rows; r++)
+            sum += gd[r * C + c];
+        bg[boff + c] += sum;
+    }
+}
+
 static void add_backward(grad_fn *fn, tensor *grad_output) {
     tensor *a = fn->inputs[0];
     tensor *b = fn->inputs[1];
@@ -22,12 +41,39 @@ static void add_backward(grad_fn *fn, tensor *grad_output) {
     if (_grad_contiguous(a, grad_output) && _grad_contiguous(b, grad_output)) {
         if (a->grad_fn || a->requires_grad) {
             float *ag = _grad_ensure(a);
-            #pragma omp simd
+#pragma omp parallel for if (out_numel >= 65536)
             for (int i = 0; i < out_numel; i++) ag[a->offset + i] += g_data[i];
         }
         if (b->grad_fn || b->requires_grad) {
             float *bg = _grad_ensure(b);
-            #pragma omp simd
+#pragma omp parallel for if (out_numel >= 65536)
+            for (int i = 0; i < out_numel; i++) bg[b->offset + i] += g_data[i];
+        }
+        return;
+    }
+
+    /* Linear/residual bias-add path: full tensor + [C] bias over last dim.
+     * Avoids full coord-decompose fallback for every linear layer. */
+    if (_grad_contiguous(a, grad_output) && _is_lastdim_bias(b, grad_output)) {
+        if (a->grad_fn || a->requires_grad) {
+            float *ag = _grad_ensure(a);
+#pragma omp parallel for if (out_numel >= 65536)
+            for (int i = 0; i < out_numel; i++) ag[a->offset + i] += g_data[i];
+        }
+        if (b->grad_fn || b->requires_grad) {
+            float *bg = _grad_ensure(b);
+            _bias_add_grad(bg, b, grad_output);
+        }
+        return;
+    }
+    if (_is_lastdim_bias(a, grad_output) && _grad_contiguous(b, grad_output)) {
+        if (a->grad_fn || a->requires_grad) {
+            float *ag = _grad_ensure(a);
+            _bias_add_grad(ag, a, grad_output);
+        }
+        if (b->grad_fn || b->requires_grad) {
+            float *bg = _grad_ensure(b);
+#pragma omp parallel for if (out_numel >= 65536)
             for (int i = 0; i < out_numel; i++) bg[b->offset + i] += g_data[i];
         }
         return;
@@ -77,9 +123,23 @@ tensor *tensor_add(struct mem_pool *scratch, const tensor *a, const tensor *b) {
         /* Fast path: same contiguous shape, no broadcasting */
         float *af = (float*)a->data + a->offset;
         float *bf = (float*)b->data + b->offset;
-        #pragma omp simd
+#pragma omp parallel for if (numel >= 65536)
         for (int i = 0; i < numel; i++)
             od[i] = af[i] + bf[i];
+    } else if (tensor_is_contiguous(a) && _is_lastdim_bias(b, out)) {
+        float *af = (float*)a->data + a->offset;
+        float *bf = (float*)b->data + b->offset;
+        int C = b->shape[0];
+#pragma omp parallel for if (numel >= 65536)
+        for (int i = 0; i < numel; i++)
+            od[i] = af[i] + bf[i % C];
+    } else if (_is_lastdim_bias(a, out) && tensor_is_contiguous(b)) {
+        float *af = (float*)a->data + a->offset;
+        float *bf = (float*)b->data + b->offset;
+        int C = a->shape[0];
+#pragma omp parallel for if (numel >= 65536)
+        for (int i = 0; i < numel; i++)
+            od[i] = af[i % C] + bf[i];
     } else {
         /* General broadcast path */
         float *ad = (float*)a->data;

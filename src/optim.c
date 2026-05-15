@@ -91,6 +91,7 @@ void adamw_free(adamw_opt *opt) {
 }
 
 void adamw_zero_grad(adamw_opt *opt) {
+#pragma omp parallel for schedule(dynamic) if (opt->n_params >= 4)
     for (int i = 0; i < opt->n_params; i++) {
         float *g = tensor_grad(opt->params[i]);
         if (g)
@@ -193,10 +194,12 @@ float clip_grad_norm(tensor **params, int n_params, float max_norm) {
     if (max_norm <= 0.0f) return 0.0f;
 
     double total_norm_sq = 0.0;
+#pragma omp parallel for reduction(+:total_norm_sq) schedule(dynamic) if (n_params >= 4)
     for (int i = 0; i < n_params; i++) {
         float *g = tensor_grad(params[i]);
         if (!g) continue;
         int n = tensor_numel(params[i]);
+#pragma omp simd reduction(+:total_norm_sq)
         for (int j = 0; j < n; j++)
             total_norm_sq += (double)g[j] * (double)g[j];
     }
@@ -205,10 +208,12 @@ float clip_grad_norm(tensor **params, int n_params, float max_norm) {
 
     if (total_norm > max_norm) {
         float scale = max_norm / total_norm;
+#pragma omp parallel for schedule(dynamic) if (n_params >= 4)
         for (int i = 0; i < n_params; i++) {
             float *g = tensor_grad(params[i]);
             if (!g) continue;
             int n = tensor_numel(params[i]);
+#pragma omp simd
             for (int j = 0; j < n; j++)
                 g[j] *= scale;
         }
@@ -242,6 +247,7 @@ void adamw_step(adamw_opt *opt) {
     float bias_corr1 = 1.0f - powf(b1, (float)opt->t);
     float bias_corr2 = 1.0f - powf(b2, (float)opt->t);
 
+#pragma omp parallel for schedule(dynamic) if (opt->n_params >= 4)
     for (int i = 0; i < opt->n_params; i++) {
         tensor *p = opt->params[i];
         tensor *mt = opt->m[i];
@@ -255,6 +261,9 @@ void adamw_step(adamw_opt *opt) {
 
         assert(gd && "adamw_step: param has no gradient (did you call backward?)");
 
+        float step_size = lr / bias_corr1;
+        float bias_corr2_sqrt = sqrtf(bias_corr2);
+#pragma omp simd
         for (int j = 0; j < n; j++) {
             float g = gd[j];
 
@@ -267,8 +276,7 @@ void adamw_step(adamw_opt *opt) {
                denom     = sqrt(v) / sqrt(bias_corr2) + eps
                param    -= step_size * m / denom
             */
-            float step_size = lr / bias_corr1;
-            float denom     = sqrtf(vd[j]) / sqrtf(bias_corr2) + eps;
+            float denom = sqrtf(vd[j]) / bias_corr2_sqrt + eps;
 
             /* decoupled weight decay then Adam update */
             pd[j] *= 1.0f - lr * wd;

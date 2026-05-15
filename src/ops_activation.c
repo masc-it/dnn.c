@@ -886,6 +886,33 @@ static void cross_entropy_backward(grad_fn *fn, tensor *grad_output) {
                 }
 #endif
             }
+        } else if (ndim == 3 && dim == 2 && logits->strides[2] == 1) {
+            /* GPT path: logits [B,T,C], often a slice of [B,N,C].
+             * Last dimension contiguous, leading stride may include skipped token. */
+            int B = logits->shape[0], T = logits->shape[1], C = logits->shape[2];
+            int s0 = logits->strides[0], s1 = logits->strides[1];
+            int off0 = logits->offset;
+            float scale = gout * inv_N;
+#pragma omp parallel for collapse(2) if (B * T >= 64)
+            for (int b = 0; b < B; b++) {
+                for (int t = 0; t < T; t++) {
+                    int r = b * T + t;
+                    float *row = ld + off0 + b * s0 + t * s1;
+                    float *ag_row = ag + off0 + b * s0 + t * s1;
+#if DNN_HAVE_NEON
+                    simd_ce_bwd_row_kernel(ag_row, row, max_vals[r], sum_exp[r],
+                                           td[r], scale, C);
+#else
+                    float mx = max_vals[r];
+                    float se = sum_exp[r];
+                    int tgt = td[r];
+                    for (int c = 0; c < C; c++) {
+                        float sm = expf(row[c] - mx) / se;
+                        ag_row[c] += (sm - (c == tgt ? 1.0f : 0.0f)) * scale;
+                    }
+#endif
+                }
+            }
         } else {
             for (int i = 0; i < numel; i++) {
                 int coord[DNN_MAX_DIMS];
@@ -977,6 +1004,51 @@ tensor *tensor_cross_entropy(struct mem_pool *scratch, const tensor *logits, con
             max_vals[n] = mx;
             sum_exp[n]  = se;
             total_loss += logf(se) + mx - row[td[n]];
+        }
+    } else if (ndim == 3 && dim == 2 && logits->strides[2] == 1) {
+        /* GPT path: logits [B,T,C], often non-contiguous because train_step
+         * slices [B,N,C] to [B,N-1,C].  Avoid per-element coord decomposition. */
+        int B = logits->shape[0], T = logits->shape[1], C = logits->shape[2];
+        int s0 = logits->strides[0], s1 = logits->strides[1];
+        int off0 = logits->offset;
+#pragma omp parallel for collapse(2) reduction(+:total_loss) if (B * T >= 64)
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T; t++) {
+                int r = b * T + t;
+                float *row = ld + off0 + b * s0 + t * s1;
+                float mx, se;
+#if DNN_HAVE_NEON
+                mx = -INFINITY;
+                se = 0.0f;
+                int j = 0;
+                for (; j + 4 <= C; j += 4) {
+                    float32x4_t v = vld1q_f32(row + j);
+                    float chunk_max = vmaxvq_f32(v);
+                    if (chunk_max > mx) {
+                        se *= expf(mx - chunk_max);
+                        mx = chunk_max;
+                    }
+                    float32x4_t shifted = vsubq_f32(v, vdupq_n_f32(mx));
+                    se += vaddvq_f32(simd_expf_f32(shifted));
+                }
+                for (; j < C; j++) {
+                    float v = row[j];
+                    if (v > mx) { se *= expf(mx - v); mx = v; }
+                    se += expf(v - mx);
+                }
+#else
+                mx = -INFINITY;
+                se = 0.0f;
+                for (int j = 0; j < C; j++) {
+                    float v = row[j];
+                    if (v > mx) { se *= expf(mx - v); mx = v; }
+                    se += expf(v - mx);
+                }
+#endif
+                max_vals[r] = mx;
+                sum_exp[r]  = se;
+                total_loss += logf(se) + mx - row[td[r]];
+            }
         }
     } else {
         /* general nD fallback — 2 full passes over logits (was 3).
