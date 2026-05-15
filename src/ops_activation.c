@@ -911,14 +911,42 @@ tensor *tensor_cross_entropy(const tensor *logits, const tensor *target, int dim
     float total_loss = 0.0f;
 
     /* fast path: 2D contiguous logits, dim=1 (most common — classification)
-     * 2 row reads per row: max (SIMD), then sum_exp (SIMD) + scalar loss.
+     * 1 fused pass: online max + sum_exp via online softmax (running max,
+     * adaptive sum_exp).  Saves 1 full C-element read per row.
      */
     if (ndim == 2 && dim == 1 && tensor_is_contiguous(logits)) {
         int N = logits->shape[0], C = logits->shape[1];
         for (int n = 0; n < N; n++) {
             float *row = ld + n * C;
-            float mx = simd_reduce_max_f32(row, C);
-            float se = simd_exp_sum_shifted_f32(row, C, mx);
+            float mx, se;
+#if DNN_HAVE_NEON
+            mx = -INFINITY;
+            se = 0.0f;
+            int j = 0;
+            for (; j + 4 <= C; j += 4) {
+                float32x4_t v = vld1q_f32(row + j);
+                float chunk_max = vmaxvq_f32(v);
+                if (chunk_max > mx) {
+                    se *= expf(mx - chunk_max);
+                    mx = chunk_max;
+                }
+                float32x4_t shifted = vsubq_f32(v, vdupq_n_f32(mx));
+                se += vaddvq_f32(simd_expf_f32(shifted));
+            }
+            for (; j < C; j++) {
+                float v = row[j];
+                if (v > mx) { se *= expf(mx - v); mx = v; }
+                se += expf(v - mx);
+            }
+#else
+            mx = -INFINITY;
+            se = 0.0f;
+            for (int j = 0; j < C; j++) {
+                float v = row[j];
+                if (v > mx) { se *= expf(mx - v); mx = v; }
+                se += expf(v - mx);
+            }
+#endif
             max_vals[n] = mx;
             sum_exp[n]  = se;
             total_loss += logf(se) + mx - row[td[n]];
