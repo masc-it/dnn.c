@@ -5,6 +5,8 @@
 
 /* ── Constants ── */
 
+#define MNIST_DATA_DIR "data/mnist"
+
 #define MNIST_TRAIN_N  60000
 #define MNIST_TEST_N   10000
 #define MNIST_ROWS     28

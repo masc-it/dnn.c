@@ -42,6 +42,13 @@ static void shuffle_int(int *arr, int n) {
  * ================================================================ */
 
 int mnist_download(void) {
+    /* ensure data directory exists */
+    int r = system("mkdir -p " MNIST_DATA_DIR);
+    if (r != 0) {
+        fprintf(stderr, "mnist_download: failed to create %s\n", MNIST_DATA_DIR);
+        return -1;
+    }
+
     static const char *urls[] = {
         "https://github.com/fgnt/mnist/raw/refs/heads/master/"
         "train-images-idx3-ubyte.gz",
@@ -52,7 +59,7 @@ int mnist_download(void) {
         "https://github.com/fgnt/mnist/raw/refs/heads/master/"
         "t10k-labels-idx1-ubyte.gz",
     };
-    static const char *outfiles[] = {
+    static const char *names[] = {
         "train-images-idx3-ubyte",
         "train-labels-idx1-ubyte",
         "t10k-images-idx3-ubyte",
@@ -62,14 +69,17 @@ int mnist_download(void) {
 
     for (int i = 0; i < n; i++) {
         /* skip if already downloaded */
-        FILE *f = fopen(outfiles[i], "rb");
+        char path[512];
+        r = snprintf(path, sizeof(path), MNIST_DATA_DIR "/%s", names[i]);
+        assert(r > 0 && r < (int)sizeof(path));
+
+        FILE *f = fopen(path, "rb");
         if (f) { fclose(f); continue; }
 
         char cmd[1024];
-        int r = snprintf(cmd, sizeof(cmd),
-                         "curl -fSL '%s' 2>/dev/null | gunzip > '%s'",
-                         urls[i], outfiles[i]);
-        (void)r;  /* suppress unused-variable warnings */
+        r = snprintf(cmd, sizeof(cmd),
+                     "curl -fSL '%s' 2>/dev/null | gunzip > '%s'",
+                     urls[i], path);
         assert(r > 0 && r < (int)sizeof(cmd));
 
         int ret = system(cmd);

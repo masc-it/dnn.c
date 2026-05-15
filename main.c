@@ -20,8 +20,8 @@ int main(void) {
     }
 
     printf("Loading training data...\n");
-    tensor *train_images = mnist_load_images("train-images-idx3-ubyte");
-    tensor *train_labels = mnist_load_labels("train-labels-idx1-ubyte");
+    tensor *train_images = mnist_load_images(MNIST_DATA_DIR "/train-images-idx3-ubyte");
+    tensor *train_labels = mnist_load_labels(MNIST_DATA_DIR "/train-labels-idx1-ubyte");
     if (!train_images || !train_labels) {
         fprintf(stderr, "Failed to load training data.\n");
         goto cleanup;
@@ -29,8 +29,8 @@ int main(void) {
     printf("  %d images loaded.\n", MNIST_TRAIN_N);
 
     printf("Loading test data...\n");
-    tensor *test_images = mnist_load_images("t10k-images-idx3-ubyte");
-    tensor *test_labels = mnist_load_labels("t10k-labels-idx1-ubyte");
+    tensor *test_images = mnist_load_images(MNIST_DATA_DIR "/t10k-images-idx3-ubyte");
+    tensor *test_labels = mnist_load_labels(MNIST_DATA_DIR "/t10k-labels-idx1-ubyte");
     if (!test_images || !test_labels) {
         fprintf(stderr, "Failed to load test data.\n");
         goto cleanup;
