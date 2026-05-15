@@ -1,12 +1,10 @@
 # Build artifacts
 main
-*.dSYM/
-libdnn.a
 obj/
+build/
+*.dSYM
 
 # Editor / OS droppings
 .DS_Store
-*.o
 .venv
 data/
-build/
