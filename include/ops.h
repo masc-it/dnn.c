@@ -12,6 +12,12 @@ tensor *tensor_div(struct mem_pool *scratch, const tensor *a, const tensor *b);
 /* ── Matrix ops ── */
 tensor *tensor_matmul(struct mem_pool *scratch, const tensor *a, const tensor *b);
 
+/* Fused matmul + bias: out = a @ b + bias.
+ * Avoids intermediate tensor allocation vs separate matmul + add.
+ * bias must be 1-D with shape[b->ndim-1]. */
+tensor *tensor_matmul_add(struct mem_pool *scratch, const tensor *a,
+                          const tensor *b, const tensor *bias);
+
 /* ── Activations ── */
 tensor *tensor_relu(struct mem_pool *scratch, const tensor *t);
 tensor *tensor_sigmoid(struct mem_pool *scratch, const tensor *t);

@@ -31,9 +31,8 @@ tensor *linear_forward(struct mem_pool *scratch, linear *l, const tensor *input)
     assert(input->shape[input->ndim - 1] == l->in_features
            && "linear_forward: last dim of input must match in_features");
 
-    /* x @ W + b */
-    tensor *mm = tensor_matmul(scratch, input, l->weight);
-    return tensor_add(scratch, mm, l->bias);
+    /* x @ W + b  (fused — avoids intermediate tensor) */
+    return tensor_matmul_add(scratch, input, l->weight, l->bias);
 }
 
 /* ── SwiGLU FFN ── */
