@@ -10,6 +10,7 @@
 #include "tensor_int.h"
 #include "autograd.h"
 #include "optim.h"
+#include "simd.h"
 #include <assert.h>
 #include <string.h>
 #include <math.h>
@@ -413,18 +414,63 @@ tensor *transformer_block_forward_cached(transformer_block *block,
                         0.0f, scores, S);
 #endif
 
-            /* Softmax over last dim — no causal mask, all past visible */
+            /* Softmax over last dim — no causal mask, all past visible
+             * Fused online max + sum_exp + NEON SIMD.
+             */
             for (int i = 0; i < N_new; i++) {
                 float *row = scores + i * S;
+
+                /* ── Fused pass: online max + sum_exp ── */
                 float mx = -INFINITY;
-                for (int j = 0; j < S; j++)
-                    if (row[j] > mx) mx = row[j];
                 float se = 0.0f;
-                for (int j = 0; j < S; j++)
+#if DNN_HAVE_NEON
+                {
+                    int j = 0;
+                    for (; j + 4 <= S; j += 4) {
+                        float32x4_t v = vld1q_f32(row + j);
+                        float group_max = vmaxvq_f32(v);
+                        if (group_max > mx) {
+                            se *= expf(mx - group_max);
+                            mx = group_max;
+                        }
+                        float32x4_t shifted = vsubq_f32(v, vdupq_n_f32(mx));
+                        se += vaddvq_f32(simd_expf_f32(shifted));
+                    }
+                    for (; j < S; j++) {
+                        float old_mx = mx;
+                        if (row[j] > mx) mx = row[j];
+                        if (mx != old_mx) se *= expf(old_mx - mx);
+                        se += expf(row[j] - mx);
+                    }
+                }
+#else
+                for (int j = 0; j < S; j++) {
+                    float old_mx = mx;
+                    if (row[j] > mx) mx = row[j];
+                    if (mx != old_mx) se *= expf(old_mx - mx);
                     se += expf(row[j] - mx);
+                }
+#endif
+
+                /* ── Write softmax weights (1 pass) ── */
                 float inv_se = 1.0f / se;
+#if DNN_HAVE_NEON
+                {
+                    int j = 0;
+                    float32x4_t vmx = vdupq_n_f32(mx);
+                    float32x4_t vinv_se = vdupq_n_f32(inv_se);
+                    for (; j + 4 <= S; j += 4) {
+                        float32x4_t v = vld1q_f32(row + j);
+                        float32x4_t exp_v = simd_expf_f32(vsubq_f32(v, vmx));
+                        vst1q_f32(row + j, vmulq_f32(exp_v, vinv_se));
+                    }
+                    for (; j < S; j++)
+                        row[j] = expf(row[j] - mx) * inv_se;
+                }
+#else
                 for (int j = 0; j < S; j++)
                     row[j] = expf(row[j] - mx) * inv_se;
+#endif
             }
 
             /* O = P @ V  [N_new, d_k] */

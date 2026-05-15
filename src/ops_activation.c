@@ -669,28 +669,68 @@ tensor *tensor_causal_softmax(const tensor *t) {
     tensor *out = _tensor_scratch_create(ndim, t->shape, 0);
     float *od = (float*)out->data;
 
-    /* ── 2D fast path (N, N), contiguous ── */
+    /* ── Fused causal softmax with online max+sum_exp + NEON SIMD ──
+     *
+     * Both 2D fast path and general nD path share the same fused logic.
+     * The inner loop body is factored inline to avoid function call overhead
+     * while keeping the fused pattern (1 pass max+sum_exp, 1 pass write).
+     */
     if (ndim == 2 && tensor_is_contiguous(t)) {
         for (int i = 0; i < N; i++) {
             float *row_in = td + i * N;
             float *row_out = od + i * N;
 
-            /* max over j=0..i (visible positions) */
+            /* ── Fused pass: online max + sum_exp ── */
             float mx = -INFINITY;
-            for (int j = 0; j <= i; j++) {
-                float v = row_in[j];
-                if (v > mx) mx = v;
-            }
-
-            /* sum of exp over j=0..i */
             float se = 0.0f;
-            for (int j = 0; j <= i; j++)
+#if DNN_HAVE_NEON
+            {
+                int j = 0;
+                for (; j + 4 <= i + 1; j += 4) {
+                    float32x4_t v = vld1q_f32(row_in + j);
+                    float group_max = vmaxvq_f32(v);
+                    if (group_max > mx) {
+                        se *= expf(mx - group_max);
+                        mx = group_max;
+                    }
+                    float32x4_t shifted = vsubq_f32(v, vdupq_n_f32(mx));
+                    se += vaddvq_f32(simd_expf_f32(shifted));
+                }
+                for (; j <= i; j++) {
+                    float old_mx = mx;
+                    if (row_in[j] > mx) mx = row_in[j];
+                    if (mx != old_mx) se *= expf(old_mx - mx);
+                    se += expf(row_in[j] - mx);
+                }
+            }
+#else
+            for (int j = 0; j <= i; j++) {
+                float old_mx = mx;
+                if (row_in[j] > mx) mx = row_in[j];
+                if (mx != old_mx) se *= expf(old_mx - mx);
                 se += expf(row_in[j] - mx);
+            }
+#endif
 
-            /* write softmax for visible, 0 for masked */
+            /* ── Write softmax weights (1 pass) ── */
             float inv_se = 1.0f / se;
+#if DNN_HAVE_NEON
+            {
+                int j = 0;
+                float32x4_t vmx = vdupq_n_f32(mx);
+                float32x4_t vinv_se = vdupq_n_f32(inv_se);
+                for (; j + 4 <= i + 1; j += 4) {
+                    float32x4_t v = vld1q_f32(row_in + j);
+                    float32x4_t exp_v = simd_expf_f32(vsubq_f32(v, vmx));
+                    vst1q_f32(row_out + j, vmulq_f32(exp_v, vinv_se));
+                }
+                for (; j <= i; j++)
+                    row_out[j] = expf(row_in[j] - mx) * inv_se;
+            }
+#else
             for (int j = 0; j <= i; j++)
                 row_out[j] = expf(row_in[j] - mx) * inv_se;
+#endif
             for (int j = i + 1; j < N; j++)
                 row_out[j] = 0.0f;
         }
@@ -704,19 +744,57 @@ tensor *tensor_causal_softmax(const tensor *t) {
                 float *row_in  = mat_in  + i * N;
                 float *row_out = mat_out + i * N;
 
+                /* ── Fused pass: online max + sum_exp ── */
                 float mx = -INFINITY;
-                for (int j = 0; j <= i; j++) {
-                    float v = row_in[j];
-                    if (v > mx) mx = v;
-                }
-
                 float se = 0.0f;
-                for (int j = 0; j <= i; j++)
+#if DNN_HAVE_NEON
+                {
+                    int j = 0;
+                    for (; j + 4 <= i + 1; j += 4) {
+                        float32x4_t v = vld1q_f32(row_in + j);
+                        float group_max = vmaxvq_f32(v);
+                        if (group_max > mx) {
+                            se *= expf(mx - group_max);
+                            mx = group_max;
+                        }
+                        float32x4_t shifted = vsubq_f32(v, vdupq_n_f32(mx));
+                        se += vaddvq_f32(simd_expf_f32(shifted));
+                    }
+                    for (; j <= i; j++) {
+                        float old_mx = mx;
+                        if (row_in[j] > mx) mx = row_in[j];
+                        if (mx != old_mx) se *= expf(old_mx - mx);
+                        se += expf(row_in[j] - mx);
+                    }
+                }
+#else
+                for (int j = 0; j <= i; j++) {
+                    float old_mx = mx;
+                    if (row_in[j] > mx) mx = row_in[j];
+                    if (mx != old_mx) se *= expf(old_mx - mx);
                     se += expf(row_in[j] - mx);
+                }
+#endif
 
+                /* ── Write softmax weights (1 pass) ── */
                 float inv_se = 1.0f / se;
+#if DNN_HAVE_NEON
+                {
+                    int j = 0;
+                    float32x4_t vmx = vdupq_n_f32(mx);
+                    float32x4_t vinv_se = vdupq_n_f32(inv_se);
+                    for (; j + 4 <= i + 1; j += 4) {
+                        float32x4_t v = vld1q_f32(row_in + j);
+                        float32x4_t exp_v = simd_expf_f32(vsubq_f32(v, vmx));
+                        vst1q_f32(row_out + j, vmulq_f32(exp_v, vinv_se));
+                    }
+                    for (; j <= i; j++)
+                        row_out[j] = expf(row_in[j] - mx) * inv_se;
+                }
+#else
                 for (int j = 0; j <= i; j++)
                     row_out[j] = expf(row_in[j] - mx) * inv_se;
+#endif
                 for (int j = i + 1; j < N; j++)
                     row_out[j] = 0.0f;
             }
