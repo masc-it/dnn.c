@@ -76,12 +76,8 @@ int main(void) {
     all_params[n_params++] = lm->lm_head->bias;
     for (int i = 0; i < n_layers; i++) {
         transformer_block *b = lm->blocks[i];
-        all_params[n_params++] = b->q_proj->weight;
-        all_params[n_params++] = b->q_proj->bias;
-        all_params[n_params++] = b->k_proj->weight;
-        all_params[n_params++] = b->k_proj->bias;
-        all_params[n_params++] = b->v_proj->weight;
-        all_params[n_params++] = b->v_proj->bias;
+        all_params[n_params++] = b->qkv_proj->weight;
+        all_params[n_params++] = b->qkv_proj->bias;
         all_params[n_params++] = b->out_proj->weight;
         all_params[n_params++] = b->out_proj->bias;
         all_params[n_params++] = b->attn_norm_weight;

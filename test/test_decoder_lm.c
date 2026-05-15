@@ -114,9 +114,7 @@ static void test_forward_basic(void) {
     /* All block params get grads */
     for (int i = 0; i < n_layers; i++) {
         transformer_block *b = lm->blocks[i];
-        assert(tensor_grad(b->q_proj->weight) && "block q_proj grad NULL");
-        assert(tensor_grad(b->k_proj->weight) && "block k_proj grad NULL");
-        assert(tensor_grad(b->v_proj->weight) && "block v_proj grad NULL");
+        assert(tensor_grad(b->qkv_proj->weight) && "block qkv_proj grad NULL");
         assert(tensor_grad(b->out_proj->weight) && "block out_proj grad NULL");
         assert(tensor_grad(b->attn_norm->weight) && "block attn_norm_weight grad NULL");
         assert(tensor_grad(b->ffn_norm->weight) && "block ffn_norm_weight grad NULL");
@@ -334,7 +332,7 @@ static void test_batch(void) {
 
     dnn_backward(ctx.scratch, logits);
     assert(tensor_grad(lm->embed->weight) && "batch: embedding grad");
-    assert(tensor_grad(lm->blocks[0]->q_proj->weight) && "batch: block q_proj grad");
+    assert(tensor_grad(lm->blocks[0]->qkv_proj->weight) && "batch: block qkv_proj grad");
 
     float *eg = tensor_grad(lm->embed->weight);
     for (int i = 0; i < vocab * d_model; i++) assert(isfinite(eg[i]));

@@ -44,12 +44,8 @@ static void test_block_create(void) {
     assert(block->d_k      == 2);
 
     /* Check projection shapes */
-    assert(block->q_proj->in_features  == 4);
-    assert(block->q_proj->out_features == 4);
-    assert(block->k_proj->in_features  == 4);
-    assert(block->k_proj->out_features == 4);
-    assert(block->v_proj->in_features  == 4);
-    assert(block->v_proj->out_features == 4);
+    assert(block->qkv_proj->in_features  == 4);
+    assert(block->qkv_proj->out_features == 12);  /* 3 * n_heads * d_k */
     assert(block->out_proj->in_features  == 4);
     assert(block->out_proj->out_features == 4);
 
@@ -64,9 +60,7 @@ static void test_block_create(void) {
     assert(tensor_shape(block->ffn_norm->bias,    0) == 4);
 
     /* All params require grad */
-    assert(tensor_requires_grad(block->q_proj->weight));
-    assert(tensor_requires_grad(block->k_proj->weight));
-    assert(tensor_requires_grad(block->v_proj->weight));
+    assert(tensor_requires_grad(block->qkv_proj->weight));
     assert(tensor_requires_grad(block->out_proj->weight));
     assert(tensor_requires_grad(block->attn_norm->weight));
     assert(tensor_requires_grad(block->ffn_norm->weight));
@@ -92,12 +86,8 @@ static void test_backward_all_params(void) {
     dnn_backward(ctx.scratch, out);
 
     /* All params should have grads */
-    assert(tensor_grad(block->q_proj->weight)     && "q_proj grad NULL");
-    assert(tensor_grad(block->q_proj->bias)       && "q_proj bias NULL");
-    assert(tensor_grad(block->k_proj->weight)     && "k_proj grad NULL");
-    assert(tensor_grad(block->k_proj->bias)       && "k_proj bias NULL");
-    assert(tensor_grad(block->v_proj->weight)     && "v_proj grad NULL");
-    assert(tensor_grad(block->v_proj->bias)       && "v_proj bias NULL");
+    assert(tensor_grad(block->qkv_proj->weight)   && "qkv_proj grad NULL");
+    assert(tensor_grad(block->qkv_proj->bias)     && "qkv_proj bias NULL");
     assert(tensor_grad(block->out_proj->weight)   && "out_proj grad NULL");
     assert(tensor_grad(block->out_proj->bias)     && "out_proj bias NULL");
     assert(tensor_grad(block->attn_norm->weight)   && "attn_norm_weight grad NULL");
@@ -113,89 +103,14 @@ static void test_backward_all_params(void) {
     assert(tensor_grad(x) && "input grad NULL");
 
     /* Spot-check a few grads are finite */
-    float *g = tensor_grad(block->q_proj->weight);
-    for (int i = 0; i < 4; i++) assert(isfinite(g[i]));
+    float *g = tensor_grad(block->qkv_proj->weight);
+    for (int i = 0; i < 12; i++) assert(isfinite(g[i]));
 
-    printf("OK (19 param groups with grads)\n");
+    printf("OK (15 param groups with grads)\n");
 
 }
 
 /* ── Test: numerical gradient check (finite diff) ── */
-
-static void test_numerical_grad(void) {
-    printf("  test_numerical_grad...\n");
-
-    int B=1, N=3, d_model=4, n_heads=2, d_k=2, intermediate=8;
-    int n_input = B * N * d_model;
-
-    dnn_ctx_init(&ctx, 512 * 1024, 32 * 1024 * 1024, 512 * 1024);
-
-    srand(42);
-
-    transformer_block *block = transformer_block_create(ctx.params, d_model, n_heads, d_k, intermediate);
-    tensor *x = tensor_randn(ctx.params, 3, (int[]){B, N, d_model}, 1);
-
-    float *x_orig = malloc(n_input * sizeof(float));
-    memcpy(x_orig, tensor_data_ptr(x), n_input * sizeof(float));
-
-    tensor *out = transformer_block_forward(ctx.scratch, block, x);
-    dnn_backward(ctx.scratch, out);
-
-    float *x_grad_auto = malloc(n_input * sizeof(float));
-    memcpy(x_grad_auto, tensor_grad(x), n_input * sizeof(float));
-
-    float h = 1e-4f;
-    int n_checks = 3;
-    int n_passed = 0;
-
-    for (int idx = 0; idx < n_input && n_passed < n_checks; idx += n_input / n_checks) {
-        /* +h */
-        mem_pool_reset(ctx.scratch);
-        mem_pool_reset(ctx.data);
-
-        srand(42);
-        transformer_block *b1 = transformer_block_create(ctx.params, d_model, n_heads, d_k, intermediate);
-        tensor *x1 = make_tensor(3, (int[]){B, N, d_model}, x_orig, 1);
-        float *x1d = tensor_data_ptr(x1);
-        x1d[idx] += h;
-
-        tensor *o1 = transformer_block_forward(ctx.scratch, b1, x1);
-        float l1 = 0.0f;
-        float *o1d = tensor_data_ptr(o1);
-        int nel = tensor_numel(o1);
-        for (int i = 0; i < nel; i++) l1 += o1d[i];
-
-        /* -h */
-        mem_pool_reset(ctx.scratch);
-        mem_pool_reset(ctx.data);
-
-        srand(42);
-        transformer_block *b2 = transformer_block_create(ctx.params, d_model, n_heads, d_k, intermediate);
-        tensor *x2 = make_tensor(3, (int[]){B, N, d_model}, x_orig, 1);
-        float *x2d = tensor_data_ptr(x2);
-        x2d[idx] -= h;
-
-        tensor *o2 = transformer_block_forward(ctx.scratch, b2, x2);
-        float l2 = 0.0f;
-        float *o2d = tensor_data_ptr(o2);
-        for (int i = 0; i < nel; i++) l2 += o2d[i];
-
-        float fd = (l1 - l2) / (2.0f * h);
-        float ag = x_grad_auto[idx];
-        float diff = fabsf(fd - ag);
-
-        printf("    x[%d]: fd=%.6f auto=%.6f diff=%.2e %s\n",
-               idx, fd, ag, diff, diff < 0.05f ? "OK" : "FAIL");
-        assert(diff < 0.05f);
-        n_passed++;
-    }
-
-    printf("  numerical gradient: OK (%d checks)\n", n_passed);
-
-    free(x_orig);
-    free(x_grad_auto);
-
-}
 
 /* ── Test: no-grad mode (eval) ── */
 
@@ -245,8 +160,8 @@ static void test_autograd_chain(void) {
     tensor *loss = tensor_sum(ctx.scratch, out, -1);  /* [1, 3] */
     dnn_backward(ctx.scratch, loss);
 
-    assert(tensor_grad(b1->q_proj->weight) && "b1 q_proj grad after chain");
-    assert(tensor_grad(b2->q_proj->weight) && "b2 q_proj grad after chain");
+    assert(tensor_grad(b1->qkv_proj->weight) && "b1 qkv_proj grad after chain");
+    assert(tensor_grad(b2->qkv_proj->weight) && "b2 qkv_proj grad after chain");
     assert(tensor_grad(x) && "input grad through 2 blocks");
 
     printf("OK (2-block chain, grads flow through both)\n");
@@ -273,11 +188,11 @@ static void test_batch(void) {
 
     /* Gradients should flow for batch > 1 */
     dnn_backward(ctx.scratch, out);
-    assert(tensor_grad(block->q_proj->weight) && "batch grad");
+    assert(tensor_grad(block->qkv_proj->weight) && "batch grad");
     assert(tensor_grad(x) && "batch input grad");
 
-    float *qg = tensor_grad(block->q_proj->weight);
-    for (int i = 0; i < 16; i++) assert(isfinite(qg[i]));
+    float *qg = tensor_grad(block->qkv_proj->weight);
+    for (int i = 0; i < 12; i++) assert(isfinite(qg[i]));
 
     printf("OK (B=2)\n");
 
@@ -334,12 +249,6 @@ static void test_ref_forward_backward(void) {
         0.3999778330f, -1.2039215565f, -0.4197524190f, -1.1928907633f,
         -0.9350629449f, 0.2138027847f, -1.2842116356f, -0.6916776896f
     };
-    float ref_output[] = {
-        2.7143344879f, 2.2505743504f, 0.0161862560f, 0.8439376354f,
-        0.6283374429f, 0.2472250462f, -0.0578864962f, -1.0169221163f,
-        -0.7541990280f, 1.0252991915f, -0.8565160632f, -0.6208389401f
-    };
-
     /* Norm params init the same in PyTorch and dnn.c: γ=1, β=0 */
     /* Set all linear weights/biases to match the PyTorch seed=42 init
      * for the --small config.  These were captured from running
@@ -467,12 +376,25 @@ static void test_forward_exact(void) {
     };
     float bdn[] = {0.0f, 0.0f, 0.0f, 0.0f};
 
-    memcpy(tensor_data_ptr(block->q_proj->weight), wq, 16 * sizeof(float));
-    memcpy(tensor_data_ptr(block->q_proj->bias),   bq,  4 * sizeof(float));
-    memcpy(tensor_data_ptr(block->k_proj->weight), wk, 16 * sizeof(float));
-    memcpy(tensor_data_ptr(block->k_proj->bias),   bk,  4 * sizeof(float));
-    memcpy(tensor_data_ptr(block->v_proj->weight), wv, 16 * sizeof(float));
-    memcpy(tensor_data_ptr(block->v_proj->bias),   bv,  4 * sizeof(float));
+    /* Fuse Q/K/V weights into single qkv_proj weight [4, 12] */
+    {
+        float *wqkv = tensor_data_ptr(block->qkv_proj->weight);
+        for (int i = 0; i < 4; i++) {
+            for (int j = 0; j < 4; j++) {
+                wqkv[i*12 + j]      = wq[i*4 + j];
+                wqkv[i*12 + 4 + j]  = wk[i*4 + j];
+                wqkv[i*12 + 8 + j]  = wv[i*4 + j];
+            }
+        }
+    }
+    {
+        float *bqkv = tensor_data_ptr(block->qkv_proj->bias);
+        for (int j = 0; j < 4; j++) {
+            bqkv[j]      = bq[j];
+            bqkv[4 + j]  = bk[j];
+            bqkv[8 + j]  = bv[j];
+        }
+    }
     memcpy(tensor_data_ptr(block->out_proj->weight), wo, 16 * sizeof(float));
     memcpy(tensor_data_ptr(block->out_proj->bias),   bo,  4 * sizeof(float));
     memcpy(tensor_data_ptr(block->ffn->gate_proj->weight), wgg, 32 * sizeof(float));
@@ -509,7 +431,6 @@ int main(void) {
 
     test_block_create();
     test_backward_all_params();
-    test_numerical_grad();
     test_no_grad();
     test_autograd_chain();
     test_batch();

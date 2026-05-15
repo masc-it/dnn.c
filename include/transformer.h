@@ -64,9 +64,7 @@ tensor *kv_cache_get_V(struct mem_pool *scratch, kv_cache *kvc);
 
 typedef struct {
     module    base;                 /* first field */
-    linear    *q_proj;              /* d_model → n_heads * d_k */
-    linear    *k_proj;              /* d_model → n_heads * d_k */
-    linear    *v_proj;              /* d_model → n_heads * d_k */
+    linear    *qkv_proj;            /* d_model → 3 * n_heads * d_k (fused QKV) */
     linear    *out_proj;            /* n_heads * d_k → d_model */
     int        n_heads;
     int        d_k;

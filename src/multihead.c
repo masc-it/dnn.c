@@ -15,25 +15,31 @@
 
 /* ── Internal helpers ── */
 
-/* Copy data from [B,N,H,d_k] layout (src) to [B,H,N,d_k] layout (dst).
- * Both dst and src are contiguous flat arrays.
- * Parallelized over (batch × heads) — each thread copies a subset of
- * sequence positions for its assigned (b,h) pair. */
-static void _to_bhnd(int B, int N, int H, int d_k,
-                      const float *src, float *dst) {
-    int Hd_k = H * d_k;
+/* Copy data from [B,N,H,d_k] layout (src_t) to [B,H,N,d_k] layout (dst).
+ * src_t may be a non-contiguous view (e.g. slice of fused QKV) — uses its
+ * strides to index correctly.  dst is always flat contiguous.
+ * Parallelized over (batch × heads). */
+static void _to_bhnd(const tensor *src_t, int H, float *dst) {
+    int B   = src_t->shape[0];
+    int N   = src_t->shape[1];
+    int D   = src_t->shape[2];  /* H * d_k */
+    int d_k = D / H;
     int Nd_k = N * d_k;
+    float *src = (float*)src_t->data;
+    int off    = src_t->offset;
+    int s0     = src_t->strides[0];
+    int s1     = src_t->strides[1];
+    int s2     = src_t->strides[2];
 
     #pragma omp parallel for collapse(2) if (B * H >= OMP_MIN_ITERS)
     for (int b = 0; b < B; b++)
         for (int h = 0; h < H; h++) {
-            const float *b_src = src + b * N * Hd_k;
             float *b_dst = dst + b * H * Nd_k;
             for (int n = 0; n < N; n++) {
-                const float *s = b_src + n * Hd_k + h * d_k;
                 float *d = b_dst + h * Nd_k + n * d_k;
+                float *s = src + off + b * s0 + n * s1 + h * d_k * s2;
                 for (int i = 0; i < d_k; i++)
-                    d[i] = s[i];
+                    d[i] = s[i * s2];
             }
         }
 }
@@ -118,10 +124,11 @@ tensor *tensor_split_heads(struct mem_pool *scratch, tensor *t, int H) {
     /* Allocate contiguous output in scratch pool */
     tensor *out = tensor_scratch(scratch, 4, (int[]){B, H, N, d_k}, 0);
     float *od = (float*)out->data + out->offset;
-    float *td = (float*)t->data + t->offset;
 
-    /* Copy with layout transform: [B,N,H,d_k] → [B,H,N,d_k] */
-    _to_bhnd(B, N, H, d_k, td, od);
+    /* Copy with layout transform: [B,N,H,d_k] → [B,H,N,d_k]
+     * Uses tensor strides — works for both contiguous inputs and
+     * non-contiguous views (e.g. slices of fused QKV). */
+    _to_bhnd(t, H, od);
 
     /* ── Autograd ── */
     int needs_grad = dnn_grad_enabled() && tensor_requires_grad(t);
@@ -222,4 +229,120 @@ tensor *tensor_merge_heads(struct mem_pool *scratch, tensor *t) {
     }
 
     return out;
+}
+
+/* ── Fused QKV split + split heads ──
+ *
+ * Forward: read contiguous [B,N,3*H*d_k], write 3× contiguous [B,H,N,d_k].
+ * One pass, no strided intermediates.
+ */
+
+static void _split_qkv_to_bhnd(const tensor *qkv, int H,
+                                 float *qd, float *kd, float *vd) {
+    int B   = qkv->shape[0];
+    int N   = qkv->shape[1];
+    int D   = qkv->shape[2];  /* 3 * H * d_k */
+    int d_k = D / (3 * H);
+    float *src = (float*)qkv->data + qkv->offset;
+
+    #pragma omp parallel for collapse(2) if (B * H >= OMP_MIN_ITERS)
+    for (int b = 0; b < B; b++)
+        for (int h = 0; h < H; h++) {
+            float *q_row = qd + (b * H + h) * N * d_k;
+            float *k_row = kd + (b * H + h) * N * d_k;
+            float *v_row = vd + (b * H + h) * N * d_k;
+            for (int n = 0; n < N; n++) {
+                float *s = src + b * N * D + n * D + h * d_k;
+                for (int i = 0; i < d_k; i++) {
+                    q_row[n * d_k + i] = s[i];
+                    k_row[n * d_k + i] = s[H * d_k + i];
+                    v_row[n * d_k + i] = s[2 * H * d_k + i];
+                }
+            }
+        }
+}
+
+/* Backward for one output (Q, K, or V) of split_qkv_heads.
+ * Adds (does not zero) gradient to the fused qkv tensor.
+ * saved_idx = 0→Q, 1→K, 2→V selects which third of fused data. */
+static void split_qkv_heads_backward(grad_fn *fn, tensor *grad_output) {
+    tensor *qkv = fn->inputs[0];
+    int B   = qkv->shape[0];
+    int N   = qkv->shape[1];
+    int D   = qkv->shape[2];  /* 3 * H * d_k */
+    int saved_idx = *(int*)fn->saved_tensors[0];
+    float *gd = (float*)grad_output->data + grad_output->offset;
+    float *ig = _grad_ensure(qkv);
+    if (!ig) return;
+
+    /* grad_output is [B, H, N, d_k] (contiguous), saved_idx selects offset
+     * into the fused qkv gradient [B, N, 3*H*d_k]. */
+    int H_   = grad_output->shape[1];
+    int d_k  = grad_output->shape[3];
+    int Hd_k = H_ * d_k;
+
+    #pragma omp parallel for collapse(2) if (B * H_ >= OMP_MIN_ITERS)
+    for (int b = 0; b < B; b++)
+        for (int h = 0; h < H_; h++) {
+            float *g_row = gd + (b * H_ + h) * N * d_k;
+            int qkv_off = qkv->offset + b * N * D + h * d_k + saved_idx * Hd_k;
+            for (int n = 0; n < N; n++) {
+                float *ig_off = ig + qkv_off + n * D;
+                float *gd_off = g_row + n * d_k;
+                for (int i = 0; i < d_k; i++)
+                    ig_off[i] += gd_off[i];
+            }
+        }
+}
+
+/* ── Public API ── */
+
+void tensor_split_qkv_heads(struct mem_pool *scratch,
+                            tensor *qkv, int H,
+                            tensor **Qh_out, tensor **Kh_out, tensor **Vh_out) {
+    assert(qkv->ndim == 3 && "split_qkv_heads: qkv must be 3D [B,N,3*H*d_k]");
+    assert(qkv->contiguous && "split_qkv_heads: qkv must be contiguous");
+    int B   = qkv->shape[0];
+    int N   = qkv->shape[1];
+    int D   = qkv->shape[2];  /* 3 * H * d_k */
+    assert(D % (3 * H) == 0 && "split_qkv_heads: D must be 3*H*d_k");
+    int d_k = D / (3 * H);
+
+    /* Allocate three contiguous output tensors */
+    int shape4[] = {B, H, N, d_k};
+    tensor *Qh = tensor_scratch(scratch, 4, shape4, 0);
+    tensor *Kh = tensor_scratch(scratch, 4, shape4, 0);
+    tensor *Vh = tensor_scratch(scratch, 4, shape4, 0);
+
+    /* Fused layout transform: contiguous read from qkv, contiguous writes */
+    _split_qkv_to_bhnd(qkv, H,
+                        (float*)Qh->data + Qh->offset,
+                        (float*)Kh->data + Kh->offset,
+                        (float*)Vh->data + Vh->offset);
+
+    /* ── Autograd — wire three separate grad_fn instances, one per output.
+     * Each backward adds to the qkv gradient (no zero, so they accumulate). */
+    int needs_grad = dnn_grad_enabled() && tensor_requires_grad(qkv);
+    if (needs_grad) {
+        tensor *outs[3] = {Qh, Kh, Vh};
+        int saved_ids[3] = {0, 1, 2};
+        for (int i = 0; i < 3; i++) {
+            grad_fn *fn = _grad_fn_create(scratch);
+            fn->backward = split_qkv_heads_backward;
+            fn->n_inputs = 1;
+            fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
+            fn->inputs[0] = qkv;
+            fn->n_saved = 1;
+            fn->saved_tensors = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
+            int *p_idx = _mem_pool_alloc(scratch, sizeof(int), NULL);
+            *p_idx = saved_ids[i];
+            fn->saved_tensors[0] = (tensor*)p_idx;
+            outs[i]->requires_grad = 1;
+            outs[i]->grad_fn = fn;
+        }
+    }
+
+    *Qh_out = Qh;
+    *Kh_out = Kh;
+    *Vh_out = Vh;
 }

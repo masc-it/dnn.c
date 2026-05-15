@@ -19,4 +19,19 @@
 tensor *tensor_split_heads(struct mem_pool *scratch, tensor *t, int H);
 tensor *tensor_merge_heads(struct mem_pool *scratch, tensor *t);
 
+/* ── Fused QKV split + split heads (for fused QKV projection) ──
+ *
+ * Takes the fused output of qkv_proj:  [B, N, 3*H*d_k]  (contiguous)
+ * Produces 3 split-head outputs:      [B, H, N, d_k]   each (contiguous)
+ *
+ * Reads contiguous from source (no strided access) and writes contiguous
+ * to each output.  Single pass — much faster than slice + 3× split_heads.
+ *
+ * Autograd wired: backward accumulates gradients from all three outputs
+ * back to the single fused qkv tensor.
+ */
+void tensor_split_qkv_heads(struct mem_pool *scratch,
+                            tensor *qkv, int H,
+                            tensor **Qh_out, tensor **Kh_out, tensor **Vh_out);
+
 #endif /* DNN_MULTIHEAD_H */

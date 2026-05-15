@@ -99,10 +99,8 @@ static void test_gradients_flow(void) {
 
     /* Check all block params have grad buffers (allocated during backward) */
     transformer_block *b0 = lm->blocks[0];
-    assert(tensor_grad(b0->q_proj->weight) != NULL);
-    assert(tensor_grad(b0->q_proj->bias) != NULL);
-    assert(tensor_grad(b0->k_proj->weight) != NULL);
-    assert(tensor_grad(b0->v_proj->weight) != NULL);
+    assert(tensor_grad(b0->qkv_proj->weight) != NULL);
+    assert(tensor_grad(b0->qkv_proj->bias) != NULL);
     assert(tensor_grad(b0->out_proj->weight) != NULL);
     assert(tensor_grad(b0->attn_norm->weight) != NULL);
     assert(tensor_grad(b0->ffn_norm->weight) != NULL);
@@ -112,17 +110,17 @@ static void test_gradients_flow(void) {
 
     /* After adamw_zero_grad, grad buffers exist but are zeroed.
      * Parameter update is verified in test_params_update. */
-    float *qg = tensor_grad(b0->q_proj->weight);
+    float *qg = tensor_grad(b0->qkv_proj->weight);
     float qg_sum = 0.0f;
-    for (int i = 0; i < tensor_numel(b0->q_proj->weight); i++)
+    for (int i = 0; i < tensor_numel(b0->qkv_proj->weight); i++)
         qg_sum += fabsf(qg[i]);
     assert(qg_sum == 0.0f && "grads should be zeroed by adamw_zero_grad");
 
-    printf("    q_proj.weight grad: zeroed after optimizer step (ok)\n");
+    printf("    qkv_proj.weight grad: zeroed after optimizer step (ok)\n");
 
     /* Check block 1 as well */
     transformer_block *b1 = lm->blocks[1];
-    assert(tensor_grad(b1->q_proj->weight) != NULL);
+    assert(tensor_grad(b1->qkv_proj->weight) != NULL);
     assert(tensor_grad(b1->ffn->down_proj->weight) != NULL);
 
     printf("  gradients_flow: OK\n");

@@ -125,12 +125,8 @@ transformer_block *transformer_block_create(struct mem_pool *params_pool, int d_
     block->n_heads  = n_heads;
     block->d_k      = d_k;
 
-    block->q_proj   = linear_create(params_pool, d_model, n_heads * d_k);
-    module_add_child(&block->base, "q_proj", &block->q_proj->base);
-    block->k_proj   = linear_create(params_pool, d_model, n_heads * d_k);
-    module_add_child(&block->base, "k_proj", &block->k_proj->base);
-    block->v_proj   = linear_create(params_pool, d_model, n_heads * d_k);
-    module_add_child(&block->base, "v_proj", &block->v_proj->base);
+    block->qkv_proj = linear_create(params_pool, d_model, 3 * n_heads * d_k);
+    module_add_child(&block->base, "qkv_proj", &block->qkv_proj->base);
     block->out_proj = linear_create(params_pool, n_heads * d_k, d_model);
     module_add_child(&block->base, "out_proj", &block->out_proj->base);
 
@@ -159,15 +155,10 @@ tensor *transformer_block_forward(struct mem_pool *scratch, transformer_block *b
     tensor *residual = (tensor*)x;
     tensor *h = layer_norm_forward(scratch, block->attn_norm, x);
 
-    /* QKV projections: [B, N, d_model] → [B, N, n_heads * d_k] */
-    tensor *Q = linear_forward(scratch, block->q_proj, h);
-    tensor *K = linear_forward(scratch, block->k_proj, h);
-    tensor *V = linear_forward(scratch, block->v_proj, h);
-
-    /* Split heads: [B, N, H*d_k] → [B, H, N, d_k] */
-    tensor *Qh = tensor_split_heads(scratch, Q, block->n_heads);
-    tensor *Kh = tensor_split_heads(scratch, K, block->n_heads);
-    tensor *Vh = tensor_split_heads(scratch, V, block->n_heads);
+    /* Fused QKV projection + split heads: [B,N,d_model] → [B,N,3*H*d_k] */
+    tensor *qkv = linear_forward(scratch, block->qkv_proj, h);
+    tensor *Qh, *Kh, *Vh;
+    tensor_split_qkv_heads(scratch, qkv, block->n_heads, &Qh, &Kh, &Vh);
 
     /* ── RoPE: apply rotary position encoding to Q, K ── */
     if (block->freqs_cos && block->freqs_sin) {
@@ -220,15 +211,10 @@ tensor *transformer_block_forward_cached(struct mem_pool *scratch,
     /* Pre-norm */
     tensor *h = layer_norm_forward(scratch, block->attn_norm, x);
 
-    /* QKV projections */
-    tensor *Q = linear_forward(scratch, block->q_proj, h);  /* [B, N_new, H*d_k] */
-    tensor *K = linear_forward(scratch, block->k_proj, h);
-    tensor *V = linear_forward(scratch, block->v_proj, h);
-
-    /* Split heads */
-    tensor *Qh = tensor_split_heads(scratch, Q, H);  /* [B, H, N_new, d_k] */
-    tensor *Kh = tensor_split_heads(scratch, K, H);
-    tensor *Vh = tensor_split_heads(scratch, V, H);
+    /* Fused QKV projection + split heads */
+    tensor *qkv = linear_forward(scratch, block->qkv_proj, h);  /* [B, N_new, 3*H*d_k] */
+    tensor *Qh, *Kh, *Vh;
+    tensor_split_qkv_heads(scratch, qkv, H, &Qh, &Kh, &Vh);
 
     /* ── RoPE: apply to Q, K with position offset ── */
     if (block->freqs_cos && block->freqs_sin) {

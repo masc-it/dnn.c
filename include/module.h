@@ -83,7 +83,7 @@ void module_zero_grad(module *m);
  */
 void module_summary(module *m, int indent, int detail);
 
-/* Find a parameter tensor by its full state path, e.g. "blocks.0.q_proj.weight".
+/* Find a parameter tensor by its full state path, e.g. "blocks.0.qkv_proj.weight".
  * Returns NULL if not found. */
 tensor *module_find_param(module *m, const char *name);
 
