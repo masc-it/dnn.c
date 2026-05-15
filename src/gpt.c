@@ -10,6 +10,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+/* Forward declaration */
+static tensor *_lm_head_forward(struct mem_pool *scratch, decoder_lm *lm,
+                                 const tensor *h);
+
 /* ── Decoder-only Language Model ── */
 
 decoder_lm *decoder_lm_create(struct mem_pool *params_pool, int vocab_size, int d_model,
@@ -49,17 +53,13 @@ decoder_lm *decoder_lm_create(struct mem_pool *params_pool, int vocab_size, int 
     lm->norm = layer_norm_create(params_pool, d_model, 1e-5f);
     module_add_child(&lm->base, "norm", &lm->norm->base);
 
-    /* LM head: d_model → vocab_size (weight tied to embedding) */
+    /* LM head: d_model → vocab_size (weight tied to embedding — share data via
+     * embed->weight used with BLAS CblasTrans path instead of non-contig view) */
     lm->lm_head = _mem_pool_alloc(params_pool, sizeof(linear), NULL);
     module_init(&lm->lm_head->base, params_pool, "linear");
     lm->lm_head->in_features  = d_model;
     lm->lm_head->out_features = vocab_size;
-    /* weight = transpose(embedding) — persistent copy in params pool */
-    {
-        tensor *tmp = tensor_transpose(params_pool, lm->embed->weight, 0, 1);
-        lm->lm_head->weight = _mem_pool_alloc(params_pool, sizeof(tensor), tmp);
-        lm->lm_head->weight->pool = params_pool;
-    }
+    lm->lm_head->weight       = NULL;  /* not used — forward uses embed->weight */
     lm->lm_head->bias = tensor_zeros(params_pool, 1, (int[]){vocab_size}, 1);
     /* bias is the only param of lm_head — weight is tied to embedding
        (shares data buffer), so it's NOT registered as a separate param.
@@ -97,7 +97,7 @@ tensor *decoder_lm_forward(struct mem_pool *scratch, decoder_lm *lm, const tenso
     h = layer_norm_forward(scratch, lm->norm, h);
 
     /* LM head: [B, N, d_model] → [B, N, vocab_size] */
-    tensor *logits = linear_forward(scratch, lm->lm_head, h);
+    tensor *logits = _lm_head_forward(scratch, lm, h);
 
     return logits;
 }
@@ -159,6 +159,16 @@ tensor *decoder_lm_train_step(struct mem_pool *scratch_pool, struct mem_pool *da
     adamw_zero_grad(opt);
 
     return loss;
+}
+
+/* ── LM head forward (tied embedding, BLAS transposed path) ── */
+
+static tensor *_lm_head_forward(struct mem_pool *scratch, decoder_lm *lm,
+                                 const tensor *h) {
+    /* h @ embed_weight^T + bias.
+     * embed_weight is [vocab_size, d_model] contiguous — BLAS CblasTrans.
+     * Avoids non-contiguous transposed view that would skip BLAS entirely. */
+    return tensor_matmul_add(scratch, h, lm->embed->weight, 1, lm->lm_head->bias);
 }
 
 /* ── Sampling helpers ── */
@@ -273,7 +283,7 @@ int *decoder_lm_generate(struct mem_pool *scratch_pool, struct mem_pool *data_po
             /* Final norm + lm_head (only needed for last prompt token's logits) */
             if (p == prompt_len - 1) {
                 h = layer_norm_forward(scratch_pool, lm->norm, h);
-                tensor *logits = linear_forward(scratch_pool, lm->lm_head, h);  /* [1, 1, vocab] */
+                tensor *logits = _lm_head_forward(scratch_pool, lm, h);  /* [1, 1, vocab] */
                 float *ld = tensor_data_ptr(logits);
 
                 /* Copy last logits row before resetting scratch */
@@ -309,7 +319,7 @@ int *decoder_lm_generate(struct mem_pool *scratch_pool, struct mem_pool *data_po
             }
 
             h = layer_norm_forward(scratch_pool, lm->norm, h);
-            tensor *logits = linear_forward(scratch_pool, lm->lm_head, h);
+            tensor *logits = _lm_head_forward(scratch_pool, lm, h);
             float *ld = tensor_data_ptr(logits);
 
             /* Copy last logits row before resetting scratch */
@@ -392,9 +402,8 @@ static float _randn(void) {
 
 
 static void _init_linear(linear *l, float std) {
-    /* Weight may be a transposed view (tied weights) — skip if non-contiguous.
-       Bias is always contiguous. */
-    if (tensor_is_contiguous(l->weight)) {
+    /* Weight may be NULL (tied lm_head) — skip. Bias always init. */
+    if (l->weight && tensor_is_contiguous(l->weight)) {
         int nw = tensor_numel(l->weight);
         float *wd = tensor_data_ptr(l->weight);
         for (int i = 0; i < nw; i++) wd[i] = _randn() * std;

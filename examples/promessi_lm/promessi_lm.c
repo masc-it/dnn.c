@@ -63,7 +63,7 @@ int main(void) {
 
     /* ── Create LR scheduler (warmup + cosine) ── */
     int total_training_steps  = n_batches * MAX_EPOCHS;
-    int warmup_steps          = n_batches;  /* warmup over 1 epoch */
+    int warmup_steps          = n_batches * 60;  /* warmup over 1 epoch */
 
     lr_scheduler *sched = lr_scheduler_create(ctx.params, opt, LR_SCHEDULE_LINEAR_WARMUP_COSINE,
                                                 LR, warmup_steps, total_training_steps,
