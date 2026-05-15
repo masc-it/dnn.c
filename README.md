@@ -1,10 +1,13 @@
 # dnn.c — Deep Neural Network library in C
 
 From-scratch DNN training framework in C11. Implements autograd, optimizers,
-conv/linear layers, MNIST digit classification, and a full decoder-only
-transformer LM with RoPE, KV-cache, and byte-level tokenizer.
+conv/linear layers.
 
-Zero heap allocations during training — all memory managed via bump allocators.
+Examples include: 
+- classic MNIST digit classification (MLP/CNN)
+- full decoder-only transformer LM with RoPE, KV-cache, and byte-level tokenizer (docs/promessi_sposi.txt)
+
+Zero heap allocations during training — all memory managed via 3 bump allocators (params, activations, data).
 
 ## Architecture
 
