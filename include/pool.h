@@ -15,17 +15,9 @@ void     mem_pool_destroy(mem_pool *pool);
 void     mem_pool_reset(mem_pool *pool);
 size_t   mem_pool_mark(mem_pool *pool);
 void     mem_pool_release(mem_pool *pool, size_t mark);
-/* ── Default pools ── */
 
-/* ── Low-level allocators (internal, exposed for tensor.h etc.) ── */
+/* ── Low-level allocators (exposed for tensor.h etc.) ── */
 void    *_mem_pool_alloc(struct mem_pool *pool, size_t bytes, const void *src);
 void    *_mem_pool_alloc_nz(struct mem_pool *pool, size_t bytes);
-void mem_pool_set_defaults(mem_pool *params, mem_pool *scratch, mem_pool *data);
-
-/* ── Convenience (use default pools) ── */
-void *mem_params_alloc(size_t bytes, const void *src);
-void *mem_scratch_alloc(size_t bytes, const void *src);
-void *mem_data_alloc(size_t bytes, const void *src);
-
 
 #endif /* DNN_POOL_H */

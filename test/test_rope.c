@@ -1,6 +1,5 @@
 #include "dnn.h"
 #include "context.h"
-#include "pool_int.h"
 #include <stdio.h>
 #include <assert.h>
 #include <stdlib.h>

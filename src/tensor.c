@@ -1,6 +1,4 @@
 #include "tensor.h"
-#include "pool_int.h"
-#include "tensor_int.h"
 #include "autograd_int.h"
 #include <stdlib.h>
 #include <string.h>

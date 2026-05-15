@@ -1,7 +1,6 @@
 #include "rope.h"
 #include "autograd.h"
 #include "pool.h"
-#include "tensor_int.h"
 #include "autograd_int.h"
 #include "broadcast.h"
 #include <stdlib.h>

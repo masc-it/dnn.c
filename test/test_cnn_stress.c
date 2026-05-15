@@ -1,8 +1,6 @@
 #include "dnn.h"
 #include "context.h"
 #include "mnist.h"
-#include "tensor_int.h"
-#include "pool_int.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

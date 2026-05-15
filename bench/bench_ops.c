@@ -13,8 +13,6 @@
 #include "nn.h"
 #include "norm.h"
 #include "pool.h"
-#include "pool_int.h"
-#include "tensor_int.h"
 #include "simd.h"
 #include <stdio.h>
 #include <stdlib.h>

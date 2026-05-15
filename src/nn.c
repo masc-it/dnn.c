@@ -2,7 +2,6 @@
 #include "ops.h"
 #include "autograd.h"
 #include "pool.h"
-#include "tensor_int.h"
 #include <assert.h>
 #include <math.h>
 

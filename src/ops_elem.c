@@ -1,7 +1,6 @@
 #include "ops.h"
 #include "autograd.h"
 #include "pool.h"
-#include "tensor_int.h"
 #include "autograd_int.h"
 #include "broadcast.h"
 #include "ops_elem_int.h"

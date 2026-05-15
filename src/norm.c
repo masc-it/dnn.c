@@ -3,7 +3,6 @@
 #include "autograd_int.h"
 #include "pool.h"
 #include "broadcast.h"
-#include "tensor_int.h"
 #include "simd.h"
 #include <assert.h>
 #include <string.h>

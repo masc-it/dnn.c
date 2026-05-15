@@ -2,7 +2,6 @@
 #include "autograd.h"
 #include "autograd_int.h"
 #include "pool.h"
-#include "tensor_int.h"
 #include <assert.h>
 #include <string.h>
 #include <stdio.h>

@@ -6,8 +6,6 @@
 #include "multihead.h"
 #include "rope.h"
 #include "pool.h"
-#include "pool_int.h"
-#include "tensor_int.h"
 #include "autograd.h"
 #include "optim.h"
 #include "tokenizer.h"

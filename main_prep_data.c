@@ -141,22 +141,18 @@ int main(int argc, char **argv) {
     if (data_pool_size < 128 * 1024 * 1024)
         data_pool_size = 128 * 1024 * 1024;
 
-    mem_pool params  = mem_pool_create(1 * 1024 * 1024);
-    mem_pool scratch = mem_pool_create(16 * 1024 * 1024);
-    mem_pool data    = mem_pool_create(data_pool_size);
-    mem_pool_set_defaults(&params, &scratch, &data);
+    dnn_ctx ctx;
+    if (dnn_ctx_init(&ctx, 1*1024*1024, 16*1024*1024, data_pool_size) != 0) {
+        fprintf(stderr, "error: dnn_ctx_init failed\n");
+        free(file_buf);
+        return 1;
+    }
 
     /* ── Tokenize ── */
     tokenizer tok = tokenizer_with_chat_template();
 
     int total_ids_len;
-    int *all_ids = tokenizer_encode(&tok, file_buf, &total_ids_len);
-    if (!all_ids || total_ids_len <= 0) {
-        fprintf(stderr, "error: tokenizer returned empty\n");
-        free(file_buf);
-        dnn_ctx_destroy(&ctx);
-        return 1;
-    }
+    int *all_ids = tokenizer_encode(ctx.data, &tok, file_buf, &total_ids_len);
     printf("Tokenized: %d IDs (including outer BOS/EOS)\n", total_ids_len);
 
     free(file_buf);
@@ -260,17 +256,13 @@ int main(int argc, char **argv) {
            TOKENIZER_DATA_HEADER_SIZE);
 
     free(out_path);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+    dnn_ctx_destroy(&ctx);
     return 0;
 
 write_err:
     fprintf(stderr, "error: writing sequence data to '%s'\n", out_path);
     fclose(fout);
     free(out_path);
-    mem_pool_destroy(&params);
-    mem_pool_destroy(&scratch);
-    mem_pool_destroy(&data);
+    dnn_ctx_destroy(&ctx);
     return 1;
 }

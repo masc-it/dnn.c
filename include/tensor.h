@@ -3,7 +3,7 @@
 
 #define DNN_MAX_DIMS 8
 
-struct mem_pool;
+#include "pool.h"  /* for mem_pool, _mem_pool_alloc */
 typedef struct grad_fn grad_fn;
 
 typedef struct tensor {

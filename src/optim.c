@@ -1,6 +1,5 @@
 #include "optim.h"
 #include "pool.h"
-#include "tensor_int.h"
 #include <assert.h>
 #include <string.h>
 #include <math.h>
