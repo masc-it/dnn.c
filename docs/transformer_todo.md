@@ -575,6 +575,19 @@ mem_pool scratch = mem_pool_create(512 * 1024 * 1024);
   Runs in `dnn_no_grad` — no autograd tape created.
   Returns int array from data pool (caller resets data pool to free).
 
+**Scratch pool management:**
+- Both cached and non-cached paths now reset `_mem_pool_scratch()` between
+  iterations — no O(N²) scratch accumulation during generation.
+- Each generation step: forward pass fills scratch, logits row copied to
+  data pool buffer, scratch reset, then next step begins fresh.
+- Non-last prompt tokens in cached path also reset scratch between steps.
+
+**RoPE support:**
+- `decoder_lm_generate` works correctly with RoPE enabled.
+- Cached path applies RoPE at the correct position offset (`cache->seq_len`)
+  for each token via `tensor_slice` of freq tables.  Non-cached path applies
+  RoPE from position 0 (full sequence).  Both produce identical results.
+
 **Tests added:**
 - `test/ref_generation.py` — PyTorch reference: creates decoder LM, trains 5
   steps, generates with argmax + temperature, with/without cache, short prompt.
@@ -588,15 +601,35 @@ mem_pool scratch = mem_pool_create(512 * 1024 * 1024);
   - Temperature sampling: structurally valid (may match argmax)
   - Various model configs: cached/non-cached match across architectures
   - No-grad mode: generation doesn't accumulate grads
+- `test/ref_generation_prefix.py` — PyTorch reference (5 cases):
+  - No RoPE, short prompt (N=3): cached == non-cached
+  - RoPE, short prompt (N=3): cached == non-cached
+  - RoPE, long prefix (N=8): cached == non-cached
+  - RoPE, single token (N=1): cached == non-cached
+  - No RoPE, long prefix (N=8): cached == non-cached
+- `test/test_generation_prefix.c` — C tests (8 tests):
+  - RoPE + short prompt (N=3): cached == non-cached
+  - RoPE + long prefix (N=8): cached == non-cached
+  - RoPE + single token (N=1): cached == non-cached
+  - No RoPE + long prefix (N=8): cached == non-cached
+  - RoPE + various model configs (4 configs)
+  - RoPE + max new tokens limit
+  - RoPE + EOS stopping (vocab includes EOS ID)
+  - Prefix exact preservation (6-token prefix, RoPE)
 
 **Files changed:**
 - `include/transformer.h` — added `transformer_block_forward_cached`,
   `decoder_lm_generate` declarations
 - `src/transformer.c` — added `transformer_block_forward_cached`, `_argmax`,
-  `_sample_with_temp`, `decoder_lm_generate`
+  `_sample_with_temp`, `decoder_lm_generate`.  Added `#include "pool_int.h"`
+  for `_mem_pool_scratch()`.  Added scratch pool reset between iterations
+  in both cached and non-cached paths.
 - `test/ref_generation.py` — new PyTorch reference
 - `test/test_generation.c` — new C test suite
-- `docs/transformer_todo.md` — marked 19 done
+- `test/ref_generation_prefix.py` — new PyTorch reference (RoPE + prefix)
+- `test/test_generation_prefix.c` — new C test suite for prefixes + RoPE
+- `docs/transformer_todo.md` — marked 19 done, then refined with scratch
+  management + RoPE + prefix tests
 
 ---
 

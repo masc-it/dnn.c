@@ -6,6 +6,7 @@
 #include "multihead.h"
 #include "rope.h"
 #include "pool.h"
+#include "pool_int.h"
 #include "tensor_int.h"
 #include "autograd.h"
 #include "optim.h"
@@ -542,8 +543,10 @@ int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
         int d_k = lm->blocks[0]->d_k;
         int H   = lm->blocks[0]->n_heads;
 
-        /* Create KV-caches for each layer */
-        kv_cache **caches = mem_scratch_alloc((size_t)lm->n_layers * sizeof(kv_cache*), NULL);
+        /* Create KV-caches for each layer.
+         * IMPORTANT: allocate pointer array from params pool — scratch
+         * gets reset between iterations and caches must survive. */
+        kv_cache **caches = mem_params_alloc((size_t)lm->n_layers * sizeof(kv_cache*), NULL);
         int max_seq = max_len;
         for (int i = 0; i < lm->n_layers; i++) {
             caches[i] = kv_cache_create(B, H, max_seq, d_k);
@@ -571,16 +574,24 @@ int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
                 tensor *logits = linear_forward(lm->lm_head, h);  /* [1, 1, vocab] */
                 float *ld = tensor_data_ptr(logits);
 
+                /* Copy last logits row before resetting scratch */
+                float *last_logit_buf = mem_data_alloc((size_t)vocab_size * sizeof(float), NULL);
+                memcpy(last_logit_buf, ld, (size_t)vocab_size * sizeof(float));
+                mem_pool_reset(_mem_pool_scratch());
+
                 int next_id;
                 if (temperature == 0.0f) {
-                    next_id = _argmax(ld, vocab_size);
+                    next_id = _argmax(last_logit_buf, vocab_size);
                 } else {
-                    next_id = _sample_with_temp(ld, vocab_size, temperature);
+                    next_id = _sample_with_temp(last_logit_buf, vocab_size, temperature);
                 }
 
                 output[cur_len++] = next_id;
 
                 if (next_id == 258) goto done_generate;  /* EOS */
+            } else {
+                /* Free scratch between non-last prompt tokens */
+                mem_pool_reset(_mem_pool_scratch());
             }
         }
 
@@ -599,11 +610,16 @@ int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
             tensor *logits = linear_forward(lm->lm_head, h);
             float *ld = tensor_data_ptr(logits);
 
+            /* Copy last logits row before resetting scratch */
+            float *last_logit_buf = mem_data_alloc((size_t)vocab_size * sizeof(float), NULL);
+            memcpy(last_logit_buf, ld, (size_t)vocab_size * sizeof(float));
+            mem_pool_reset(_mem_pool_scratch());
+
             int next_id;
             if (temperature == 0.0f) {
-                next_id = _argmax(ld, vocab_size);
+                next_id = _argmax(last_logit_buf, vocab_size);
             } else {
-                next_id = _sample_with_temp(ld, vocab_size, temperature);
+                next_id = _sample_with_temp(last_logit_buf, vocab_size, temperature);
             }
 
             output[cur_len++] = next_id;
@@ -623,15 +639,20 @@ done_generate:
             /* Full forward pass */
             tensor *logits = decoder_lm_forward(lm, ids_tensor);  /* [1, cur_len, vocab] */
 
-            /* Get last token's logits */
+            /* Copy last token's logits before resetting scratch */
             float *ld = tensor_data_ptr(logits);
             float *last_logits = ld + (cur_len - 1) * vocab_size;
+            float *last_logit_buf = mem_data_alloc((size_t)vocab_size * sizeof(float), NULL);
+            memcpy(last_logit_buf, last_logits, (size_t)vocab_size * sizeof(float));
+
+            /* Reset scratch — each forward pass allocates huge activations */
+            mem_pool_reset(_mem_pool_scratch());
 
             int next_id;
             if (temperature == 0.0f) {
-                next_id = _argmax(last_logits, vocab_size);
+                next_id = _argmax(last_logit_buf, vocab_size);
             } else {
-                next_id = _sample_with_temp(last_logits, vocab_size, temperature);
+                next_id = _sample_with_temp(last_logit_buf, vocab_size, temperature);
             }
 
             output[cur_len++] = next_id;
