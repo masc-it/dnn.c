@@ -62,3 +62,17 @@ tensor *swiglu_ffn_forward(swiglu_ffn *ffn, const tensor *x) {
     /* out = hidden @ W_d + b_d */
     return linear_forward(ffn->down_proj, hidden);
 }
+
+long long linear_num_parameters(linear *l) {
+    assert(l);
+    long long n = tensor_numel(l->weight);
+    if (l->bias) n += tensor_numel(l->bias);
+    return n;
+}
+
+long long swiglu_ffn_num_parameters(swiglu_ffn *ffn) {
+    assert(ffn);
+    return linear_num_parameters(ffn->gate_proj)
+         + linear_num_parameters(ffn->up_proj)
+         + linear_num_parameters(ffn->down_proj);
+}

@@ -214,6 +214,52 @@ tensor *mnist_model_forward_cnn(mnist_model_cnn *m, const tensor *x) {
     return h;
 }
 
+/* ── CNN model (pool variant: stride-1 convs + avg_pool2d for full Winograd) ── */
+
+mnist_model_cnn_pool *mnist_model_create_cnn_pool(void) {
+    mnist_model_cnn_pool *m = mem_params_alloc(sizeof(mnist_model_cnn_pool), NULL);
+
+    float b1 = kaiming_bound(1, 3, 3);
+    m->conv1_w = tensor_uniform(4, (int[]){32, 1, 3, 3}, 1, b1);
+    m->conv1_b = tensor_zeros(1, (int[]){32}, 1);
+
+    float b2 = kaiming_bound(32, 3, 3);
+    m->conv2_w = tensor_uniform(4, (int[]){64, 32, 3, 3}, 1, b2);
+    m->conv2_b = tensor_zeros(1, (int[]){64}, 1);
+
+    float b3 = kaiming_bound(64, 3, 3);
+    m->conv3_w = tensor_uniform(4, (int[]){64, 64, 3, 3}, 1, b3);
+    m->conv3_b = tensor_zeros(1, (int[]){64}, 1);
+
+    m->fc1 = linear_create(3136, 128);
+    m->fc2 = linear_create(128, 10);
+
+    return m;
+}
+
+tensor *mnist_model_forward_cnn_pool(mnist_model_cnn_pool *m, const tensor *x) {
+    int N = tensor_shape(x, 0);
+    tensor *h = tensor_reshape((tensor*)x, 4, (int[]){N, 1, 28, 28});
+
+    h = tensor_conv2d(h, m->conv1_w, m->conv1_b, 1, 1);  /* Winograd: 28×28 */
+    h = tensor_relu(h);
+
+    h = tensor_conv2d(h, m->conv2_w, m->conv2_b, 1, 1);  /* Winograd: 28×28 */
+    h = tensor_relu(h);
+    h = tensor_avg_pool2d(h, 2, 2);                       /* 14×14 */
+
+    h = tensor_conv2d(h, m->conv3_w, m->conv3_b, 1, 1);  /* Winograd: 14×14 */
+    h = tensor_relu(h);
+    h = tensor_avg_pool2d(h, 2, 2);                       /* 7×7 */
+
+    h = tensor_reshape(h, 2, (int[]){N, -1});  /* (N, 3136) */
+    h = linear_forward(m->fc1, h);
+    h = tensor_relu(h);
+    h = tensor_dropout(h, 0.5f);
+    h = linear_forward(m->fc2, h);
+    return h;
+}
+
 /* ================================================================
  *  Training (generic backend, shared by MLP and CNN wrappers)
  * ================================================================ */
@@ -423,6 +469,25 @@ void mnist_train_cnn(mnist_model_cnn *m,
                      epochs, batch_size, lr, val_n, patience,
                      params, 10, m,
                      (forward_fn_t)mnist_model_forward_cnn);
+}
+
+/* ── CNN (pool variant) training wrapper ── */
+
+void mnist_train_cnn_pool(mnist_model_cnn_pool *m,
+                          tensor *train_images, tensor *train_labels,
+                          int epochs, int batch_size, float lr,
+                          int val_n, int patience) {
+    tensor *params[] = {
+        m->conv1_w, m->conv1_b,
+        m->conv2_w, m->conv2_b,
+        m->conv3_w, m->conv3_b,
+        m->fc1->weight, m->fc1->bias,
+        m->fc2->weight, m->fc2->bias,
+    };
+    mnist_train_impl(train_images, train_labels,
+                     epochs, batch_size, lr, val_n, patience,
+                     params, 10, m,
+                     (forward_fn_t)mnist_model_forward_cnn_pool);
 }
 
 /* ================================================================

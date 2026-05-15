@@ -670,6 +670,36 @@ done_nocache:
 }
 
 
+/* ── Parameter count ── */
+
+long long transformer_block_num_parameters(transformer_block *block) {
+    assert(block);
+    long long n = 0;
+    n += linear_num_parameters(block->q_proj);
+    n += linear_num_parameters(block->k_proj);
+    n += linear_num_parameters(block->v_proj);
+    n += linear_num_parameters(block->out_proj);
+    n += tensor_numel(block->attn_norm_weight);
+    n += tensor_numel(block->attn_norm_bias);
+    n += tensor_numel(block->ffn_norm_weight);
+    n += tensor_numel(block->ffn_norm_bias);
+    n += swiglu_ffn_num_parameters(block->ffn);
+    return n;
+}
+
+long long decoder_lm_num_parameters(decoder_lm *lm) {
+    assert(lm);
+    long long n = 0;
+    n += tensor_numel(lm->embedding_table);
+    for (int i = 0; i < lm->n_layers; i++)
+        n += transformer_block_num_parameters(lm->blocks[i]);
+    n += tensor_numel(lm->norm_weight);
+    n += tensor_numel(lm->norm_bias);
+    n += linear_num_parameters(lm->lm_head);
+    return n;
+}
+
+
 /* ── RoPE position encoding ── */
 
 void decoder_lm_enable_rope(decoder_lm *lm, int max_seq_len, float base) {

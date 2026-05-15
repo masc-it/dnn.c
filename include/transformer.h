@@ -205,4 +205,8 @@ int *decoder_lm_generate(decoder_lm *lm, const tensor *prompt_ids,
  */
 void decoder_lm_enable_rope(decoder_lm *lm, int max_seq_len, float base);
 
+/* ── Parameter count ── */
+long long transformer_block_num_parameters(transformer_block *block);
+long long decoder_lm_num_parameters(decoder_lm *lm);
+
 #endif /* DNN_TRANSFORMER_H */

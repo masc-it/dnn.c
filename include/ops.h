@@ -42,6 +42,9 @@ tensor *tensor_pow(const tensor *t, float exp);
 tensor *tensor_neg(const tensor *t);
 tensor *tensor_triu(int N, int diagonal);
 
+/* ── Pooling ── */
+tensor *tensor_avg_pool2d(const tensor *x, int k, int stride);
+
 /* ── Tensor concatenation ── */
 tensor *tensor_cat(const tensor *a, const tensor *b, int dim);
 

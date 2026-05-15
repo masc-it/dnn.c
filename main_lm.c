@@ -127,7 +127,10 @@ int main(void) {
 
     decoder_lm *lm = decoder_lm_create(VOCAB_SIZE, D_MODEL, N_LAYERS,
                                         N_HEADS, D_K, INTERMEDIATE);
-    printf("  model created.\n");
+    {
+        long long n = decoder_lm_num_parameters(lm);
+        printf("  model created.  Parameters: %lld (%.2fM)\n", n, n / 1e6);
+    }
 
     /* ── Enable RoPE ── */
     decoder_lm_enable_rope(lm, ds.seq_len, 10000.0f);

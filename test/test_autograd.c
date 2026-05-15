@@ -1791,6 +1791,74 @@ static void test_conv_stride_pad(void) {
     printf("OK\n");
 }
 
+/* ── Winograd-specific tests for 3×3 stride=1 pad=1 ── */
+
+static void test_winograd_simple(void) {
+    printf("  test_winograd_simple... ");
+    tensor *x = tensor_zeros(4, (int[]){1,1,4,4}, 1);
+    float *xp = tensor_data_ptr(x);
+    for (int i = 0; i < 16; i++) xp[i] = (float)i;
+    tensor *w = tensor_zeros(4, (int[]){1,1,3,3}, 1);
+    float *wp = tensor_data_ptr(w);
+    wp[0]=1; wp[1]=0; wp[2]=0;
+    wp[3]=0; wp[4]=0; wp[5]=0;
+    wp[6]=0; wp[7]=0; wp[8]=1;
+
+    tensor *out = tensor_conv2d(x, w, NULL, 1, 1);
+    tensor *loss = tensor_sum(out, 0);
+    dnn_backward(loss);
+
+    float *od = tensor_data_ptr(out);
+    float exp_out[] = {5.0f, 6.0f, 7.0f, 0.0f, 9.0f, 10.0f, 12.0f, 2.0f,
+                       13.0f, 18.0f, 20.0f, 6.0f, 0.0f, 8.0f, 9.0f, 10.0f};
+    for (int i = 0; i < 16; i++)
+        if (fabsf(od[i] - exp_out[i]) > 1e-4f) {
+            printf("    FAIL: out[%d]: got %.4f, expected %.4f\n", i, od[i], exp_out[i]);
+            assert(0);
+        }
+
+    float exp_dx[] = {1,1,1,0, 1,2,2,1, 1,2,2,1, 0,1,1,1};
+    check_grad_ary(x, exp_dx, 16, "dx");
+
+    float exp_dw[] = {45,66,54, 84,120,96, 81,114,90};
+    check_grad_ary(w, exp_dw, 9, "dw");
+    printf("OK\n");
+}
+
+static void test_winograd_multi_channel(void) {
+    printf("  test_winograd_multi_channel... ");
+    srand(0);
+    tensor *x = tensor_randn(4, (int[]){1,2,4,4}, 1);
+    tensor *w = tensor_randn(4, (int[]){3,2,3,3}, 1);
+    tensor *b = tensor_randn(1, (int[]){3}, 1);
+
+    tensor *out = tensor_conv2d(x, w, b, 1, 1);
+    tensor *loss = tensor_sum(out, 0);
+    dnn_backward(loss);
+
+    assert(tensor_grad(x) != NULL && "dx non-null");
+    assert(tensor_grad(w) != NULL && "dw non-null");
+    assert(tensor_grad(b) != NULL && "db non-null");
+    assert(out->shape[0] == 1 && out->shape[1] == 3);
+    assert(out->shape[2] == 4 && out->shape[3] == 4);
+    printf("OK\n");
+}
+
+static void test_winograd_no_bias(void) {
+    printf("  test_winograd_no_bias... ");
+    srand(1);
+    tensor *x = tensor_randn(4, (int[]){2,1,6,6}, 1);
+    tensor *w = tensor_randn(4, (int[]){2,1,3,3}, 1);
+
+    tensor *out = tensor_conv2d(x, w, NULL, 1, 1);
+    tensor *loss = tensor_sum(out, 0);
+    dnn_backward(loss);
+
+    assert(tensor_grad(x) != NULL && "dx non-null");
+    assert(tensor_grad(w) != NULL && "dw non-null");
+    printf("OK\n");
+}
+
 static void test_ln_exact_pytorch(void) {
     printf("  test_ln_exact_pytorch... ");
     /* exact setup from ref_layer_norm.py backward test */
@@ -2154,6 +2222,18 @@ int main(void) {
     mem_pool_reset(&scratch);
 
     test_conv_stride_pad();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_winograd_simple();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_winograd_multi_channel();
+    mem_pool_reset(&params);
+    mem_pool_reset(&scratch);
+
+    test_winograd_no_bias();
     mem_pool_reset(&params);
     mem_pool_reset(&scratch);
 

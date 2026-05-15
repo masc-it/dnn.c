@@ -22,7 +22,7 @@ typedef struct {
     linear *fc2;  /* 256 → 10  */
 } mnist_model;
 
-/* CNN: convs 1→32→64→64 + FC 3136→128→10 */
+/* CNN: convs 1→32→64→64 + FC 3136→128→10 (stride-2 for downsampling) */
 typedef struct {
     tensor  *conv1_w, *conv1_b;   /*  1→32, 3×3, pad=1, s1 → 28×28 */
     tensor  *conv2_w, *conv2_b;   /* 32→64, 3×3, pad=1, s2 → 14×14 */
@@ -30,6 +30,18 @@ typedef struct {
     linear  *fc1;                 /* 3136 → 128 */
     linear  *fc2;                 /* 128  → 10  */
 } mnist_model_cnn;
+
+/* CNN (pool variant): stride-1 convs + avg_pool2d for downsampling.
+ * All 3×3 convs use Winograd (stride=1).
+ *   28 → conv1 → 28 → conv2 → 28 → pool → 14 → conv3 → 14 → pool → 7
+ */
+typedef struct {
+    tensor  *conv1_w, *conv1_b;   /*  1→32, 3×3, pad=1, s1 → 28×28 */
+    tensor  *conv2_w, *conv2_b;   /* 32→64, 3×3, pad=1, s1 → 28×28 */
+    tensor  *conv3_w, *conv3_b;   /* 64→64, 3×3, pad=1, s1 → 14×14 */
+    linear  *fc1;                 /* 3136 → 128 */
+    linear  *fc2;                 /* 128  → 10  */
+} mnist_model_cnn_pool;
 
 /* ── Data loading ── */
 
@@ -52,6 +64,9 @@ tensor         *mnist_model_forward(mnist_model *m, const tensor *x);
 mnist_model_cnn *mnist_model_create_cnn(void);
 tensor          *mnist_model_forward_cnn(mnist_model_cnn *m, const tensor *x);
 
+mnist_model_cnn_pool *mnist_model_create_cnn_pool(void);
+tensor               *mnist_model_forward_cnn_pool(mnist_model_cnn_pool *m, const tensor *x);
+
 /* ── Training / eval ── */
 
 /* Train model with AdamW. Prints per-epoch loss.
@@ -70,6 +85,11 @@ void   mnist_train_cnn(mnist_model_cnn *m,
                        tensor *train_images, tensor *train_labels,
                        int epochs, int batch_size, float lr,
                        int val_n, int patience);
+
+void   mnist_train_cnn_pool(mnist_model_cnn_pool *m,
+                            tensor *train_images, tensor *train_labels,
+                            int epochs, int batch_size, float lr,
+                            int val_n, int patience);
 
 /* Compute accuracy (0.0 – 1.0) on given dataset. Runs in no-grad mode.
  *
@@ -90,6 +110,13 @@ static inline float mnist_eval(mnist_model *m, tensor *images, tensor *labels) {
 static inline float mnist_eval_cnn(mnist_model_cnn *m, tensor *images, tensor *labels) {
     return mnist_eval_generic(m,
         (tensor *(*)(void *, const tensor *))mnist_model_forward_cnn,
+        images, labels);
+}
+
+static inline float mnist_eval_cnn_pool(mnist_model_cnn_pool *m,
+                                         tensor *images, tensor *labels) {
+    return mnist_eval_generic(m,
+        (tensor *(*)(void *, const tensor *))mnist_model_forward_cnn_pool,
         images, labels);
 }
 

@@ -41,7 +41,17 @@ int main(void) {
     mem_pool_reset(&scratch);
 
     mnist_model_cnn *m_cnn = mnist_model_create_cnn();
-    printf("CNN model created.\n\n");
+    
+    {
+        /* count CNN params — no generic helper for mnist_model_cnn */
+        long long n = 0;
+        n += tensor_numel(m_cnn->conv1_w) + tensor_numel(m_cnn->conv1_b);
+        n += tensor_numel(m_cnn->conv2_w) + tensor_numel(m_cnn->conv2_b);
+        n += tensor_numel(m_cnn->conv3_w) + tensor_numel(m_cnn->conv3_b);
+        n += linear_num_parameters(m_cnn->fc1);
+        n += linear_num_parameters(m_cnn->fc2);
+        printf("CNN model created.  Parameters: %lld (%.2fM)\n\n", n, n / 1e6);
+    }
 
     printf("Training CNN (AdamW, lr=0.001, batch=128, max_epochs=1, patience=3):\n");
     mnist_train_cnn(m_cnn, train_images, train_labels, 1, 128, 0.001f, 5000, 3);

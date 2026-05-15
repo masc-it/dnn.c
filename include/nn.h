@@ -41,4 +41,8 @@ typedef struct swiglu_ffn {
 swiglu_ffn *swiglu_ffn_create(int d_model, int intermediate_size);
 tensor     *swiglu_ffn_forward(swiglu_ffn *ffn, const tensor *x);
 
+/* ── Parameter count helpers ── */
+long long linear_num_parameters(linear *l);
+long long swiglu_ffn_num_parameters(swiglu_ffn *ffn);
+
 #endif /* DNN_NN_H */
