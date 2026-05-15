@@ -368,6 +368,9 @@ static void conv2d_backward(grad_fn *fn, tensor *grad_output) {
         float *col = (float*)fn->saved_tensors[2];  /* reuse forward's col */
         float *wg = _grad_ensure(weight);
         int dw_block = out_C > 16 ? 16 : out_C;
+        /* Disable nested OMP: each thread calls threaded BLAS */
+        int prev_level = omp_get_max_active_levels();
+        omp_set_max_active_levels(1);
 #pragma omp parallel for
         for (int oc = 0; oc < out_C; oc += dw_block) {
             int oc_this = out_C - oc;
@@ -389,6 +392,7 @@ static void conv2d_backward(grad_fn *fn, tensor *grad_output) {
                         1.0f, wg + (size_t)oc * K, K);
 #endif
         }
+        omp_set_max_active_levels(prev_level);
     }
 
     /* ── d_input: col2im( gd(M,out_C) @ weight(out_C,K) ) ── */
@@ -744,6 +748,9 @@ tensor *tensor_conv2d(tensor *input, tensor *weight, tensor *bias,
 
         im2col(xd, col, N, C, H, W, kH, kW, pad, stride);
 
+        /* Disable nested OMP before BLAS sections: each thread calls threaded BLAS */
+        int _prev_omp_level = omp_get_max_active_levels();
+        omp_set_max_active_levels(1);
 #if NO_CBLAS
 #pragma omp parallel for
         for (int oc = 0; oc < out_C; oc++) {
@@ -781,6 +788,7 @@ tensor *tensor_conv2d(tensor *input, tensor *weight, tensor *bias,
             }
         }
 #endif
+        omp_set_max_active_levels(_prev_omp_level);
 
         /* ── autograd tape (im2col) ── */
         int _needs_grad = dnn_grad_enabled() &&

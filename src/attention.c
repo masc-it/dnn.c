@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <string.h>
 #include <math.h>
+#include <omp.h>
 
 /* BLAS for fast matmul */
 #if defined(__APPLE__)
@@ -135,22 +136,31 @@ static void attention_backward(grad_fn *fn, tensor *grad_output) {
                 float *ds_row = dS + i * N;
 
                 /* dot_i = sum_{j <= i} P[i][j] * dP[i][j] */
-                float dot = 0.0f;
+                float dot;
+#if DNN_HAVE_NEON
+                {
+                    float32x4_t vdot = vdupq_n_f32(0.0f);
+                    int j = 0;
+                    for (; j + 4 <= i; j += 4) {
+                        vdot = vfmaq_f32(vdot, vld1q_f32(p_row + j),
+                                               vld1q_f32(dp_row + j));
+                    }
+                    dot = vaddvq_f32(vdot);
+                    for (; j <= i; j++) dot += p_row[j] * dp_row[j];
+                }
+#else
+                dot = 0.0f;
                 for (int j = 0; j <= i; j++)
                     dot += p_row[j] * dp_row[j];
+#endif
 
-                /* dS[i][j] = P[i][j] * (dP[i][j] - dot_i) for j <= i */
+                /* dS[i][j] = P[i][j] * (dP[i][j] - dot_i) * scale for j <= i
+                 *   scale baked in here to avoid a separate N×N pass */
                 for (int j = 0; j <= i; j++)
-                    ds_row[j] = p_row[j] * (dp_row[j] - dot);
+                    ds_row[j] = p_row[j] * (dp_row[j] - dot) * scale;
                 for (int j = i + 1; j < N; j++)
                     ds_row[j] = 0.0f;
             }
-
-            /* ── Scale dS by scale ──
-             *   S = (Q @ K^T) * scale, so d(Q@K^T) = dS * scale
-             */
-            for (int i = 0; i < N * N; i++)
-                dS[i] *= scale;
 
             /* ── dQ = dS @ K  [N, d] ──
              *   dS is [N,N], K is [N,d]

@@ -604,9 +604,23 @@ static void causal_softmax_backward(grad_fn *fn, tensor *grad_output) {
             float *ag_row = ag + i * N;
 
             /* dot_i = sum_{j <= i} sm[i][j] * g[i][j] */
-            float dot = 0.0f;
+            float dot;
+#if DNN_HAVE_NEON
+            {
+                float32x4_t vdot = vdupq_n_f32(0.0f);
+                int j = 0;
+                for (; j + 4 <= i; j += 4) {
+                    vdot = vfmaq_f32(vdot, vld1q_f32(sm_row + j),
+                                           vld1q_f32(g_row + j));
+                }
+                dot = vaddvq_f32(vdot);
+                for (; j <= i; j++) dot += sm_row[j] * g_row[j];
+            }
+#else
+            dot = 0.0f;
             for (int j = 0; j <= i; j++)
                 dot += sm_row[j] * g_row[j];
+#endif
 
             /* dL/dx[i][j] = sm[i][j] * (g[i][j] - dot_i) for j <= i */
             for (int j = 0; j <= i; j++)
@@ -631,9 +645,23 @@ static void causal_softmax_backward(grad_fn *fn, tensor *grad_output) {
             float *g_row  = g_mat  + i * N;
             float *ag_row = ag_mat + i * N;
 
-            float dot = 0.0f;
+            float dot;
+#if DNN_HAVE_NEON
+            {
+                float32x4_t vdot = vdupq_n_f32(0.0f);
+                int j = 0;
+                for (; j + 4 <= i; j += 4) {
+                    vdot = vfmaq_f32(vdot, vld1q_f32(sm_row + j),
+                                           vld1q_f32(g_row + j));
+                }
+                dot = vaddvq_f32(vdot);
+                for (; j <= i; j++) dot += sm_row[j] * g_row[j];
+            }
+#else
+            dot = 0.0f;
             for (int j = 0; j <= i; j++)
                 dot += sm_row[j] * g_row[j];
+#endif
 
             for (int j = 0; j <= i; j++)
                 ag_row[j] += sm_row[j] * (g_row[j] - dot);
@@ -1047,7 +1075,7 @@ tensor *tensor_cross_entropy(const tensor *logits, const tensor *target, int dim
 /* ── dropout_backward ── */
 
 static void dropout_backward(grad_fn *fn, tensor *grad_output) {
-    float  *mask = (float*)fn->saved_tensors[0];
+    unsigned char *mask = (unsigned char*)fn->saved_tensors[0];
     float   p    = *(float*)fn->saved_tensors[1];
     int     n    = *(int*)fn->saved_tensors[2];
     tensor *input = fn->inputs[0];
@@ -1061,7 +1089,7 @@ static void dropout_backward(grad_fn *fn, tensor *grad_output) {
         if (tensor_is_contiguous(input)) {
             int off = input->offset;
             for (int i = 0; i < n; i++)
-                ig[off + i] += gd[i] * mask[i] * scale;
+                ig[off + i] += gd[i] * (float)mask[i] * scale;
         } else {
             for (int i = 0; i < n; i++) {
                 int coord[DNN_MAX_DIMS];
@@ -1070,7 +1098,7 @@ static void dropout_backward(grad_fn *fn, tensor *grad_output) {
                     coord[d] = r % input->shape[d];
                     r /= input->shape[d];
                 }
-                ig[_bcast_off(input, ndim, coord)] += gd[i] * mask[i] * scale;
+                ig[_bcast_off(input, ndim, coord)] += gd[i] * (float)mask[i] * scale;
             }
         }
     }
@@ -1093,13 +1121,14 @@ tensor *tensor_dropout(const tensor *t, float p) {
     float  *od  = (float*)out->data;
     float  *td  = (float*)t->data;
 
-    /* generate mask and apply: out = mask * t / (1-p) */
-    float *mask = mem_scratch_alloc((size_t)n * sizeof(float), NULL);
+    /* generate mask and apply: out = mask * t / (1-p)
+     * mask stored as byte array (75% less memory than float mask). */
+    unsigned char *mask = mem_scratch_alloc((size_t)n * sizeof(unsigned char), NULL);
     if (tensor_is_contiguous(t)) {
         float *tp = td + t->offset;
         for (int i = 0; i < n; i++) {
-            mask[i] = ((float)rand() / (float)RAND_MAX) >= p ? 1.0f : 0.0f;
-            od[i]   = mask[i] * tp[i] * scale;
+            mask[i] = ((float)rand() / (float)RAND_MAX) >= p ? 1 : 0;
+            od[i]   = (float)mask[i] * tp[i] * scale;
         }
     } else {
         for (int i = 0; i < n; i++) {
@@ -1109,8 +1138,8 @@ tensor *tensor_dropout(const tensor *t, float p) {
                 coord[d] = r % t->shape[d];
                 r /= t->shape[d];
             }
-            mask[i] = ((float)rand() / (float)RAND_MAX) >= p ? 1.0f : 0.0f;
-            od[i]   = mask[i] * td[_bcast_off(t, ndim, coord)] * scale;
+            mask[i] = ((float)rand() / (float)RAND_MAX) >= p ? 1 : 0;
+            od[i]   = (float)mask[i] * td[_bcast_off(t, ndim, coord)] * scale;
         }
     }
 

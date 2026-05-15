@@ -4,6 +4,7 @@
 #include "pool.h"
 #include "broadcast.h"
 #include "tensor_int.h"
+#include "simd.h"
 #include <assert.h>
 #include <string.h>
 #include <math.h>
@@ -33,11 +34,30 @@ static void ln_backward(grad_fn *fn, tensor *grad_output) {
 #pragma omp parallel for
         for (int s = 0; s < n; s++) {
             float m = mean[s], rs = rstd[s];
+            float *x_slice = xd + s * d;
+            float *g_slice = gd + s * d;
+#if DNN_HAVE_NEON
+            float32x4_t vm  = vdupq_n_f32(m);
+            float32x4_t vrs = vdupq_n_f32(rs);
+            int j = 0;
+            for (; j + 4 <= d; j += 4) {
+                float32x4_t vx = vld1q_f32(x_slice + j);
+                float32x4_t vg = vld1q_f32(g_slice + j);
+                float32x4_t vy = vmulq_f32(vsubq_f32(vx, vm), vrs);
+                float32x4_t vw = vld1q_f32(wg + j);
+                vst1q_f32(wg + j, vfmaq_f32(vw, vg, vy));
+            }
+            for (; j < d; j++) {
+                float y = (x_slice[j] - m) * rs;
+                wg[j] += g_slice[j] * y;
+            }
+#else
             #pragma omp simd
             for (int j = 0; j < d; j++) {
-                float y = (xd[s * d + j] - m) * rs;
-                wg[j] += gd[s * d + j] * y;
+                float y = (x_slice[j] - m) * rs;
+                wg[j] += g_slice[j] * y;
             }
+#endif
         }
     }
 
@@ -45,10 +65,22 @@ static void ln_backward(grad_fn *fn, tensor *grad_output) {
     if (bias && tensor_requires_grad(bias)) {
         float *bg = _grad_ensure(bias);
 #pragma omp parallel for
-        for (int s = 0; s < n; s++)
+        for (int s = 0; s < n; s++) {
+            float *g_slice = gd + s * d;
+#if DNN_HAVE_NEON
+            int j = 0;
+            for (; j + 4 <= d; j += 4) {
+                float32x4_t vg = vld1q_f32(g_slice + j);
+                float32x4_t vb = vld1q_f32(bg + j);
+                vst1q_f32(bg + j, vaddq_f32(vb, vg));
+            }
+            for (; j < d; j++) bg[j] += g_slice[j];
+#else
             #pragma omp simd
             for (int j = 0; j < d; j++)
-                bg[j] += gd[s * d + j];
+                bg[j] += g_slice[j];
+#endif
+        }
     }
 
     /* dx = rstd * (dy - mean(dy) - xmu * mean(dy * xmu) * rstd²)
@@ -64,27 +96,80 @@ static void ln_backward(grad_fn *fn, tensor *grad_output) {
 #pragma omp parallel for
         for (int s = 0; s < n; s++) {
             float m = mean[s], rs = rstd[s];
+            float *x_slice = xd + s * d;
+            float *g_slice = gd + s * d;
+            float *xg_slice = xg + s * d;
 
             float dy_buf[d];  /* VLA, per-thread stack — stores dy = gd * weight */
             float sum_dy = 0.0f, sum_dy_xmu = 0.0f;
-            #pragma omp simd reduction(+:sum_dy,sum_dy_xmu)
-            for (int j = 0; j < d; j++) {
+
+#if DNN_HAVE_NEON
+            float32x4_t vm  = vdupq_n_f32(m);
+            float32x4_t vone = vdupq_n_f32(1.0f);
+            float32x4_t vsum_dy = vdupq_n_f32(0.0f);
+            float32x4_t vsum_dy_xmu = vdupq_n_f32(0.0f);
+            int j = 0;
+            for (; j + 4 <= d; j += 4) {
+                float32x4_t vx  = vld1q_f32(x_slice + j);
+                float32x4_t vg  = vld1q_f32(g_slice + j);
+                float32x4_t vw  = wd ? vld1q_f32(wd + j) : vone;
+                float32x4_t vxmu = vsubq_f32(vx, vm);
+                float32x4_t vdy = vmulq_f32(vg, vw);
+                vst1q_f32(dy_buf + j, vdy);
+                vsum_dy     = vaddq_f32(vsum_dy, vdy);
+                vsum_dy_xmu = vfmaq_f32(vsum_dy_xmu, vdy, vxmu);
+            }
+            sum_dy     = vaddvq_f32(vsum_dy);
+            sum_dy_xmu = vaddvq_f32(vsum_dy_xmu);
+            for (; j < d; j++) {
                 float w = wd ? wd[j] : 1.0f;
-                dy_buf[j] = gd[s * d + j] * w;
-                float xmu = xd[s * d + j] - m;
+                dy_buf[j] = g_slice[j] * w;
+                float xmu = x_slice[j] - m;
                 sum_dy     += dy_buf[j];
                 sum_dy_xmu += dy_buf[j] * xmu;
             }
+#else
+            #pragma omp simd reduction(+:sum_dy,sum_dy_xmu)
+            for (int j = 0; j < d; j++) {
+                float w = wd ? wd[j] : 1.0f;
+                dy_buf[j] = g_slice[j] * w;
+                float xmu = x_slice[j] - m;
+                sum_dy     += dy_buf[j];
+                sum_dy_xmu += dy_buf[j] * xmu;
+            }
+#endif
 
             float mean_dy     = sum_dy * inv_d;
             float mean_dy_xmu = sum_dy_xmu * inv_d;
 
+#if DNN_HAVE_NEON
+            float32x4_t vmean_dy     = vdupq_n_f32(mean_dy);
+            float32x4_t vmean_dy_xmu = vdupq_n_f32(mean_dy_xmu);
+            float32x4_t vrs          = vdupq_n_f32(rs);
+            float32x4_t vrs2         = vdupq_n_f32(rs * rs);
+            j = 0;
+            for (; j + 4 <= d; j += 4) {
+                float32x4_t vxmu  = vsubq_f32(vld1q_f32(x_slice + j), vm);
+                float32x4_t vdy   = vld1q_f32(dy_buf + j);
+                float32x4_t vx    = vld1q_f32(xg_slice + j);
+                /* dx = rs * (dy - mean_dy - xmu * mean_dy_xmu * rs²) */
+                float32x4_t vdx   = vsubq_f32(vsubq_f32(vdy, vmean_dy),
+                                              vmulq_f32(vxmu, vmulq_f32(vmean_dy_xmu, vrs2)));
+                vst1q_f32(xg_slice + j, vfmaq_f32(vx, vrs, vdx));
+            }
+            for (; j < d; j++) {
+                float xmu = x_slice[j] - m;
+                float dx  = rs * (dy_buf[j] - mean_dy - xmu * mean_dy_xmu * rs * rs);
+                xg_slice[j] += dx;
+            }
+#else
             #pragma omp simd
             for (int j = 0; j < d; j++) {
-                float xmu = xd[s * d + j] - m;
+                float xmu = x_slice[j] - m;
                 float dx  = rs * (dy_buf[j] - mean_dy - xmu * mean_dy_xmu * rs * rs);
-                xg[s * d + j] += dx;
+                xg_slice[j] += dx;
             }
+#endif
         }
     }
 }
@@ -141,11 +226,30 @@ tensor *tensor_layer_norm(const tensor *x, const tensor *weight,
 #pragma omp parallel for
     for (int s = 0; s < n; s++) {
         float m = mean[s], rs = rstd[s];
+        float *x_slice = xd + s * d;
+        float *o_slice = od + s * d;
+#if DNN_HAVE_NEON
+        float32x4_t vm  = vdupq_n_f32(m);
+        float32x4_t vrs = vdupq_n_f32(rs);
+        int j = 0;
+        for (; j + 4 <= d; j += 4) {
+            float32x4_t vx = vld1q_f32(x_slice + j);
+            float32x4_t vy = vmulq_f32(vsubq_f32(vx, vm), vrs);
+            float32x4_t vw = wd ? vld1q_f32(wd + j) : vdupq_n_f32(1.0f);
+            float32x4_t vb = bd ? vld1q_f32(bd + j) : vdupq_n_f32(0.0f);
+            vst1q_f32(o_slice + j, vfmaq_f32(vb, vy, vw));
+        }
+        for (; j < d; j++) {
+            float y = (x_slice[j] - m) * rs;
+            o_slice[j] = y * (wd ? wd[j] : 1.0f) + (bd ? bd[j] : 0.0f);
+        }
+#else
         #pragma omp simd
         for (int j = 0; j < d; j++) {
-            float y = (xd[s * d + j] - m) * rs;
-            od[s * d + j] = y * (wd ? wd[j] : 1.0f) + (bd ? bd[j] : 0.0f);
+            float y = (x_slice[j] - m) * rs;
+            o_slice[j] = y * (wd ? wd[j] : 1.0f) + (bd ? bd[j] : 0.0f);
         }
+#endif
     }
 
     /* autograd tape */

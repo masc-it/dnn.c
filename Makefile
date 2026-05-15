@@ -1,5 +1,5 @@
 CC        ?= gcc
-CFLAGS    := -Wall -Wextra -pedantic -std=c11 -O3 -ffast-math -g
+CFLAGS    := -Wall -Wextra -pedantic -std=c11 -O3 -ffinite-math-only -fno-signed-zeros -fno-trapping-math -g
 EXTRA_CFLAGS ?=
 OMP_PREFIX = /opt/homebrew/opt/libomp
 INCDIRS    = -Iinclude -Isrc -I$(OMP_PREFIX)/include
@@ -28,7 +28,7 @@ BENCH_BINS = $(patsubst $(BENCHDIR)/%.c, $(BUILDDIR)/%, $(BENCH_SRCS))
 LIB      = $(BUILDDIR)/libdnn.a
 
 .PHONY: all clean test run bench main main_lm main_prep_data run_lm
-.PHONY: bench_conv2d bench_matmul bench_ops bench_multihead bench_all
+.PHONY: bench_conv2d bench_matmul bench_ops bench_multihead bench_transformer bench_all
 
 all: $(OBJDIR) $(TEST_OBJDIR) $(LIB)
 
@@ -94,6 +94,9 @@ bench_ops: $(BUILDDIR)/bench_ops
 
 bench_multihead: $(BUILDDIR)/bench_multihead
 	$(BUILDDIR)/bench_multihead
+
+bench_transformer: $(BUILDDIR)/bench_transformer
+	$(BUILDDIR)/bench_transformer
 
 # build all benches then run each
 bench_all: $(BENCH_BINS)
