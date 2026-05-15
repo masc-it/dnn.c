@@ -1,13 +1,24 @@
 # dnn.c — Deep Neural Network library in C
 
-From-scratch DNN training framework in C11. Implements autograd, optimizers,
-conv/linear layers.
+From-scratch DNN training framework in C11.
 
 Examples include: 
 - classic MNIST digit classification (MLP/CNN)
 - full decoder-only transformer LM with RoPE, KV-cache, and byte-level tokenizer (docs/promessi_sposi.txt)
 
-Zero heap allocations during training — all memory managed via 3 bump allocators (params, activations, data).
+~Zero heap allocations during training.
+
+Decided to finally give this a shot after ~2 years of studying and replicating from first principles what great Andrej Karpathy shared on the internet (sources at the bottom). Got tired of python and pytorch, was time to go deeper. 
+
+Thanks to this project, I truly realised how blessed we are to have pytorch and the people surroudning it.
+
+The focus of this project for me was to put in practice the best low-level design practices I learnt about and instruct ds4-flash to implement them step-by-step (most of the time). 
+
+I left ~0% room to the AI assistant for design choices, 90% freedom in implementation. As usual, pareto law applies here as well, the 10% implementation guidance brought the majority of longer-term benefits.
+
+Up to now, the cost of this project is around $6. we average $1/day (opencode-go)
+
+This model is truly amazing as a daily assistant in "pair-programming mode" (not yolo/vibes).
 
 ## Architecture
 
