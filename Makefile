@@ -27,7 +27,9 @@ BENCH_BINS = $(patsubst $(BENCHDIR)/%.c, $(BUILDDIR)/%, $(BENCH_SRCS))
 
 LIB      = $(BUILDDIR)/libdnn.a
 
-.PHONY: all clean test run bench main main_lm main_prep_data run_lm
+.PHONY: all clean test bench main_lm main_prep_data run_lm
+.PHONY: mnist_mlp mnist_cnn mnist_cnn_pool
+.PHONY: run_mnist_mlp run_mnist_cnn run_mnist_cnn_pool
 .PHONY: bench_conv2d bench_matmul bench_ops bench_multihead bench_transformer bench_all
 
 all: $(OBJDIR) $(TEST_OBJDIR) $(LIB)
@@ -53,24 +55,32 @@ test: $(TEST_BINS)
 $(TEST_OBJDIR)/%: $(TESTDIR)/%.c $(LIB) | $(TEST_OBJDIR)
 	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(OMPFLAGS) $(CPPFLAGS) $< $(LDFLAGS) $(LDLIBS) -o $@
 
-run: $(BUILDDIR)/main $(LIB)
-	./$(BUILDDIR)/main
 
 run_lm: $(BUILDDIR)/main_lm $(LIB)
 	./$(BUILDDIR)/main_lm
 
-# phony shortcuts: make main  →  build + run
-main: $(BUILDDIR)/main
-	$(BUILDDIR)/main
+# MNIST examples live in examples/mnist/.
+
+MNIST_EXAMPLES := examples/mnist
+
+# build-only: always delegate to sub-make
+mnist_mlp mnist_cnn mnist_cnn_pool: $(LIB)
+	$(MAKE) -C $(MNIST_EXAMPLES) $@
+
+# build + run
+run_mnist_mlp: mnist_mlp
+	$(BUILDDIR)/mnist_mlp
+run_mnist_cnn: mnist_cnn
+	$(BUILDDIR)/mnist_cnn
+run_mnist_cnn_pool: mnist_cnn_pool
+	$(BUILDDIR)/mnist_cnn_pool
+	$(MNIST_EXAMPLES)/mnist_cnn_pool
 
 main_lm: $(BUILDDIR)/main_lm
 	$(BUILDDIR)/main_lm
 
 main_prep_data: $(BUILDDIR)/main_prep_data
 	$(BUILDDIR)/main_prep_data
-
-$(BUILDDIR)/main: main.c $(LIB) | $(BUILDDIR)
-	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(OMPFLAGS) $(CPPFLAGS) $< $(LDFLAGS) $(LDLIBS) -o $@
 
 $(BUILDDIR)/main_prep_data: main_prep_data.c $(LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(OMPFLAGS) $(CPPFLAGS) $< $(LDFLAGS) $(LDLIBS) -o $@

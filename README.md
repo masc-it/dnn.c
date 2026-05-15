@@ -160,12 +160,12 @@ Special tokens occupy IDs 257–260.
 include/         — Public API headers (tensor.h, ops.h, nn.h, autograd.h,
                    context.h, conv.h, optim.h, norm.h, pool.h,
                    attention.h, multihead.h, rope.h, tokenizer.h,
-                   transformer.h, mnist.h, dnn.h)
+                   transformer.h, dnn.h)
 src/             — Implementation (.c + internal headers)
 test/            — C unit tests + Python reference scripts
 bench/           — Benchmarks (conv2d, matmul, ops, multihead, transformer, coord, batched_matmul)
 docs/            — Design spec, optimization audit, coding rules
-main.c           — Entry point: CNN training on MNIST
+examples/mnist/  — MNIST example: data loading, models, training loops
 main_lm.c        — Entry point: decoder-only LM training
 main_prep_data.c — Entry point: data preparation utilities
 Makefile         — Build: static lib, tests, benchmarks
@@ -175,12 +175,11 @@ Makefile         — Build: static lib, tests, benchmarks
 
 ```sh
 make            # builds libdnn.a + test binaries
-make run        # builds + runs MNIST CNN training
 make run_lm     # builds + runs decoder LM training
 make test       # runs all unit tests
 make bench_all  # conv2d/matmul/ops/multihead/transformer benchmarks
-make main       # build + run MNIST
 make main_lm    # build + run decoder LM
+make -C examples/mnist  # build MNIST examples
 ```
 
 Requires: Apple Accelerate (or cblas), libz, libomp.
