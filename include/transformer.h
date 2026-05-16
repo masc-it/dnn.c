@@ -4,6 +4,7 @@
 #include "tensor.h"
 #include "module.h"
 #include "nn.h"
+#include "attention.h"   /* attention_mode */
 
 /* ── KV Cache ──
  *
@@ -79,11 +80,38 @@ typedef struct {
 
 transformer_block *transformer_block_create(struct mem_pool *params_pool, int d_model, int n_heads, int d_k,
                                              int intermediate_size);
-tensor            *transformer_block_forward(struct mem_pool *scratch,
-                                              transformer_block *block,
-                                              const tensor *x);
 
-/* ── Cached forward (eval-only, generation) ──
+/* Forward with attention mode selection.
+ *
+ *   mode       — ATTENTION_CAUSAL or ATTENTION_PREFIX_LM.
+ *   prefix_len — bidirectional prefix length (0 for causal).
+ *   seq_lens   — nullable [B]; per-batch effective lengths for P1 padding.
+ */
+tensor *transformer_block_forward_ex(struct mem_pool *scratch,
+                                     transformer_block *block,
+                                     const tensor *x,
+                                     attention_mode mode,
+                                     int prefix_len,
+                                     const int *seq_lens);
+
+/* Causal forward (backward-compat wrapper). */
+tensor *transformer_block_forward(struct mem_pool *scratch,
+                                  transformer_block *block,
+                                  const tensor *x);
+
+/* ── Cached forward with mode (eval-only, generation) ──
+ *
+ * Like transformer_block_forward_cached but supports ATTENTION_PREFIX_LM
+ * for VLM prefix prefill (must have cache->seq_len == 0).
+ */
+tensor *transformer_block_forward_cached_ex(struct mem_pool *scratch,
+                                            transformer_block *block,
+                                            const tensor *x,
+                                            kv_cache *cache,
+                                            attention_mode mode,
+                                            int prefix_len);
+
+/* ── Cached forward (eval-only, generation, causal) ──
  *
  * Forward one token through a single transformer block using KV-cache.
  *

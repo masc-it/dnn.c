@@ -28,7 +28,7 @@ BENCH_BINS = $(patsubst $(BENCHDIR)/%.c, $(BUILDDIR)/%, $(BENCH_SRCS))
 LIB      = $(BUILDDIR)/libdnn.a
 
 .PHONY: all clean test bench main_prep_data promessi_lm
-.PHONY: mnist_mlp mnist_cnn mnist_cnn_pool
+.PHONY: mnist_mlp mnist_cnn mnist_cnn_pool mnist_vlm
 .PHONY: run_mnist_mlp run_mnist_cnn run_mnist_cnn_pool
 .PHONY: bench_conv2d bench_matmul bench_ops bench_multihead bench_transformer bench_all
 
@@ -73,6 +73,15 @@ run_mnist_cnn: mnist_cnn
 run_mnist_cnn_pool: mnist_cnn_pool
 	$(BUILDDIR)/mnist_cnn_pool
 	$(MNIST_EXAMPLES)/mnist_cnn_pool
+
+# VLM-based MNIST example
+MNIST_VLM_EXAMPLES := examples/mnist_vlm
+
+mnist_vlm: $(LIB)
+	$(MAKE) -C $(MNIST_VLM_EXAMPLES) $@
+
+run_mnist_vlm: mnist_vlm
+	$(BUILDDIR)/mnist_vlm
 
 main_prep_data: $(BUILDDIR)/main_prep_data
 	$(BUILDDIR)/main_prep_data

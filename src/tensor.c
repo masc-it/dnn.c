@@ -36,10 +36,49 @@ static void copy_strided_rec(const tensor *src, int dim, int src_off, float *dst
     }
 }
 
+static void copy_strided_backward(grad_fn *fn, tensor *grad_output) {
+    tensor *parent = fn->inputs[0];
+    if (!(parent->grad_fn || parent->requires_grad)) return;
+    float *pg = _grad_ensure(parent);
+    if (!pg) return;
+    /* Scatter grad_output into parent's grad buffer following parent's strides.
+     * Do NOT call copy_strided_rec here — that would copy parent forward data
+     * into grad_output, overwriting the incoming gradient. */
+    int total = tensor_numel(grad_output);
+    int coord[DNN_MAX_DIMS];
+    for (int flat = 0; flat < total; flat++) {
+        int rem = flat;
+        for (int d = grad_output->ndim - 1; d >= 0; d--) {
+            coord[d] = rem % grad_output->shape[d];
+            rem /= grad_output->shape[d];
+        }
+        int p_off = parent->offset;
+        for (int d = 0; d < parent->ndim; d++)
+            p_off += coord[d] * parent->strides[d];
+        int g_off = grad_output->offset;
+        for (int d = 0; d < grad_output->ndim; d++)
+            g_off += coord[d] * grad_output->strides[d];
+        pg[p_off] += ((float*)grad_output->data)[g_off];
+    }
+}
+
 static tensor *tensor_copy_strided(struct mem_pool *scratch, const tensor *t) {
     tensor *out = tensor_scratch(scratch, t->ndim, t->shape, t->requires_grad);
     int dst_off = 0;
     copy_strided_rec(t, 0, t->offset, (float*)out->data, &dst_off);
+
+    /* ── Autograd ── */
+    if (dnn_grad_enabled() && tensor_requires_grad(t)) {
+        grad_fn *fn = _grad_fn_create(scratch);
+        fn->backward = copy_strided_backward;
+        fn->n_inputs = 1;
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
+        fn->inputs[0] = (tensor*)t;
+        fn->n_saved = 0;
+        out->requires_grad = 1;
+        out->grad_fn = fn;
+    }
+
     return out;
 }
 
@@ -163,6 +202,43 @@ static void slice_backward(grad_fn *fn, tensor *grad_output) {
     }
 }
 
+/* ── transpose_backward ── */
+
+static void transpose_backward(grad_fn *fn, tensor *grad_output) {
+    tensor *parent = fn->inputs[0];
+    if (!(parent->grad_fn || parent->requires_grad)) return;
+
+    float *pg = _grad_ensure(parent);
+    if (!pg) return;
+
+    int d1 = *(int*)fn->saved_tensors[0];
+    int d2 = *(int*)fn->saved_tensors[1];
+    float *gd = (float*)grad_output->data;
+    int total = tensor_numel(grad_output);
+
+    int coord[DNN_MAX_DIMS];
+    for (int flat = 0; flat < total; flat++) {
+        int rem = flat;
+        for (int d = grad_output->ndim - 1; d >= 0; d--) {
+            coord[d] = rem % grad_output->shape[d];
+            rem /= grad_output->shape[d];
+        }
+
+        /* Parent has original layout: coord[d1] and coord[d2] are swapped */
+        int p_off = parent->offset;
+        for (int d = 0; d < parent->ndim; d++) {
+            int c = coord[(d == d1) ? d2 : (d == d2) ? d1 : d];
+            p_off += c * parent->strides[d];
+        }
+
+        int g_off = grad_output->offset;
+        for (int d = 0; d < grad_output->ndim; d++)
+            g_off += coord[d] * grad_output->strides[d];
+
+        pg[p_off] += gd[g_off];
+    }
+}
+
 /* ── reshape_backward ── */
 
 static void reshape_backward(grad_fn *fn, tensor *grad_output) {
@@ -242,6 +318,26 @@ tensor *tensor_transpose(struct mem_pool *scratch, tensor *t, int d1, int d2) {
     v->grad = NULL;
     v->pool = NULL;
     v->contiguous = strides_contiguous(v->shape, v->strides, v->ndim);
+
+    /* ── Autograd ── */
+    if (dnn_grad_enabled() && tensor_requires_grad(t)) {
+        grad_fn *fn = _grad_fn_create(scratch);
+        fn->backward = transpose_backward;
+        fn->n_inputs = 1;
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
+        fn->inputs[0] = t;
+        fn->n_saved = 2;
+        fn->saved_tensors = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
+        int *saved_d1 = _mem_pool_alloc(scratch, sizeof(int), NULL);
+        int *saved_d2 = _mem_pool_alloc(scratch, sizeof(int), NULL);
+        *saved_d1 = d1;
+        *saved_d2 = d2;
+        fn->saved_tensors[0] = (tensor*)saved_d1;
+        fn->saved_tensors[1] = (tensor*)saved_d2;
+        v->requires_grad = 1;
+        v->grad_fn = fn;
+    }
+
     return v;
 }
 

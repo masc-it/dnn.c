@@ -10,10 +10,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-/* Forward declaration */
-static tensor *_lm_head_forward(struct mem_pool *scratch, decoder_lm *lm,
-                                 const tensor *h);
-
 /* ── Decoder-only Language Model ── */
 
 decoder_lm *decoder_lm_create(struct mem_pool *params_pool, int vocab_size, int d_model,
@@ -39,11 +35,9 @@ decoder_lm *decoder_lm_create(struct mem_pool *params_pool, int vocab_size, int 
     for (int i = 0; i < n_layers; i++) {
         lm->blocks[i] = transformer_block_create(params_pool, d_model, n_heads, d_k,
                                                    intermediate_size);
-        /* Build names like "blocks.0", "blocks.1", ... */
         char name_buf[32];
         int r = snprintf(name_buf, sizeof(name_buf), "blocks.%d", i);
         (void)r;
-        /* Names are stable pointers — pool-allocated copy */
         size_t len = (size_t)r + 1;
         char *name = _mem_pool_alloc(params_pool, len, name_buf);
         module_add_child(&lm->base, name, &lm->blocks[i]->base);
@@ -53,53 +47,106 @@ decoder_lm *decoder_lm_create(struct mem_pool *params_pool, int vocab_size, int 
     lm->norm = rms_norm_create(params_pool, d_model, 1e-5f);
     module_add_child(&lm->base, "norm", &lm->norm->base);
 
-    /* LM head: d_model → vocab_size (weight tied to embedding — share data via
-     * embed->weight used with BLAS CblasTrans path instead of non-contig view) */
+    /* LM head: d_model → vocab_size (weight tied to embedding) */
     lm->lm_head = _mem_pool_alloc(params_pool, sizeof(linear), NULL);
     module_init(&lm->lm_head->base, params_pool, "linear");
     lm->lm_head->in_features  = d_model;
     lm->lm_head->out_features = vocab_size;
     lm->lm_head->weight       = NULL;  /* not used — forward uses embed->weight */
     lm->lm_head->bias = tensor_zeros(params_pool, 1, (int[]){vocab_size}, 1);
-    /* bias is the only param of lm_head — weight is tied to embedding
-       (shares data buffer), so it's NOT registered as a separate param.
-       The optimizer sees it via embedding->weight. */
     module_param(&lm->lm_head->base, "bias", lm->lm_head->bias);
     module_add_child(&lm->base, "lm_head", &lm->lm_head->base);
 
     return lm;
 }
 
-tensor *decoder_lm_forward(struct mem_pool *scratch, decoder_lm *lm, const tensor *input_ids) {
+/* ── Token embedding only ── */
+
+tensor *decoder_lm_token_embeds(struct mem_pool *scratch,
+                                 decoder_lm *lm,
+                                 const tensor *input_ids) {
     assert(lm && input_ids);
-    assert(input_ids->ndim == 2 && "decoder_lm_forward: input_ids must be 2D [B, N]");
-    assert(input_ids->contiguous && "decoder_lm_forward: input_ids must be contiguous");
+    assert(input_ids->ndim == 2 && "token_embeds: input_ids must be 2D [B, N]");
+    assert(input_ids->contiguous && "token_embeds: input_ids must be contiguous");
 
     int B = input_ids->shape[0];
     int N = input_ids->shape[1];
     int D = lm->d_model;
 
-    /* Flatten [B, N] → [B*N] for embedding lookup */
-    tensor *flat_ids = tensor_flatten(scratch, (tensor*)input_ids);  /* view, no data copy */
-
-    /* Embed: [B*N] → [B*N, d_model] */
+    tensor *flat_ids = tensor_flatten(scratch, (tensor*)input_ids);
     tensor *h = embedding_forward(scratch, NULL, lm->embed, flat_ids);
+    return tensor_reshape(scratch, h, 3, (int[]){B, N, D});
+}
 
-    /* Reshape to [B, N, d_model] */
-    h = tensor_reshape(scratch, h, 3, (int[]){B, N, D});
+/* ── Hidden from embeds (extended) ── */
 
-    /* Pass through all transformer blocks */
+tensor *decoder_lm_hidden_from_embeds_ex(struct mem_pool *scratch,
+                                          decoder_lm *lm,
+                                          const tensor *embeds,
+                                          attention_mode mode,
+                                          int prefix_len,
+                                          const int *seq_lens) {
+    assert(lm && embeds);
+    assert(embeds->ndim == 3 && "hidden_from_embeds: embeds must be 3D [B, S, D]");
+    assert(embeds->shape[2] == lm->d_model);
+
+    tensor *h = (tensor*)embeds;
+
     for (int i = 0; i < lm->n_layers; i++) {
-        h = transformer_block_forward(scratch, lm->blocks[i], h);
+        h = transformer_block_forward_ex(scratch, lm->blocks[i], h,
+                                          mode, prefix_len, seq_lens);
     }
 
     /* Final RMS norm */
     h = rms_norm_forward(scratch, lm->norm, h);
+    return h;
+}
 
-    /* LM head: [B, N, d_model] → [B, N, vocab_size] */
-    tensor *logits = _lm_head_forward(scratch, lm, h);
+/* ── Hidden from embeds (causal) ── */
 
-    return logits;
+tensor *decoder_lm_hidden_from_embeds(struct mem_pool *scratch,
+                                       decoder_lm *lm,
+                                       const tensor *embeds) {
+    return decoder_lm_hidden_from_embeds_ex(scratch, lm, embeds,
+                                             ATTENTION_CAUSAL, 0, NULL);
+}
+
+/* ── LM head forward ── */
+
+tensor *decoder_lm_lm_head_forward(struct mem_pool *scratch,
+                                    decoder_lm *lm,
+                                    const tensor *h) {
+    /* h @ embed->weight^T + bias */
+    return tensor_matmul_add(scratch, h, lm->embed->weight, 1, lm->lm_head->bias);
+}
+
+/* ── Forward from embeds (extended) ── */
+
+tensor *decoder_lm_forward_embeds_ex(struct mem_pool *scratch,
+                                      decoder_lm *lm,
+                                      const tensor *embeds,
+                                      attention_mode mode,
+                                      int prefix_len,
+                                      const int *seq_lens) {
+    tensor *h = decoder_lm_hidden_from_embeds_ex(scratch, lm, embeds,
+                                                  mode, prefix_len, seq_lens);
+    return decoder_lm_lm_head_forward(scratch, lm, h);
+}
+
+/* ── Forward from embeds (causal) ── */
+
+tensor *decoder_lm_forward_embeds(struct mem_pool *scratch,
+                                   decoder_lm *lm,
+                                   const tensor *embeds) {
+    return decoder_lm_forward_embeds_ex(scratch, lm, embeds,
+                                         ATTENTION_CAUSAL, 0, NULL);
+}
+
+/* ── Full forward pass (refactored to use helpers) ── */
+
+tensor *decoder_lm_forward(struct mem_pool *scratch, decoder_lm *lm, const tensor *input_ids) {
+    tensor *h = decoder_lm_token_embeds(scratch, lm, input_ids);
+    return decoder_lm_forward_embeds(scratch, lm, h);
 }
 
 /* ── Training step ── */
@@ -167,19 +214,9 @@ tensor *decoder_lm_train_step(struct mem_pool *scratch_pool,
     return loss;
 }
 
-/* ── LM head forward (tied embedding, BLAS transposed path) ── */
+/* ── Sampling helpers (public) ── */
 
-static tensor *_lm_head_forward(struct mem_pool *scratch, decoder_lm *lm,
-                                 const tensor *h) {
-    /* h @ embed_weight^T + bias.
-     * embed_weight is [vocab_size, d_model] contiguous — BLAS CblasTrans.
-     * Avoids non-contiguous transposed view that would skip BLAS entirely. */
-    return tensor_matmul_add(scratch, h, lm->embed->weight, 1, lm->lm_head->bias);
-}
-
-/* ── Sampling helpers ── */
-
-static int _argmax(const float *logits, int vocab_size) {
+int decoder_lm_argmax_token(const float *logits, int vocab_size) {
     int best = 0;
     float best_val = logits[0];
     for (int i = 1; i < vocab_size; i++) {
@@ -191,27 +228,20 @@ static int _argmax(const float *logits, int vocab_size) {
     return best;
 }
 
-static int _sample_with_temp(const float *logits, int vocab_size, float temp) {
-    /* NumPy-style categorical sampling:
-     *   probs = softmax(logits / temp)
-     *   sample = np.random.choice(vocab_size, p=probs)
-     */
+int decoder_lm_sample_with_temp(const float *logits, int vocab_size, float temp) {
     float inv_temp = 1.0f / temp;
 
-    /* Find max for numerical stability */
     float mx = -INFINITY;
     for (int i = 0; i < vocab_size; i++) {
         float v = logits[i] * inv_temp;
         if (v > mx) mx = v;
     }
 
-    /* Compute exp and sum */
     float sum = 0.0f;
     for (int i = 0; i < vocab_size; i++) {
         sum += expf(logits[i] * inv_temp - mx);
     }
 
-    /* Draw from cumulative distribution */
     float r = (float)rand() / (float)RAND_MAX;
     float cum = 0.0f;
     for (int i = 0; i < vocab_size; i++) {
@@ -219,7 +249,6 @@ static int _sample_with_temp(const float *logits, int vocab_size, float temp) {
         if (r < cum) return i;
     }
 
-    /* Fallback (shouldn't reach here due to floating point) */
     return vocab_size - 1;
 }
 
@@ -289,7 +318,7 @@ int *decoder_lm_generate(struct mem_pool *scratch_pool, struct mem_pool *data_po
             /* Final norm + lm_head (only needed for last prompt token's logits) */
             if (p == prompt_len - 1) {
                 h = rms_norm_forward(scratch_pool, lm->norm, h);
-                tensor *logits = _lm_head_forward(scratch_pool, lm, h);  /* [1, 1, vocab] */
+                tensor *logits = decoder_lm_lm_head_forward(scratch_pool, lm, h);  /* [1, 1, vocab] */
                 float *ld = tensor_data_ptr(logits);
 
                 /* Copy last logits row before resetting scratch */
@@ -299,9 +328,9 @@ int *decoder_lm_generate(struct mem_pool *scratch_pool, struct mem_pool *data_po
 
                 int next_id;
                 if (temperature == 0.0f) {
-                    next_id = _argmax(last_logit_buf, vocab_size);
+                    next_id = decoder_lm_argmax_token(last_logit_buf, vocab_size);
                 } else {
-                    next_id = _sample_with_temp(last_logit_buf, vocab_size, temperature);
+                    next_id = decoder_lm_sample_with_temp(last_logit_buf, vocab_size, temperature);
                 }
 
                 output[cur_len++] = next_id;
@@ -325,7 +354,7 @@ int *decoder_lm_generate(struct mem_pool *scratch_pool, struct mem_pool *data_po
             }
 
             h = rms_norm_forward(scratch_pool, lm->norm, h);
-            tensor *logits = _lm_head_forward(scratch_pool, lm, h);
+            tensor *logits = decoder_lm_lm_head_forward(scratch_pool, lm, h);
             float *ld = tensor_data_ptr(logits);
 
             /* Copy last logits row before resetting scratch */
@@ -335,9 +364,9 @@ int *decoder_lm_generate(struct mem_pool *scratch_pool, struct mem_pool *data_po
 
             int next_id;
             if (temperature == 0.0f) {
-                next_id = _argmax(last_logit_buf, vocab_size);
+                next_id = decoder_lm_argmax_token(last_logit_buf, vocab_size);
             } else {
-                next_id = _sample_with_temp(last_logit_buf, vocab_size, temperature);
+                next_id = decoder_lm_sample_with_temp(last_logit_buf, vocab_size, temperature);
             }
 
             output[cur_len++] = next_id;
@@ -371,9 +400,9 @@ done_generate:
 
             int next_id;
             if (temperature == 0.0f) {
-                next_id = _argmax(last_logit_buf, vocab_size);
+                next_id = decoder_lm_argmax_token(last_logit_buf, vocab_size);
             } else {
-                next_id = _sample_with_temp(last_logit_buf, vocab_size, temperature);
+                next_id = decoder_lm_sample_with_temp(last_logit_buf, vocab_size, temperature);
             }
 
             output[cur_len++] = next_id;

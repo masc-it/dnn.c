@@ -66,6 +66,13 @@ void       adamw_zero_grad(adamw_opt *opt);
  */
 float clip_grad_norm(tensor **params, int n_params, float max_norm);
 
+/* Per-tensor gradient clipping: clip each tensor's gradient norm
+ * independently to max_norm.  Prevents a single dominant param group
+ * (e.g. conv2d weight summing over spatial positions) from starving all
+ * other groups.  Returns the pre-clipping global norm (for logging).
+ */
+float clip_grad_norm_per_tensor(tensor **params, int n_params, float max_norm);
+
 /* Compute L2 gradient norm across all params (for logging without clipping). */
 float grad_norm(tensor **params, int n_params);
 

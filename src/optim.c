@@ -225,6 +225,26 @@ float clip_grad_norm(tensor **params, int n_params, float max_norm) {
     return total_norm;
 }
 
+float clip_grad_norm_per_tensor(tensor **params, int n_params, float max_norm) {
+    if (max_norm <= 0.0f) return 0.0f;
+    float total_norm = grad_norm(params, n_params);
+    for (int i = 0; i < n_params; i++) {
+        float *g = tensor_grad(params[i]);
+        if (!g) continue;
+        int n = tensor_numel(params[i]);
+        double tn_sq = 0.0;
+        for (int j = 0; j < n; j++)
+            tn_sq += (double)g[j] * (double)g[j];
+        float tn = sqrtf((float)tn_sq);
+        if (tn > max_norm) {
+            float scale = max_norm / tn;
+            for (int j = 0; j < n; j++)
+                g[j] *= scale;
+        }
+    }
+    return total_norm;
+}
+
 void clip_grad_value(tensor **params, int n_params, float clip_value) {
     if (clip_value <= 0.0f) return;
 

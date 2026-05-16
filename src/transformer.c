@@ -146,7 +146,14 @@ transformer_block *transformer_block_create(struct mem_pool *params_pool, int d_
     return block;
 }
 
-tensor *transformer_block_forward(struct mem_pool *scratch, transformer_block *block, const tensor *x) {
+/* ── Extended forward with attention mode ── */
+
+tensor *transformer_block_forward_ex(struct mem_pool *scratch,
+                                     transformer_block *block,
+                                     const tensor *x,
+                                     attention_mode mode,
+                                     int prefix_len,
+                                     const int *seq_lens) {
     assert(block && x);
     assert(x->ndim >= 2);
     assert(x->shape[x->ndim - 1] == block->d_model);
@@ -170,8 +177,9 @@ tensor *transformer_block_forward(struct mem_pool *scratch, transformer_block *b
         Kh = tensor_rope(scratch, Kh, fc, fs);
     }
 
-    /* Fused causal attention (no extra mask needed) */
-    tensor *attn_out = tensor_attention(scratch, Qh, Kh, Vh, NULL);
+    /* Attention with mode selection */
+    tensor *attn_out = tensor_attention_ex(scratch, Qh, Kh, Vh, NULL,
+                                           mode, prefix_len, seq_lens);
 
     /* Merge heads: [B, H, N, d_k] → [B, N, H*d_k] */
     tensor *attn_merged = tensor_merge_heads(scratch, attn_out);
@@ -192,12 +200,20 @@ tensor *transformer_block_forward(struct mem_pool *scratch, transformer_block *b
     return tensor_add(scratch, residual, ffn_out);
 }
 
-/* ── Cached transformer block forward (eval-only, generation) ── */
+/* ── Causal forward (backward-compat wrapper) ── */
 
-tensor *transformer_block_forward_cached(struct mem_pool *scratch,
-                                          transformer_block *block,
-                                          const tensor *x,
-                                          kv_cache *cache) {
+tensor *transformer_block_forward(struct mem_pool *scratch, transformer_block *block, const tensor *x) {
+    return transformer_block_forward_ex(scratch, block, x, ATTENTION_CAUSAL, 0, NULL);
+}
+
+/* ── Extended cached forward with attention mode ── */
+
+tensor *transformer_block_forward_cached_ex(struct mem_pool *scratch,
+                                            transformer_block *block,
+                                            const tensor *x,
+                                            kv_cache *cache,
+                                            attention_mode mode,
+                                            int prefix_len) {
     assert(block && x && cache);
     assert(x->contiguous && "cached forward: x must be contiguous");
     assert(x->ndim >= 2);
@@ -207,6 +223,10 @@ tensor *transformer_block_forward_cached(struct mem_pool *scratch,
     int N_new = x->shape[x->ndim - 2];  /* sequence dim for new tokens */
     int H     = block->n_heads;
     int d_k   = block->d_k;
+
+    /* Prefix-LM prefill must start from empty cache */
+    if (mode == ATTENTION_PREFIX_LM)
+        assert(cache->seq_len == 0 && "prefix-LM prefill requires empty cache");
 
     /* Pre-norm */
     tensor *h = layer_norm_forward(scratch, block->attn_norm, x);
@@ -218,8 +238,7 @@ tensor *transformer_block_forward_cached(struct mem_pool *scratch,
 
     /* ── RoPE: apply to Q, K with position offset ── */
     if (block->freqs_cos && block->freqs_sin) {
-        /* New tokens are at positions [cache->seq_len, cache->seq_len + N_new)
-         * Slice the freq tables to start at the current cache position. */
+        /* New tokens are at positions [cache->seq_len, cache->seq_len + N_new) */
         int pos_offset = cache->seq_len;
         tensor *fc_slice = tensor_slice(scratch, block->freqs_cos, 0, pos_offset, N_new);
         tensor *fs_slice = tensor_slice(scratch, block->freqs_sin, 0, pos_offset, N_new);
@@ -282,23 +301,33 @@ tensor *transformer_block_forward_cached(struct mem_pool *scratch,
                         0.0f, scores, S);
 #endif
 
-            /* ── Causal mask: row i attends only to positions ≤ old_seq + i ── */
-            {
+            /* ── Attention mask based on mode ── */
+            if (mode == ATTENTION_CAUSAL) {
                 int old_seq = S - N_new;
                 for (int i = 0; i < N_new; i++) {
                     float *row = scores + i * S;
                     for (int j = old_seq + i + 1; j < S; j++)
                         row[j] = -INFINITY;
                 }
+            } else { /* ATTENTION_PREFIX_LM */
+                /* global_q = cache->seq_len_before_append + i
+                 * For prefix-LM:
+                 *   if global_q < prefix_len: visible = prefix_len (all image)
+                 *   else: visible = global_q + 1 (all image + causal text) */
+                int old_seq = S - N_new;
+                for (int i = 0; i < N_new; i++) {
+                    int global_q = old_seq + i;
+                    int visible = (global_q < prefix_len) ? prefix_len : (global_q + 1);
+                    float *row = scores + i * S;
+                    for (int j = visible; j < S; j++)
+                        row[j] = -INFINITY;
+                }
             }
 
-            /* Softmax over last dim — causal mask applied above
-             * Fused online max + sum_exp + NEON SIMD.
-             */
+            /* Softmax over last dim */
             for (int i = 0; i < N_new; i++) {
                 float *row = scores + i * S;
 
-                /* ── Fused pass: online max + sum_exp ── */
                 float mx = -INFINITY;
                 float se = 0.0f;
 #if DNN_HAVE_NEON
@@ -330,7 +359,6 @@ tensor *transformer_block_forward_cached(struct mem_pool *scratch,
                 }
 #endif
 
-                /* ── Write softmax weights (1 pass) ── */
                 float inv_se = 1.0f / se;
 #if DNN_HAVE_NEON
                 {
@@ -385,6 +413,16 @@ tensor *transformer_block_forward_cached(struct mem_pool *scratch,
 
     /* Second residual */
     return tensor_add(scratch, x_after_attn, ffn_out);
+}
+
+/* ── Cached forward (eval-only, generation, causal) ── */
+
+tensor *transformer_block_forward_cached(struct mem_pool *scratch,
+                                          transformer_block *block,
+                                          const tensor *x,
+                                          kv_cache *cache) {
+    return transformer_block_forward_cached_ex(scratch, block, x, cache,
+                                               ATTENTION_CAUSAL, 0);
 }
 
 /* ── Parameter count ── */

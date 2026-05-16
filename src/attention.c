@@ -33,6 +33,37 @@
 
 
 /* ══════════════════════════════════════════════════════════════════
+ *  Attention mode helpers (visible length, tile S)
+ * ══════════════════════════════════════════════════════════════════ */
+
+static inline int attention_visible_len(attention_mode mode, int i,
+                                         int prefix_len) {
+    switch (mode) {
+    case ATTENTION_CAUSAL:
+        return i + 1;
+    case ATTENTION_PREFIX_LM:
+        return (i < prefix_len) ? prefix_len : i + 1;
+    default:
+        assert(0 && "unknown attention mode");
+        return i + 1;
+    }
+}
+
+static inline int attention_tile_S(attention_mode mode, int r0, int r1,
+                                    int prefix_len) {
+    (void)r0;
+    switch (mode) {
+    case ATTENTION_CAUSAL:
+        return r1;
+    case ATTENTION_PREFIX_LM:
+        return (r1 <= prefix_len) ? prefix_len : r1;
+    default:
+        assert(0 && "unknown attention mode");
+        return r1;
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════
  *  Row-prefix softmax helpers (no tile-row notion, just [0,visible))
  * ══════════════════════════════════════════════════════════════════ */
 
@@ -232,9 +263,13 @@ static void attention_forward_triangular(int B, int H, int N, int d,
                                          tensor *mask,
                                          float *scores_buf,
                                          float *p_buf,
-                                         int TB) {
+                                         int TB,
+                                         attention_mode mode,
+                                         int prefix_len,
+                                         const int *seq_lens) {
 #pragma omp parallel for collapse(2) if (B * H >= 2)
     for (int b = 0; b < B; b++) {
+        int N_b = seq_lens ? seq_lens[b] : N;
         for (int h = 0; h < H; h++) {
             int bh = b * H + h;
             int tid = omp_get_thread_num();
@@ -247,11 +282,12 @@ static void attention_forward_triangular(int B, int H, int N, int d,
             float *p_slice = Pd ? Pd + (size_t)bh * N * N : NULL;
             float *o_slice = od + (size_t)bh * N * d;
 
-            for (int r0 = 0; r0 < N; r0 += TB) {
+            for (int r0 = 0; r0 < N_b; r0 += TB) {
                 int r1 = r0 + TB;
-                if (r1 > N) r1 = N;
+                if (r1 > N_b) r1 = N_b;
                 int M = r1 - r0;
-                int S = r1;  /* visible key prefix length */
+                int S = attention_tile_S(mode, r0, r1, prefix_len);
+                if (S > N_b) S = N_b;
 
                 float *scores = worker_scores;
                 float *ptmp   = worker_p;
@@ -289,25 +325,31 @@ static void attention_forward_triangular(int B, int H, int N, int d,
                     }
                 }
 
-                /* Causal softmax per row: only first (i+1) entries visible */
+                /* Softmax per row: visible = attention_visible_len(mode, i, prefix_len) */
                 for (int mi = 0; mi < M; mi++) {
                     int i = r0 + mi;
-                    int visible = i + 1;
+                    int visible = attention_visible_len(mode, i, prefix_len);
+                    if (visible > N_b) visible = N_b;
 
                     float *row_s = scores + mi * S;
                     float *row_p = ptmp   + mi * S;
 
                     attention_softmax_row_prefix(row_s, row_p, visible);
 
-                    /* Zero future columns in p_tile (j > i) */
+                    /* Zero future columns in p_tile (j >= visible) */
                     int tail = S - visible;
                     if (tail > 0)
                         memset(row_p + visible, 0, (size_t)tail * sizeof(float));
 
-                    /* Save prefix into full P row if training */
+                    /* Save row into full P matrix for backward.
+                     * row_p already has visible..S-1 zeroed.  Copy all S
+                     * elements so backward reads valid data, then zero
+                     * pad region S..N-1 (tensor_scratch is uninitialized). */
                     if (p_slice) {
                         float *p_row = p_slice + i * N;
-                        memcpy(p_row, row_p, (size_t)visible * sizeof(float));
+                        memcpy(p_row, row_p, (size_t)S * sizeof(float));
+                        if (S < N)
+                            memset(p_row + S, 0, (size_t)(N - S) * sizeof(float));
                     }
                 }
 
@@ -330,6 +372,9 @@ static void attention_forward_triangular(int B, int H, int N, int d,
                             0.0f, o_slice + r0 * d, d);
 #endif
             }
+            /* Zero pad region N_b..N in output */
+            if (N_b < N)
+                memset(o_slice + N_b * d, 0, (size_t)(N - N_b) * d * sizeof(float));
         }
     }
 }
@@ -348,9 +393,13 @@ static void attention_backward_triangular(int B, int H, int N, int d,
                                           float *p_buf,
                                           float *dP_buf,
                                           float *dS_buf,
-                                          int TB) {
+                                          int TB,
+                                          attention_mode mode,
+                                          int prefix_len,
+                                          const int *seq_lens) {
 #pragma omp parallel for collapse(2) if (B * H >= 2)
     for (int b = 0; b < B; b++) {
+        int N_b = seq_lens ? seq_lens[b] : N;
         for (int h = 0; h < H; h++) {
             int bh = b * H + h;
             int tid = omp_get_thread_num();
@@ -370,11 +419,12 @@ static void attention_backward_triangular(int B, int H, int N, int d,
 
             int qk_active = (qg || kg);
 
-            for (int r0 = 0; r0 < N; r0 += TB) {
+            for (int r0 = 0; r0 < N_b; r0 += TB) {
                 int r1 = r0 + TB;
-                if (r1 > N) r1 = N;
+                if (r1 > N_b) r1 = N_b;
                 int M = r1 - r0;
-                int S = r1;
+                int S = attention_tile_S(mode, r0, r1, prefix_len);
+                if (S > N_b) S = N_b;
 
                 /* ── Pack saved P rows (stride N) to compact (stride S) ── */
                 for (int mi = 0; mi < M; mi++) {
@@ -425,10 +475,11 @@ static void attention_backward_triangular(int B, int H, int N, int d,
                             0.0f, dP_tile, S);
 #endif
 
-                /* ── dS_tile = causal_softmax_bwd(P, dP) for visible prefix ── */
+                /* ── dS_tile = softmax_bwd(P, dP) for visible prefix ── */
                 for (int mi = 0; mi < M; mi++) {
                     int i = r0 + mi;
-                    int visible = i + 1;
+                    int visible = attention_visible_len(mode, i, prefix_len);
+                    if (visible > N_b) visible = N_b;
 
                     float *ds_row = dS_tile + mi * S;
 
@@ -608,10 +659,21 @@ static void attention_backward(grad_fn *fn, tensor *grad_output);
 
 
 /* ══════════════════════════════════════════════════════════════════
- *  Public API: tensor_attention
+ *  Backward (grad_fn callback)
  * ══════════════════════════════════════════════════════════════════ */
 
-tensor *tensor_attention(struct mem_pool *scratch, tensor *q, tensor *k, tensor *v, tensor *mask) {
+static void attention_backward(grad_fn *fn, tensor *grad_output);
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Public API: tensor_attention_ex
+ * ══════════════════════════════════════════════════════════════════ */
+
+tensor *tensor_attention_ex(struct mem_pool *scratch,
+                            tensor *q, tensor *k, tensor *v,
+                            tensor *mask,
+                            attention_mode mode,
+                            int prefix_len,
+                            const int *seq_lens) {
     assert(q && k && v);
     assert(q->ndim == 4 && k->ndim == 4 && v->ndim == 4);
     assert(tensor_is_contiguous(q) && tensor_is_contiguous(k) && tensor_is_contiguous(v));
@@ -619,6 +681,13 @@ tensor *tensor_attention(struct mem_pool *scratch, tensor *q, tensor *k, tensor 
     int B = q->shape[0], H = q->shape[1], N = q->shape[2], d = q->shape[3];
     assert(k->shape[0] == B && k->shape[1] == H && k->shape[2] == N && k->shape[3] == d);
     assert(v->shape[0] == B && v->shape[1] == H && v->shape[2] == N && v->shape[3] == d);
+
+    if (mode == ATTENTION_PREFIX_LM)
+        assert(prefix_len > 0 && prefix_len <= N);
+    if (mode == ATTENTION_CAUSAL)
+        assert(prefix_len == 0);
+    /* P1: backward ignores seq_lens — forbid non-NULL until saved_tensors[5] */
+    assert(seq_lens == NULL && "seq_lens not yet supported in backward");
 
     float scale = 1.0f / sqrtf((float)d);
 
@@ -655,7 +724,8 @@ tensor *tensor_attention(struct mem_pool *scratch, tensor *q, tensor *k, tensor 
                             dense_scores, n_workers);
 #else
     attention_forward_triangular(B, H, N, d, scale, qd, kd, vd, Pd, od, mask,
-                                 scores_buf, p_buf, TB);
+                                 scores_buf, p_buf, TB,
+                                 mode, prefix_len, seq_lens);
 #endif
 
     /* ── Autograd tape ── */
@@ -669,8 +739,8 @@ tensor *tensor_attention(struct mem_pool *scratch, tensor *q, tensor *k, tensor 
         fn->inputs[2] = (tensor*)v;
         if (mask) fn->inputs[3] = (tensor*)mask;
 
-        fn->n_saved = 3;
-        fn->saved_tensors = _mem_pool_alloc(scratch, 3 * sizeof(tensor*), NULL);
+        fn->n_saved = 5;
+        fn->saved_tensors = _mem_pool_alloc(scratch, 5 * sizeof(tensor*), NULL);
         fn->saved_tensors[0] = P;
 
         float *scale_saved = _mem_pool_alloc(scratch, sizeof(float), NULL);
@@ -681,6 +751,14 @@ tensor *tensor_attention(struct mem_pool *scratch, tensor *q, tensor *k, tensor 
         *mask_flag = (mask != NULL) ? 1 : 0;
         fn->saved_tensors[2] = (tensor*)mask_flag;
 
+        int *mode_saved = _mem_pool_alloc(scratch, sizeof(int), NULL);
+        *mode_saved = (int)mode;
+        fn->saved_tensors[3] = (tensor*)mode_saved;
+
+        int *prefix_len_saved = _mem_pool_alloc(scratch, sizeof(int), NULL);
+        *prefix_len_saved = prefix_len;
+        fn->saved_tensors[4] = (tensor*)prefix_len_saved;
+
         out->requires_grad = 1;
         out->grad_fn = fn;
     }
@@ -690,7 +768,16 @@ tensor *tensor_attention(struct mem_pool *scratch, tensor *q, tensor *k, tensor 
 
 
 /* ══════════════════════════════════════════════════════════════════
- *  Backward (grad_fn callback)
+ *  Public API: tensor_attention (backward-compat wrapper)
+ * ══════════════════════════════════════════════════════════════════ */
+
+tensor *tensor_attention(struct mem_pool *scratch, tensor *q, tensor *k, tensor *v, tensor *mask) {
+    return tensor_attention_ex(scratch, q, k, v, mask, ATTENTION_CAUSAL, 0, NULL);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Backward (grad_fn callback) — handles both causal and prefix-LM
  * ══════════════════════════════════════════════════════════════════ */
 
 static void attention_backward(grad_fn *fn, tensor *grad_output) {
@@ -700,6 +787,16 @@ static void attention_backward(grad_fn *fn, tensor *grad_output) {
     tensor *P = fn->saved_tensors[0];
     float   scale = *(float*)fn->saved_tensors[1];
     int     mask_present = *(int*)fn->saved_tensors[2];
+
+    /* Mode and prefix_len saved by tensor_attention_ex (backward-compat: check n_saved) */
+    attention_mode mode = ATTENTION_CAUSAL;
+    int prefix_len = 0;
+    const int *seq_lens = NULL;
+    if (fn->n_saved >= 5) {
+        mode = (attention_mode)(*(int*)fn->saved_tensors[3]);
+        prefix_len = *(int*)fn->saved_tensors[4];
+        /* seq_lens not saved yet — guarded by assert(seq_lens==NULL) in forward */
+    }
 
     int B = q->shape[0], H = q->shape[1], N = q->shape[2], d = q->shape[3];
 
@@ -737,6 +834,7 @@ static void attention_backward(grad_fn *fn, tensor *grad_output) {
 
     attention_backward_triangular(B, H, N, d, scale, qd, kd, vd, Pd, gd,
                                   qg, kg, vg,
-                                  p_buf, dP_buf, dS_buf, TB);
+                                  p_buf, dP_buf, dS_buf, TB,
+                                  mode, prefix_len, seq_lens);
 #endif
 }
