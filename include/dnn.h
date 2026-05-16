@@ -16,6 +16,5 @@
 #include "rope.h"
 #include "tokenizer.h"
 #include "transformer.h"
-#include "gpt.h"
 
 #endif /* DNN_H */

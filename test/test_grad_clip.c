@@ -1,4 +1,5 @@
 #include "dnn.h"
+#include "gpt.h"
 #include "context.h"
 #include "transformer.h"
 #include "optim.h"

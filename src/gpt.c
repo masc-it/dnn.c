@@ -115,7 +115,8 @@ tensor *decoder_lm_train_step(struct mem_pool *scratch_pool, struct mem_pool *da
 
     int B = input_ids->shape[0];
     int N = input_ids->shape[1];
-
+    
+    adamw_zero_grad(opt);
     /* ── Forward ── */
     tensor *logits = decoder_lm_forward(scratch_pool, lm, input_ids);  /* [B, N, vocab] */
 
@@ -156,7 +157,6 @@ tensor *decoder_lm_train_step(struct mem_pool *scratch_pool, struct mem_pool *da
 
     /* ── Update ── */
     adamw_step(opt);
-    adamw_zero_grad(opt);
 
     return loss;
 }

@@ -1,7 +1,8 @@
 #ifndef PROMESSI_EXAMPLE_H
 #define PROMESSI_EXAMPLE_H
 
-#include "dnn.h"    /* pulls in gpt.h, transformer.h, tokenizer.h, etc. */
+#include "dnn.h"       /* transformer.h, tokenizer.h, ops.h, etc. */
+#include "gpt.h"       /* decoder_lm struct + functions */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
