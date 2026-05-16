@@ -104,32 +104,47 @@ tensor *decoder_lm_forward(struct mem_pool *scratch, decoder_lm *lm, const tenso
 
 /* ── Training step ── */
 
-tensor *decoder_lm_train_step(struct mem_pool *scratch_pool, struct mem_pool *data_pool,
+/* ── Shift targets ── */
+
+tensor *decoder_lm_shift_targets(struct mem_pool *pool,
+                                  const tensor *input_ids) {
+    assert(input_ids->ndim == 2 && "shift_targets: input_ids must be 2D [B, N]");
+    assert(input_ids->contiguous && "shift_targets: input_ids must be contiguous");
+    assert(input_ids->shape[1] >= 2 && "shift_targets: need N >= 2");
+
+    int B = input_ids->shape[0];
+    int N = input_ids->shape[1];
+    int *id = (int *)input_ids->data;
+
+    tensor *target = tensor_zeros_data(pool, 2, (int[]){B, N - 1});
+    int *td = (int *)target->data;
+    for (int b = 0; b < B; b++) {
+        memcpy(td + b * (N - 1), id + b * N + 1,
+               (size_t)(N - 1) * sizeof(int));
+    }
+    return target;
+}
+
+/* ── Training step ── */
+
+tensor *decoder_lm_train_step(struct mem_pool *scratch_pool,
                                decoder_lm *lm, const tensor *input_ids,
+                               const tensor *target,
                                adamw_opt *opt, float grad_clip,
                                float *grad_norm_out) {
-    assert(lm && input_ids && opt);
+    assert(lm && input_ids && target && opt);
     assert(input_ids->ndim == 2 && "train_step: input_ids must be 2D [B, N]");
     assert(input_ids->contiguous && "train_step: input_ids must be contiguous");
     assert(input_ids->shape[1] >= 2 && "train_step: need N >= 2 for at least 1 target");
 
-    int B = input_ids->shape[0];
     int N = input_ids->shape[1];
-    
+
     adamw_zero_grad(opt);
     /* ── Forward ── */
     tensor *logits = decoder_lm_forward(scratch_pool, lm, input_ids);  /* [B, N, vocab] */
 
-    /* ── Shift: logits[:, :-1, :] predict input_ids[:, 1:] ── */
+    /* ── Shift: logits[:, :-1, :] predict target ── */
     tensor *logits_shifted = tensor_slice(scratch_pool, logits, 1, 0, N - 1);  /* [B, N-1, vocab] */
-
-    /* Build target = input_ids[:, 1:], same int-into-float trick */
-    tensor *target = tensor_zeros_data(data_pool, 2, (int[]){B, N - 1});
-    int *td = (int *)target->data;
-    int *id = (int *)input_ids->data;
-    for (int b = 0; b < B; b++) {
-        memcpy(td + b * (N - 1), id + b * N + 1, (size_t)(N - 1) * sizeof(int));
-    }
 
     /* ── Loss: cross-entropy over vocab dim ── */
     tensor *loss = tensor_cross_entropy(scratch_pool, logits_shifted, target, 2);
@@ -142,16 +157,7 @@ tensor *decoder_lm_train_step(struct mem_pool *scratch_pool, struct mem_pool *da
     if (grad_clip > 0.0f) {
         gn = clip_grad_norm(opt->params, opt->n_params, grad_clip);
     } else {
-        /* Compute norm even without clipping, for logging */
-        double sum_sq = 0.0;
-        for (int i = 0; i < opt->n_params; i++) {
-            float *g = tensor_grad(opt->params[i]);
-            if (!g) continue;
-            int n = tensor_numel(opt->params[i]);
-            for (int j = 0; j < n; j++)
-                sum_sq += (double)g[j] * (double)g[j];
-        }
-        gn = sqrtf((float)sum_sq);
+        gn = grad_norm(opt->params, opt->n_params);
     }
     if (grad_norm_out) *grad_norm_out = gn;
 

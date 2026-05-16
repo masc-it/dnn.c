@@ -66,6 +66,9 @@ void       adamw_zero_grad(adamw_opt *opt);
  */
 float clip_grad_norm(tensor **params, int n_params, float max_norm);
 
+/* Compute L2 gradient norm across all params (for logging without clipping). */
+float grad_norm(tensor **params, int n_params);
+
 /* Clip gradient values element-wise to [-clip_value, clip_value].
  *
  *   If clip_value <= 0, no-op.

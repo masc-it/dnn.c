@@ -190,9 +190,7 @@ void lr_scheduler_destroy(lr_scheduler *sched) {
 
 /* ── Gradient Clipping ── */
 
-float clip_grad_norm(tensor **params, int n_params, float max_norm) {
-    if (max_norm <= 0.0f) return 0.0f;
-
+float grad_norm(tensor **params, int n_params) {
     double total_norm_sq = 0.0;
 #pragma omp parallel for reduction(+:total_norm_sq) schedule(dynamic) if (n_params >= 4)
     for (int i = 0; i < n_params; i++) {
@@ -203,8 +201,13 @@ float clip_grad_norm(tensor **params, int n_params, float max_norm) {
         for (int j = 0; j < n; j++)
             total_norm_sq += (double)g[j] * (double)g[j];
     }
+    return sqrtf((float)total_norm_sq);
+}
 
-    float total_norm = sqrtf((float)total_norm_sq);
+float clip_grad_norm(tensor **params, int n_params, float max_norm) {
+    if (max_norm <= 0.0f) return 0.0f;
+
+    float total_norm = grad_norm(params, n_params);
 
     if (total_norm > max_norm) {
         float scale = max_norm / total_norm;

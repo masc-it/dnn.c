@@ -104,7 +104,8 @@ int main(void) {
 
     /* ── Warmup ── */
     for (int i = 0; i < warmup; i++) {
-        tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 1.0f, NULL);
+        tensor *target = decoder_lm_shift_targets(ctx.data, input_ids);
+        tensor *loss = decoder_lm_train_step(ctx.scratch, lm, input_ids, target, opt, 1.0f, NULL);
         (void)loss;
         mem_pool_reset(ctx.scratch);
         mem_pool_reset(ctx.data);
@@ -118,7 +119,8 @@ int main(void) {
     for (int i = 0; i < iters; i++) {
         clock_t start = clock();
 
-        tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 1.0f, NULL);
+        tensor *target = decoder_lm_shift_targets(ctx.data, input_ids);
+        tensor *loss = decoder_lm_train_step(ctx.scratch, lm, input_ids, target, opt, 1.0f, NULL);
 
         clock_t end = clock();
         double elapsed = (double)(end - start) / CLOCKS_PER_SEC;

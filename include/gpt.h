@@ -58,25 +58,39 @@ decoder_lm *decoder_lm_create(struct mem_pool *params_pool,
 tensor *decoder_lm_forward(struct mem_pool *scratch,
                             decoder_lm *lm, const tensor *input_ids);
 
+/* ── Shift targets ──
+ *
+ * Build target tensor for teacher-forced next-token prediction:
+ *
+ *   target[b, i] = input_ids[b, i+1]   for i = 0 .. N-2
+ *
+ *   input_ids — [B, N] int tensor, MUST be contiguous.
+ *   pool      — allocator for output (typically data_pool).
+ *
+ *   Returns [B, N-1] int tensor (float data region, int* content).
+ */
+tensor *decoder_lm_shift_targets(struct mem_pool *pool,
+                                  const tensor *input_ids);
+
 /* ── Training step (next-token prediction, teacher forcing) ──
  *
  * Performs one training step:
  *
  *   1. Forward: logits = decoder_lm_forward(lm, input_ids)  [B, N, vocab]
- *   2. Shift: logits[:, :-1, :] predict input_ids[:, 1:]
- *   3. Loss: cross-entropy over vocab dimension
- *   4. Backward: dnn_backward(loss)
- *   5. Update: adamw_step(opt) + adamw_zero_grad(opt)
+ *   2. Loss: cross-entropy(logits[:, :-1, :], target)
+ *   3. Backward: dnn_backward(loss)
+ *   4. Update: adamw_step(opt) (zero_grad called internally at start)
  *
  *   input_ids — [B, N] int tensor (token IDs).  Must be contiguous.
  *               N >= 2 (need at least 1 target token).
+ *   target    — [B, N-1] int tensor from decoder_lm_shift_targets().
  *
  *   Returns the scalar loss tensor from scratch pool.
  *   Caller must reset scratch/data pools before next call.
  */
 tensor *decoder_lm_train_step(struct mem_pool *scratch_pool,
-                               struct mem_pool *data_pool,
                                decoder_lm *lm, const tensor *input_ids,
+                               const tensor *target,
                                adamw_opt *opt, float grad_clip,
                                float *grad_norm_out);
 

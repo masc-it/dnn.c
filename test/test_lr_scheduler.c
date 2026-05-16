@@ -326,8 +326,9 @@ static void test_scheduler_with_training(void) {
         int *id_data = (int *)input_ids->data;
         id_data[0] = 0; id_data[1] = 1; id_data[2] = 2; id_data[3] = 3;
         id_data[4] = 3; id_data[5] = 2; id_data[6] = 1; id_data[7] = 0;
+        tensor *target = decoder_lm_shift_targets(ctx.data, input_ids);
 
-        tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
+        tensor *loss = decoder_lm_train_step(ctx.scratch, lm, input_ids, target, opt, 0.0f, NULL);
         (void)loss;
 
         lr_scheduler_step(sched);

@@ -54,7 +54,8 @@ static void train_lm(decoder_lm *lm, int B, int N, int n_steps) {
 
     for (int step = 0; step < n_steps; step++) {
         tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ids);
-        tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
+        tensor *target = decoder_lm_shift_targets(ctx.data, input_ids);
+        tensor *loss = decoder_lm_train_step(ctx.scratch, lm, input_ids, target, opt, 0.0f, NULL);
         (void)loss;
     }
 

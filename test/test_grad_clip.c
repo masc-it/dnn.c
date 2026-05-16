@@ -316,8 +316,9 @@ static void test_clip_in_training_step(void) {
     int ids[] = {3, 6, 7, 0, 4, 3, 4, 7};
     tensor *input_ids = tensor_zeros_data(ctx.data, 2, (int[]){B, N});
     memcpy(input_ids->data, ids, B * N * sizeof(int));
+    tensor *target = decoder_lm_shift_targets(ctx.data, input_ids);
 
-    tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 1.0f, NULL);
+    tensor *loss = decoder_lm_train_step(ctx.scratch, lm, input_ids, target, opt, 1.0f, NULL);
     float loss_val = tensor_data_ptr(loss)[0];
     assert(isfinite(loss_val) && "loss non-finite after clip training step");
     assert(loss_val > 0.0f && "loss should be positive");
@@ -353,8 +354,9 @@ static void test_clip_reduces_norm_during_training(void) {
 
         tensor *input_ids = tensor_zeros_data(ctx.data, 2, (int[]){B, N});
         memcpy(input_ids->data, ids, B * N * sizeof(int));
+        tensor *target = decoder_lm_shift_targets(ctx.data, input_ids);
 
-        tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, clip_norm, NULL);
+        tensor *loss = decoder_lm_train_step(ctx.scratch, lm, input_ids, target, opt, clip_norm, NULL);
         float lv = tensor_data_ptr(loss)[0];
         assert(isfinite(lv));
         printf("    step %d: loss=%.6f (clip=%.1f)\n", step, lv, clip_norm);

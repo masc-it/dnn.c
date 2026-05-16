@@ -111,7 +111,8 @@ int main(void) {
 
             /* ── Train step ── */
             float grad_norm;
-            tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 1.0f, &grad_norm);
+            tensor *target = decoder_lm_shift_targets(ctx.data, input_ids);
+            tensor *loss = decoder_lm_train_step(ctx.scratch, lm, input_ids, target, opt, 1.0f, &grad_norm);
             float loss_val = ((float *)loss->data)[0];
 
             /* Advance LR scheduler after each training step */

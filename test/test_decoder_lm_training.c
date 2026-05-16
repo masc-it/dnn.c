@@ -47,8 +47,9 @@ static void test_train_step_basic(void) {
 
     int ids[] = {3, 6, 7, 0, 4, 3, 4, 7};
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ids);
+    tensor *target = decoder_lm_shift_targets(ctx.data, input_ids);
 
-    tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
+    tensor *loss = decoder_lm_train_step(ctx.scratch, lm, input_ids, target, opt, 0.0f, NULL);
 
     float loss_val = tensor_data_ptr(loss)[0];
     assert(isfinite(loss_val) && "loss non-finite");
@@ -78,11 +79,12 @@ static void test_gradients_flow(void) {
 
     int ids[] = {3, 6, 7, 0, 4, 3, 4, 7};
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ids);
+    tensor *target = decoder_lm_shift_targets(ctx.data, input_ids);
 
     /* Before step, no grads exist */
     assert(tensor_grad(lm->embed->weight) == NULL);
 
-    tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
+    tensor *loss = decoder_lm_train_step(ctx.scratch, lm, input_ids, target, opt, 0.0f, NULL);
 
     /* After step, all params have finite grads */
     float loss_val = tensor_data_ptr(loss)[0];
@@ -109,15 +111,16 @@ static void test_gradients_flow(void) {
     assert(tensor_grad(b0->ffn->up_proj->weight) != NULL);
     assert(tensor_grad(b0->ffn->down_proj->weight) != NULL);
 
-    /* After adamw_zero_grad, grad buffers exist but are zeroed.
+    /* Grad buffers contain fresh gradients from this step.
+     * adamw_zero_grad ran at top — grads are NOT zero after return.
      * Parameter update is verified in test_params_update. */
     float *qg = tensor_grad(b0->qkv_proj->weight);
     float qg_sum = 0.0f;
     for (int i = 0; i < tensor_numel(b0->qkv_proj->weight); i++)
         qg_sum += fabsf(qg[i]);
-    assert(qg_sum == 0.0f && "grads should be zeroed by adamw_zero_grad");
+    assert(qg_sum > 0.0f && "grads should be non-zero after backward");
 
-    printf("    qkv_proj.weight grad: zeroed after optimizer step (ok)\n");
+    printf("    qkv_proj.weight grad: non-zero after step (%.6f) (ok)\n", qg_sum);
 
     /* Check block 1 as well */
     transformer_block *b1 = lm->blocks[1];
@@ -153,8 +156,9 @@ static void test_params_update(void) {
 
     int ids[] = {3, 6, 7, 0, 4, 3, 4, 7};
     tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ids);
+    tensor *target = decoder_lm_shift_targets(ctx.data, input_ids);
 
-    decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
+    decoder_lm_train_step(ctx.scratch, lm, input_ids, target, opt, 0.0f, NULL);
 
     /* Embedding table should have changed */
     float *emb_final = tensor_data_ptr(lm->embed->weight);
@@ -197,10 +201,11 @@ static void test_loss_decreases(void) {
         mem_pool_reset(ctx.scratch);
         mem_pool_reset(ctx.data);
 
-        /* Rebuild input_ids (data pool was reset) */
+        /* Rebuild input_ids + targets (data pool was reset) */
         input_ids = make_int_tensor(2, (int[]){B, N}, ids);
+        tensor *target = decoder_lm_shift_targets(ctx.data, input_ids);
 
-        tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
+        tensor *loss = decoder_lm_train_step(ctx.scratch, lm, input_ids, target, opt, 0.0f, NULL);
         losses[step] = tensor_data_ptr(loss)[0];
         printf("    step %d: loss=%.6f\n", step, losses[step]);
         assert(isfinite(losses[step]));
@@ -245,8 +250,9 @@ static void test_ref_values(void) {
         mem_pool_reset(ctx.scratch);
         mem_pool_reset(ctx.data);
         input_ids = make_int_tensor(2, (int[]){B, N}, ref_input_ids);
+        tensor *target = decoder_lm_shift_targets(ctx.data, input_ids);
 
-        tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
+        tensor *loss = decoder_lm_train_step(ctx.scratch, lm, input_ids, target, opt, 0.0f, NULL);
         float c_loss = tensor_data_ptr(loss)[0];
         float diff = fabsf(c_loss - ref_losses[step]);
 
@@ -294,8 +300,9 @@ static void test_various_shapes(void) {
         for (int i = 0; i < B * N; i++) ids[i] = rand() % vocab;
 
         tensor *input_ids = make_int_tensor(2, (int[]){B, N}, ids);
+        tensor *target = decoder_lm_shift_targets(ctx.data, input_ids);
 
-        tensor *loss = decoder_lm_train_step(ctx.scratch, ctx.data, lm, input_ids, opt, 0.0f, NULL);
+        tensor *loss = decoder_lm_train_step(ctx.scratch, lm, input_ids, target, opt, 0.0f, NULL);
         float lv = tensor_data_ptr(loss)[0];
         assert(isfinite(lv) && lv > 0.0f);
 
