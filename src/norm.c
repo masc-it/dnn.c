@@ -275,3 +275,221 @@ tensor *tensor_layer_norm(struct mem_pool *scratch, const tensor *x, const tenso
 
     return out;
 }
+
+/* ── rms_backward ── */
+
+static void rms_backward(grad_fn *fn, tensor *grad_output) {
+    tensor *x      = fn->inputs[0];
+    tensor *weight = (tensor*)fn->saved_tensors[0];
+    float  *rstd   = (float*)fn->saved_tensors[1];
+
+    int ndim = x->ndim;
+    int d    = x->shape[ndim - 1];
+    int n    = tensor_numel(x) / d;
+
+    float *xd = tensor_data_ptr(x);
+    float *gd = (float*)grad_output->data;
+    float *wd = weight ? tensor_data_ptr(weight) : NULL;
+
+    float inv_d = 1.0f / (float)d;
+
+    /* dγ = sum(dy * x * rs, over batch dims) */
+    if (weight && tensor_requires_grad(weight)) {
+        float *wg = _grad_ensure(weight);
+#pragma omp parallel for
+        for (int s = 0; s < n; s++) {
+            float rs = rstd[s];
+            float *x_slice = xd + s * d;
+            float *g_slice = gd + s * d;
+#if DNN_HAVE_NEON
+            float32x4_t vrs = vdupq_n_f32(rs);
+            int j = 0;
+            for (; j + 4 <= d; j += 4) {
+                float32x4_t vx = vld1q_f32(x_slice + j);
+                float32x4_t vg = vld1q_f32(g_slice + j);
+                float32x4_t vw = vld1q_f32(wg + j);
+                vst1q_f32(wg + j, vfmaq_f32(vw, vg, vmulq_f32(vx, vrs)));
+            }
+            for (; j < d; j++) {
+                wg[j] += g_slice[j] * x_slice[j] * rs;
+            }
+#else
+            #pragma omp simd
+            for (int j = 0; j < d; j++) {
+                wg[j] += g_slice[j] * x_slice[j] * rs;
+            }
+#endif
+        }
+    }
+
+    /* dx = rs * (γ * dy - rs²/d * x * S)   where S = sum(γ * dy * x, over last dim)
+     *
+     * Two-pass per slice:
+     *   pass 1: compute S = sum(γ_i * gd_i * x_i)
+     *   pass 2: compute dx_i = rs * (γ_i * gd_i - rs²/d * x_i * S)
+     *
+     * γ = weight (or 1.0f when NULL), dy = gd * γ saved in dy_buf VLA. */
+    if (tensor_requires_grad(x)) {
+        float *xg = _grad_ensure(x);
+#pragma omp parallel for
+        for (int s = 0; s < n; s++) {
+            float rs  = rstd[s];
+            float rs2 = rs * rs;
+            float *x_slice = xd + s * d;
+            float *g_slice = gd + s * d;
+            float *xg_slice = xg + s * d;
+
+            float dy_buf[d];  /* VLA — dy = gd * γ */
+            float S = 0.0f;
+
+#if DNN_HAVE_NEON
+            float32x4_t vone = vdupq_n_f32(1.0f);
+            float32x4_t vsum = vdupq_n_f32(0.0f);
+            int j = 0;
+            for (; j + 4 <= d; j += 4) {
+                float32x4_t vx  = vld1q_f32(x_slice + j);
+                float32x4_t vg  = vld1q_f32(g_slice + j);
+                float32x4_t vw  = wd ? vld1q_f32(wd + j) : vone;
+                float32x4_t vdy = vmulq_f32(vg, vw);
+                vst1q_f32(dy_buf + j, vdy);
+                vsum = vfmaq_f32(vsum, vdy, vx);
+            }
+            S = vaddvq_f32(vsum);
+            for (; j < d; j++) {
+                float w = wd ? wd[j] : 1.0f;
+                dy_buf[j] = g_slice[j] * w;
+                S += dy_buf[j] * x_slice[j];
+            }
+#else
+            #pragma omp simd reduction(+:S)
+            for (int j = 0; j < d; j++) {
+                float w = wd ? wd[j] : 1.0f;
+                dy_buf[j] = g_slice[j] * w;
+                S += dy_buf[j] * x_slice[j];
+            }
+#endif
+
+            float S_scaled = rs2 * inv_d * S;
+
+#if DNN_HAVE_NEON
+            float32x4_t vrs   = vdupq_n_f32(rs);
+            float32x4_t vrs_n = vdupq_n_f32(-rs);
+            float32x4_t vss   = vdupq_n_f32(S_scaled);
+            j = 0;
+            for (; j + 4 <= d; j += 4) {
+                float32x4_t vdy  = vld1q_f32(dy_buf + j);
+                float32x4_t vx   = vld1q_f32(x_slice + j);
+                float32x4_t vacc = vld1q_f32(xg_slice + j);
+                /* dx = rs * dy - rs * S_scaled * x */
+                float32x4_t vdx  = vfmaq_f32(vmulq_f32(vrs, vdy), vrs_n, vmulq_f32(vx, vss));
+                vst1q_f32(xg_slice + j, vaddq_f32(vacc, vdx));
+            }
+            for (; j < d; j++) {
+                float dx  = rs * dy_buf[j] - rs * S_scaled * x_slice[j];
+                xg_slice[j] += dx;
+            }
+#else
+            #pragma omp simd
+            for (int j = 0; j < d; j++) {
+                float dx = rs * dy_buf[j] - rs * S_scaled * x_slice[j];
+                xg_slice[j] += dx;
+            }
+#endif
+        }
+    }
+}
+
+/* ── RMS Norm forward ── */
+
+tensor *tensor_rms_norm(struct mem_pool *scratch, const tensor *x,
+                         const tensor *weight, float eps) {
+    assert(x);
+    assert(tensor_is_contiguous(x) && "tensor_rms_norm: x must be contiguous");
+
+    int ndim = x->ndim;
+    int d    = x->shape[ndim - 1];
+    int n    = tensor_numel(x) / d;
+
+    float *xd = tensor_data_ptr((tensor*)x);
+
+    /* rstd = rsqrt(mean(x²) + eps) per slice */
+    float *rstd = _mem_pool_alloc(scratch, n * sizeof(float), NULL);
+
+#pragma omp parallel for
+    for (int s = 0; s < n; s++) {
+        float sum_x2 = 0.0f;
+        float *x_slice = xd + s * d;
+#if DNN_HAVE_NEON
+        float32x4_t vsum = vdupq_n_f32(0.0f);
+        int j = 0;
+        for (; j + 4 <= d; j += 4) {
+            float32x4_t vx = vld1q_f32(x_slice + j);
+            vsum = vfmaq_f32(vsum, vx, vx);
+        }
+        sum_x2 = vaddvq_f32(vsum);
+        for (; j < d; j++) {
+            sum_x2 += x_slice[j] * x_slice[j];
+        }
+#else
+        #pragma omp simd reduction(+:sum_x2)
+        for (int j = 0; j < d; j++) {
+            sum_x2 += x_slice[j] * x_slice[j];
+        }
+#endif
+        float mean_x2 = sum_x2 * (1.0f / (float)d);
+        rstd[s] = 1.0f / sqrtf(mean_x2 + eps);
+    }
+
+    /* output = x * rs * γ */
+    tensor *out = tensor_scratch(scratch, ndim, x->shape, 0);
+    float *od   = (float*)out->data;
+    float *wd   = weight ? tensor_data_ptr((tensor*)weight) : NULL;
+
+#pragma omp parallel for
+    for (int s = 0; s < n; s++) {
+        float rs = rstd[s];
+        float *x_slice = xd + s * d;
+        float *o_slice = od + s * d;
+#if DNN_HAVE_NEON
+        float32x4_t vrs = vdupq_n_f32(rs);
+        int j = 0;
+        for (; j + 4 <= d; j += 4) {
+            float32x4_t vx  = vld1q_f32(x_slice + j);
+            float32x4_t vy  = vmulq_f32(vx, vrs);
+            float32x4_t vw  = wd ? vld1q_f32(wd + j) : vdupq_n_f32(1.0f);
+            vst1q_f32(o_slice + j, vmulq_f32(vy, vw));
+        }
+        for (; j < d; j++) {
+            float y = x_slice[j] * rs;
+            o_slice[j] = y * (wd ? wd[j] : 1.0f);
+        }
+#else
+        #pragma omp simd
+        for (int j = 0; j < d; j++) {
+            float y = x_slice[j] * rs;
+            o_slice[j] = y * (wd ? wd[j] : 1.0f);
+        }
+#endif
+    }
+
+    /* autograd tape */
+    if (dnn_grad_enabled() &&
+        (tensor_requires_grad(x) ||
+         (weight && tensor_requires_grad(weight)))) {
+        grad_fn *fn = _grad_fn_create(scratch);
+        fn->backward = rms_backward;
+        fn->n_inputs = 1;
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
+        fn->inputs[0] = (tensor*)x;
+
+        fn->n_saved = 2;
+        fn->saved_tensors = _mem_pool_alloc(scratch, 2 * sizeof(tensor*), NULL);
+        fn->saved_tensors[0] = (tensor*)weight;  /* may be NULL */
+        fn->saved_tensors[1] = (tensor*)rstd;    /* rs per slice */
+
+        out->requires_grad = 1;
+        out->grad_fn = fn;
+    }
+
+    return out;
+}

@@ -1893,6 +1893,95 @@ static void test_ln_exact_pytorch(void) {
     printf("OK\n");
 }
 
+/* ── RMS Norm tests ── */
+
+static void test_rms_forward_stats(void) {
+    printf("  test_rms_forward_stats... ");
+    /* x = [[1,2,3],[4,5,6]], weight=1, eps=1e-5
+       rms = sqrt(mean(x²) + 1e-5) -> [2.160247, 5.066228]
+       y = x / rms -> [[0.462910, 0.925820, 1.388730],
+                        [0.789542, 0.986927, 1.184313]] */
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 0);
+    float *xp = tensor_data_ptr(x);
+    xp[0]=1; xp[1]=2; xp[2]=3;
+    xp[3]=4; xp[4]=5; xp[5]=6;
+
+    float exp_y[] = {0.462910049f, 0.925820109f, 1.388730168f,
+                     0.789541781f, 0.986927211f, 1.184312701f};
+
+    tensor *out = tensor_rms_norm(ctx.scratch, x, NULL, 1e-5f);
+    float *od = tensor_data_ptr(out);
+    for (int i = 0; i < 6; i++) {
+        if (fabsf(od[i] - exp_y[i]) > 1e-5f) {
+            printf("    FAIL: out[%d] = %.6f, expected %.6f\n", i, od[i], exp_y[i]);
+            assert(0);
+        }
+    }
+    printf("OK\n");
+}
+
+static void test_rms_backward_grads(void) {
+    printf("  test_rms_backward_grads... ");
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 1);
+    float *xp = tensor_data_ptr(x);
+    xp[0]=1; xp[1]=2; xp[2]=3;
+    xp[3]=4; xp[4]=5; xp[5]=6;
+
+    tensor *w = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
+    float *wp = tensor_data_ptr(w);
+    wp[0]=1; wp[1]=1; wp[2]=1;
+
+    tensor *out = tensor_rms_norm(ctx.scratch, x, w, 1e-5f);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);
+    dnn_backward(ctx.scratch, loss);
+
+    assert(tensor_grad(x) != NULL);
+    assert(tensor_grad(w) != NULL);
+    printf("OK\n");
+}
+
+static void test_rms_no_weight(void) {
+    printf("  test_rms_no_weight... ");
+    tensor *x = tensor_zeros(ctx.params, 1, (int[]){4}, 1);
+    float *xp = tensor_data_ptr(x);
+    xp[0]=1; xp[1]=2; xp[2]=3; xp[3]=4;
+
+    tensor *out = tensor_rms_norm(ctx.scratch, x, NULL, 1e-5f);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);
+    dnn_backward(ctx.scratch, loss);
+
+    assert(tensor_grad(x) != NULL);
+    printf("OK\n");
+}
+
+static void test_rms_exact_pytorch(void) {
+    printf("  test_rms_exact_pytorch... ");
+    tensor *x = tensor_zeros(ctx.params, 2, (int[]){2, 3}, 1);
+    float *xp = tensor_data_ptr(x);
+    xp[0]=1; xp[1]=2; xp[2]=3;
+    xp[3]=4; xp[4]=5; xp[5]=6;
+
+    tensor *w = tensor_zeros(ctx.params, 1, (int[]){3}, 1);
+    float *wp = tensor_data_ptr(w);
+    wp[0]=1; wp[1]=1; wp[2]=1;
+
+    tensor *out = tensor_rms_norm(ctx.scratch, x, w, 1e-5f);
+    tensor *loss = tensor_sum(ctx.scratch, out, 0);
+    dnn_backward(ctx.scratch, loss);
+
+    /* Expected from PyTorch (higher precision):
+       dx = [[ 0.2645201683,  0.0661307573, -0.1322586238],
+             [ 0.0435786694,  0.0051269680, -0.0333247334]]
+       dw = [1.2524514198, 1.9127464294, 2.5730414391] */
+    float exp_dx[] = {0.2645201683f, 0.0661307573f, -0.1322586238f,
+                      0.0435786694f, 0.0051269680f, -0.0333247334f};
+    check_grad_ary(x, exp_dx, 6, "dx");
+
+    float exp_w[] = {1.2524514198f, 1.9127464294f, 2.5730414391f};
+    check_grad_ary(w, exp_w, 3, "dw");
+    printf("OK\n");
+}
+
 int main(void) {
     printf("test_autograd:\n");
 
@@ -2207,6 +2296,22 @@ int main(void) {
     mem_pool_reset(ctx.scratch);
 
     test_ln_exact_pytorch();
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
+
+    test_rms_forward_stats();
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
+
+    test_rms_backward_grads();
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
+
+    test_rms_no_weight();
+    mem_pool_reset(ctx.params);
+    mem_pool_reset(ctx.scratch);
+
+    test_rms_exact_pytorch();
     mem_pool_reset(ctx.params);
     mem_pool_reset(ctx.scratch);
 
