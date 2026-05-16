@@ -104,6 +104,9 @@ bench_ops: $(BUILDDIR)/bench_ops
 bench_multihead: $(BUILDDIR)/bench_multihead
 	$(BUILDDIR)/bench_multihead
 
+bench_attention: $(BUILDDIR)/bench_attention
+	$(BUILDDIR)/bench_attention
+
 bench_transformer: $(BUILDDIR)/bench_transformer
 	$(BUILDDIR)/bench_transformer
 

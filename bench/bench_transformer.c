@@ -18,7 +18,7 @@ static dnn_ctx ctx;
  * d_model=256, n_layers=2, n_heads=4, d_k=64, intermediate=768
  * Sequence length N=128, batch B=2, vocab=32000.
  *
- * Prints per-step timing and estimated throughput.
+ * Prints per-step timing (wall-clock) and estimated throughput.
  */
 
 static tensor *make_int_tensor(int ndim, const int *shape) {
@@ -27,6 +27,13 @@ static tensor *make_int_tensor(int ndim, const int *shape) {
     tensor *t = tensor_zeros_data(ctx.data, ndim, shape);
     for (int i = 0; i < n; i++) ((int*)t->data)[i] = rand() % 100;
     return t;
+}
+
+/* Return wall time in seconds (monotonic) */
+static double wall_time(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
 int main(void) {
@@ -51,15 +58,13 @@ int main(void) {
     printf("  intermediate=%d\n", intermediate);
     printf("\n");
 
-    /* Estimate param count for pool size */
-    size_t param_pool_sz = 512 * 1024 * 1024;
-    size_t scratch_pool_sz = 512 * 1024 * 1024;  /* activations for B=2, N=128 */
-    size_t data_pool_sz = 16 * 1024 * 1024;
+    size_t param_pool_sz  = 256 * 1024 * 1024;
+    size_t scratch_pool_sz = 512 * 1024 * 1024;
+    size_t data_pool_sz   = 16 * 1024 * 1024;
 
-    dnn_ctx_init(&ctx, 8*1024*1024, 64*1024*1024, 8*1024*1024);
+    dnn_ctx_init(&ctx, param_pool_sz, scratch_pool_sz, data_pool_sz);
 
     srand(42);
-    /* grad mode on by default */
 
     /* ── Create model ── */
     decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,
@@ -67,32 +72,11 @@ int main(void) {
 
     printf("  Parameters: %.1fM\n", (double)decoder_lm_num_parameters(lm) / 1e6);
 
-    /* Collect params for optimizer */
-    int n_params = 0;
-    tensor *all_params[256];
-    all_params[n_params++] = lm->embedding_table;
-    all_params[n_params++] = lm->norm_weight;
-    all_params[n_params++] = lm->norm_bias;
-    /* lm_head->weight excluded — weight tying via transposed view of embedding_table */
-    all_params[n_params++] = lm->lm_head->bias;
-    for (int i = 0; i < n_layers; i++) {
-        transformer_block *b = lm->blocks[i];
-        all_params[n_params++] = b->qkv_proj->weight;
-        all_params[n_params++] = b->qkv_proj->bias;
-        all_params[n_params++] = b->out_proj->weight;
-        all_params[n_params++] = b->out_proj->bias;
-        all_params[n_params++] = b->attn_norm_weight;
-        all_params[n_params++] = b->attn_norm_bias;
-        all_params[n_params++] = b->ffn_norm_weight;
-        all_params[n_params++] = b->ffn_norm_bias;
-        all_params[n_params++] = b->ffn->gate_proj->weight;
-        all_params[n_params++] = b->ffn->gate_proj->bias;
-        all_params[n_params++] = b->ffn->up_proj->weight;
-        all_params[n_params++] = b->ffn->up_proj->bias;
-        all_params[n_params++] = b->ffn->down_proj->weight;
-        all_params[n_params++] = b->ffn->down_proj->bias;
-    }
+    /* Collect params via module API (handles all sub-modules recursively) */
+    int n_params;
+    tensor **all_params = module_parameters(&lm->base, &n_params);
 
+    /* Allocate from params pool so they persist */
     tensor **pz = _mem_pool_alloc(ctx.params, n_params * sizeof(tensor*), NULL);
     memcpy(pz, all_params, n_params * sizeof(tensor*));
     adamw_opt *opt = adamw_create(ctx.params, pz, n_params, 0.001f, 0.9f, 0.999f, 1e-8f, 0.01f);
@@ -112,18 +96,17 @@ int main(void) {
         input_ids = make_int_tensor(2, (int[]){B, N});
     }
 
-    /* ── Measured iterations ── */
+    /* ── Measured iterations (wall-clock) ── */
     double total_time = 0.0;
     double min_time = 1e9, max_time = 0.0;
 
     for (int i = 0; i < iters; i++) {
-        clock_t start = clock();
+        double start = wall_time();
 
         tensor *target = decoder_lm_shift_targets(ctx.data, input_ids);
         tensor *loss = decoder_lm_train_step(ctx.scratch, lm, input_ids, target, opt, 1.0f, NULL);
 
-        clock_t end = clock();
-        double elapsed = (double)(end - start) / CLOCKS_PER_SEC;
+        double elapsed = wall_time() - start;
 
         total_time += elapsed;
         if (elapsed < min_time) min_time = elapsed;
