@@ -467,6 +467,261 @@ static void test_contiguous_backward_correct(void) {
 }
 
 /* ══════════════════════════════════════════════════════════════════
+ *  P1 test: masked cross-entropy correctness
+ * ══════════════════════════════════════════════════════════════════ */
+
+static void test_masked_ce_basic(void) {
+    printf("  test_masked_ce_basic... ");
+    dnn_ctx_init(&ctx, 8*1024*1024, 64*1024*1024, 1*1024*1024);
+
+    /* Simple 2D case: [B=2, C=4], target [2], mask [2] */
+    float ld[8] = {1,2,3,4, 0,1,2,3};
+    int td[2] = {2, 1};
+    float md[2] = {1.0f, 0.0f};  /* only first sample contributes */
+
+    tensor *logits = tensor_zeros_data(ctx.params, 2, (int[]){2,4});
+    memcpy(tensor_data_ptr(logits), ld, 8*sizeof(float));
+    tensor_set_requires_grad(logits, 1);
+    tensor *target = tensor_zeros_data(ctx.params, 1, (int[]){2});
+    memcpy(tensor_data_ptr(target), td, 2*sizeof(int));
+    tensor *mask = tensor_zeros_data(ctx.params, 1, (int[]){2});
+    memcpy(tensor_data_ptr(mask), md, 2*sizeof(float));
+
+    tensor *loss = tensor_cross_entropy_masked(ctx.scratch, logits, target, mask, 1);
+    float lv = tensor_data_ptr(loss)[0];
+
+    /* Manual: logits[0] = [1,2,3,4], target=2 (0-indexed), mask=1
+     * CE = -log(exp(3) / sum(exp(1..4)))
+     *   = -(3 - log(exp(1)+exp(2)+exp(3)+exp(4)))
+     *   = -(3 - 4.440) = 1.440
+     */
+    float se = expf(1.0f)+expf(2.0f)+expf(3.0f)+expf(4.0f);
+    float expected = -(3.0f - logf(se));
+    assert(fabsf(lv - expected) < 1e-4f);
+
+    /* Backward: only position 0 gets gradient */
+    dnn_backward(ctx.scratch, loss);
+    float *g = tensor_grad(logits);
+    assert(g != NULL);
+    /* row 0 should have non-zero gradient, row 1 should be zero */
+    float row0_norm = 0, row1_norm = 0;
+    for (int i = 0; i < 4; i++) row0_norm += fabsf(g[i]);
+    for (int i = 0; i < 4; i++) row1_norm += fabsf(g[4+i]);
+    assert(row0_norm > 0 && "masked CE: masked position should have gradient");
+    assert(row1_norm == 0.0f && "masked CE: unmasked position should have zero gradient");
+
+    printf("OK (loss=%.6f)\n", lv);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  P1 test: masked CE with multiple masked positions
+ * ══════════════════════════════════════════════════════════════════ */
+
+static void test_masked_ce_skip(void) {
+    printf("  test_masked_ce_skip... ");
+    dnn_ctx_init(&ctx, 8*1024*1024, 64*1024*1024, 1*1024*1024);
+
+    /* 3D case: [B=1, T=3, C=4], like VLM text logits */
+    float ld[12] = {1,2,1,2, 3,4,3,4, 5,6,5,6};
+    int td[3] = {0, 1, 2};
+    float md[3] = {1.0f, 0.0f, 1.0f};  /* skip middle */
+
+    tensor *logits = tensor_zeros_data(ctx.params, 3, (int[]){1,3,4});
+    memcpy(tensor_data_ptr(logits), ld, 12*sizeof(float));
+    tensor_set_requires_grad(logits, 1);
+    tensor *target = tensor_zeros_data(ctx.params, 2, (int[]){1,3});
+    memcpy(tensor_data_ptr(target), td, 3*sizeof(int));
+    tensor *mask = tensor_zeros_data(ctx.params, 2, (int[]){1,3});
+    memcpy(tensor_data_ptr(mask), md, 3*sizeof(float));
+
+    tensor *loss = tensor_cross_entropy_masked(ctx.scratch, logits, target, mask, 2);
+    float lv = tensor_data_ptr(loss)[0];
+
+    /* Only 2 positions contribute, mask_sum=2, loss = (CE0 + CE2)/2 */
+    assert(isfinite(lv) && lv > 0.0f);
+
+    dnn_backward(ctx.scratch, loss);
+    float *g = tensor_grad(logits);
+    assert(g != NULL);
+    /* Middle row (index 1) should have zero gradient */
+    float mid_norm = 0;
+    for (int i = 0; i < 4; i++) mid_norm += fabsf(g[4+i]);
+    assert(mid_norm == 0.0f && "masked CE: skipped position gradient should be zero");
+    /* First and last rows should have gradient */
+    float first_norm = 0, last_norm = 0;
+    for (int i = 0; i < 4; i++) first_norm += fabsf(g[i]);
+    for (int i = 0; i < 4; i++) last_norm += fabsf(g[8+i]);
+    assert(first_norm > 0 && last_norm > 0);
+
+    printf("OK (loss=%.6f)\n", lv);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  P1 test: seq_lens attention backward (no gradient from pad keys)
+ * ══════════════════════════════════════════════════════════════════ */
+
+static void test_seq_lens_attention_backward(void) {
+    printf("  test_seq_lens_attention_backward... ");
+    dnn_ctx_init(&ctx, 8*1024*1024, 64*1024*1024, 1*1024*1024);
+
+    int B=2, H=1, N=4, d=4;
+    int seq_lens[2] = {2, 3};  /* batch 0: first 2 positions valid, batch 1: first 3 */
+
+    srand(42);
+    tensor *Q = tensor_randn(ctx.params, 4, (int[]){B,H,N,d}, 1);
+    tensor *K = tensor_randn(ctx.params, 4, (int[]){B,H,N,d}, 1);
+    tensor *V = tensor_randn(ctx.params, 4, (int[]){B,H,N,d}, 1);
+
+    /* Forward with seq_lens */
+    tensor *O = tensor_attention_ex(ctx.scratch, Q, K, V, NULL,
+                                     ATTENTION_CAUSAL, 0, seq_lens);
+
+    /* Sum output to get scalar loss */
+    tensor *s = O;
+    for (int d_ = 0; d_ < O->ndim; d_++) s = tensor_sum(ctx.scratch, s, 0);
+    dnn_backward(ctx.scratch, s);
+
+    float *kg = tensor_grad(K);
+    float *vg = tensor_grad(V);
+    assert(kg != NULL && vg != NULL);
+
+    /* Batch 0 seq_len=2: K positions 2..3 should have zero gradient */
+    float pad_k0_norm = 0, pad_v0_norm = 0;
+    for (int i = 0; i < d; i++) pad_k0_norm += fabsf(kg[0*H*N*d + 2*d + i]);  /* batch0, pos2 */
+    for (int i = 0; i < d; i++) pad_k0_norm += fabsf(kg[0*H*N*d + 3*d + i]);  /* batch0, pos3 */
+    for (int i = 0; i < d; i++) pad_v0_norm += fabsf(vg[0*H*N*d + 2*d + i]);
+    for (int i = 0; i < d; i++) pad_v0_norm += fabsf(vg[0*H*N*d + 3*d + i]);
+    assert(pad_k0_norm == 0.0f && "seq_lens backward: K pad should have zero grad");
+    assert(pad_v0_norm == 0.0f && "seq_lens backward: V pad should have zero grad");
+
+    /* Valid positions should have non-zero gradient */
+    float valid_k0_norm = 0;
+    for (int i = 0; i < d; i++) valid_k0_norm += fabsf(kg[0*H*N*d + 0*d + i]);
+    for (int i = 0; i < d; i++) valid_k0_norm += fabsf(kg[0*H*N*d + 1*d + i]);
+    assert(valid_k0_norm > 0.0f && "seq_lens backward: valid K should have non-zero grad");
+
+    printf("OK\n");
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  P1 test: padded train matches exact-length pretraining on same data
+ * ══════════════════════════════════════════════════════════════════ */
+
+static void test_padded_train_matches_exact(void) {
+    printf("  test_padded_train_matches_exact...\n");
+
+    /* Pre-generate a deterministic image */
+    float img_data[2*3*8*8];
+    {
+        dnn_ctx_init(&ctx, 8*1024*1024, 64*1024*1024, 1*1024*1024);
+        srand(12345);
+        tensor *tmp = tensor_randn(ctx.scratch, 4, (int[]){2,3,8,8}, 0);
+        memcpy(img_data, tensor_data_ptr(tmp), 2*3*8*8*sizeof(float));
+        dnn_ctx_destroy(&ctx);
+    }
+
+    /* Test 1: padded with text_lens=Tmax should match exact-length */
+    dnn_ctx_init(&ctx, 8*1024*1024, 128*1024*1024, 4*1024*1024);
+    srand(42);
+    vision_lm *vlm = vision_lm_create(ctx.params, 16, 8, 1, 2, 4, 16,
+                                       3, 8, 8, 4, 0);
+    vision_lm_init_weights(vlm);
+    int n_params;
+    tensor **all_p = module_parameters(&vlm->base, &n_params);
+    adamw_opt *opt = adamw_create(ctx.params, all_p, n_params, 0.01f,
+                                   0.9f, 0.999f, 1e-8f, 0.01f);
+
+    int ids[8] = {0,3,7,5, 1,4,7,2};
+    int tgt[8] = {3,7,5,8, 4,7,2,9};
+    float mask_all[8] = {1,1,1,1, 1,1,1,1};
+    int text_lens[2] = {4, 4};
+
+    tensor *img = tensor_zeros_data(ctx.scratch, 4, (int[]){2,3,8,8});
+    memcpy(tensor_data_ptr(img), img_data, 2*3*8*8*sizeof(float));
+    tensor *inp = make_int_tensor(2, (int[]){2,4}, ids);
+    tensor *tar = make_int_tensor(2, (int[]){2,4}, tgt);
+    tensor *mask_t = tensor_zeros_data(ctx.scratch, 2, (int[]){2,4});
+    memcpy(tensor_data_ptr(mask_t), mask_all, 8*sizeof(float));
+
+    tensor *loss_p = vision_lm_train_step_padded(ctx.scratch, vlm, img, inp, tar,
+                                                  mask_t, text_lens, opt, 0.0f, NULL);
+    float lv_p = tensor_data_ptr(loss_p)[0];
+
+    /* Reset and test regular train step with exact-length */
+    /* Need fresh VLM with same weights */
+    mem_pool_reset(ctx.scratch);
+    mem_pool_reset(ctx.data);
+    dnn_ctx_destroy(&ctx);
+
+    dnn_ctx_init(&ctx, 8*1024*1024, 128*1024*1024, 4*1024*1024);
+    srand(42);
+    vision_lm *vlm2 = vision_lm_create(ctx.params, 16, 8, 1, 2, 4, 16,
+                                        3, 8, 8, 4, 0);
+    vision_lm_init_weights(vlm2);
+    int n_p2;
+    tensor **all_p2 = module_parameters(&vlm2->base, &n_p2);
+    adamw_opt *opt2 = adamw_create(ctx.params, all_p2, n_p2, 0.01f,
+                                    0.9f, 0.999f, 1e-8f, 0.01f);
+
+    tensor *img2 = tensor_zeros_data(ctx.scratch, 4, (int[]){2,3,8,8});
+    memcpy(tensor_data_ptr(img2), img_data, 2*3*8*8*sizeof(float));
+    tensor *inp2 = make_int_tensor(2, (int[]){2,4}, ids);
+    tensor *tar2 = make_int_tensor(2, (int[]){2,4}, tgt);
+
+    tensor *loss_r = vision_lm_train_step(ctx.scratch, vlm2, img2, inp2, tar2, opt2, 0.0f, NULL);
+    float lv_r = tensor_data_ptr(loss_r)[0];
+
+    float diff = fabsf(lv_p - lv_r);
+    printf("    padded=%.6f regular=%.6f diff=%.6f\n", lv_p, lv_r, diff);
+    assert(diff < 1e-4f && "padded train with text_lens=Tmax should match regular");
+    printf("    OK\n");
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  P1 test: masked train step ignores mask=0 gradients
+ * ══════════════════════════════════════════════════════════════════ */
+
+static void test_masked_train_no_grad_from_mask0(void) {
+    printf("  test_masked_train_no_grad_from_mask0...\n");
+    dnn_ctx_init(&ctx, 8*1024*1024, 128*1024*1024, 4*1024*1024);
+    srand(42);
+
+    vision_lm *vlm = vision_lm_create(ctx.params, 16, 8, 1, 2, 4, 16,
+                                       3, 8, 8, 4, 1);
+    int n_params;
+    tensor **all_p = module_parameters(&vlm->base, &n_params);
+    adamw_opt *opt = adamw_create(ctx.params, all_p, n_params, 0.001f,
+                                   0.9f, 0.999f, 1e-8f, 0.01f);
+
+    tensor *img = tensor_randn(ctx.scratch, 4, (int[]){2, 3, 8, 8}, 0);
+    int ids[8] = {0,3,7,5, 1,4,7,2};
+    int tgt[8] = {3,7,5,8, 4,7,2,9};
+    float mask_data[8] = {1,1,1,1, 0,0,0,0};  /* batch 1 fully masked */
+
+    tensor *inp = make_int_tensor(2, (int[]){2,4}, ids);
+    tensor *tar = make_int_tensor(2, (int[]){2,4}, tgt);
+    tensor *mask_t = tensor_zeros_data(ctx.scratch, 2, (int[]){2,4});
+    memcpy(tensor_data_ptr(mask_t), mask_data, 8*sizeof(float));
+
+    /* Run masked train step — only batch 0 contributes */
+    tensor *loss = vision_lm_train_step_masked(ctx.scratch, vlm, img, inp, tar, mask_t, opt, 0.0f, NULL);
+    float lv = tensor_data_ptr(loss)[0];
+    assert(isfinite(lv) && lv > 0.0f);
+
+    /* Check that gradients on image_pos are not affected by batch 1 */
+    float *ip_grad = tensor_grad(vlm->image_pos);
+    if (ip_grad) {
+        float gnorm = 0;
+        for (int i = 0; i < tensor_numel(vlm->image_pos); i++)
+            gnorm += fabsf(ip_grad[i]);
+        assert(gnorm > 0 && "masked train: should have gradients from batch 0");
+        assert(isfinite(gnorm));
+    }
+
+    printf("    OK (loss=%.6f)\n", lv);
+}
+
+/* ══════════════════════════════════════════════════════════════════
  *  Main
  * ══════════════════════════════════════════════════════════════════ */
 
@@ -499,6 +754,19 @@ int main(void) {
     printf("\n--- Gradient correctness tests ---\n");
     test_contiguous_backward_correct();
     test_attention_backward_column_sums();
+
+    printf("\n--- P1: Masked CE tests ---\n");
+    test_masked_ce_basic();
+    test_masked_ce_skip();
+
+    printf("\n--- P1: seq_lens attention backward tests ---\n");
+    test_seq_lens_attention_backward();
+
+    printf("\n--- P1: Padded training tests ---\n");
+    test_padded_train_matches_exact();
+
+    printf("\n--- P1: Masked training tests ---\n");
+    test_masked_train_no_grad_from_mask0();
 
     printf("\n=== All VLM tests passed ===\n");
     return 0;

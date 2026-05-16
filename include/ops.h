@@ -43,6 +43,22 @@ tensor *tensor_mean(struct mem_pool *scratch, const tensor *t, int dim);
 /* ── Loss ── */
 tensor *tensor_cross_entropy(struct mem_pool *scratch, const tensor *logits, const tensor *target, int dim);
 
+/* ── Masked cross-entropy loss ──
+ *
+ *   logits: [B,...,V] float — unnormalized class scores.
+ *   target: [B,...]   int   — ground-truth class indices.
+ *   mask:   [B,...]   float 0/1 — 1 = contribute to loss, 0 = ignore.
+ *   dim:    class dimension in logits (e.g. 2 for [B,T,V]).
+ *
+ *   loss = sum(mask[b,t] * CE(b,t)) / max(sum(mask), 1)
+ *   Backward: dlogits skipped where mask == 0.
+ */
+tensor *tensor_cross_entropy_masked(struct mem_pool *scratch,
+                                    const tensor *logits,
+                                    const tensor *target,
+                                    const tensor *mask,
+                                    int dim);
+
 /* ── Embedding ── */
 tensor *tensor_embedding(struct mem_pool *scratch, const tensor *table, const tensor *ids);
 

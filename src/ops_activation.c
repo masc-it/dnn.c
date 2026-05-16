@@ -1143,6 +1143,271 @@ tensor *tensor_cross_entropy(struct mem_pool *scratch, const tensor *logits, con
     return out;
 }
 
+/* ══════════════════════════════════════════════════════════════════
+ *  Masked cross-entropy forward/backward
+ * ══════════════════════════════════════════════════════════════════ */
+
+/* ── Helper: compute mask offset from non-class coords ──
+ *   mask has ndim-1 dims (target shape). coord is full logits coord.
+ */
+static inline int _mask_off(const tensor *mask, int ndim, const int *coord,
+                             int class_dim) {
+    int off = mask->offset;
+    int md = 0;
+    for (int d = 0; d < ndim; d++) {
+        if (d == class_dim) continue;
+        int c = coord[d];
+        if (mask->shape[md] == 1) c = 0;
+        off += c * mask->strides[md];
+        md++;
+    }
+    return off;
+}
+
+static void cross_entropy_masked_backward(grad_fn *fn, tensor *grad_output) {
+    tensor *logits   = fn->inputs[0];
+    float  *max_vals = (float*)fn->saved_tensors[0];
+    float  *sum_exp  = (float*)fn->saved_tensors[1];
+    tensor *target   = fn->saved_tensors[2];
+    tensor *mask     = fn->saved_tensors[3];
+    int     dim      = *(int*)fn->saved_tensors[4];
+    float   inv_mask_sum = *(float*)fn->saved_tensors[5];
+
+    int ndim    = logits->ndim;
+    int numel   = _numel(ndim, logits->shape);
+    float *ld   = (float*)logits->data;
+    float *gd   = (float*)grad_output->data;
+    int   *td   = (int*)target->data;
+    float *md   = (float*)mask->data;
+    float  gout = gd[0];
+
+    if (logits->grad_fn || logits->requires_grad) {
+        float *ag = _grad_ensure(logits);
+        float scale = gout * inv_mask_sum;
+
+        if (ndim == 3 && dim == 2 && logits->strides[2] == 1) {
+            int B = logits->shape[0], T = logits->shape[1], C = logits->shape[2];
+            int s0 = logits->strides[0], s1 = logits->strides[1];
+            int off0 = logits->offset;
+            int m_s0 = mask->strides[0], m_s1 = mask->strides[1];
+            int m_off = mask->offset;
+            for (int b = 0; b < B; b++) {
+                for (int t = 0; t < T; t++) {
+                    float m = md[m_off + b * m_s0 + t * m_s1];
+                    if (m == 0.0f) continue;
+                    int r = b * T + t;
+                    float *row = ld + off0 + b * s0 + t * s1;
+                    float *ag_row = ag + off0 + b * s0 + t * s1;
+                    float mx = max_vals[r];
+                    float se = sum_exp[r];
+                    int tgt = td[r];
+                    for (int c = 0; c < C; c++) {
+                        float sm = expf(row[c] - mx) / se;
+                        ag_row[c] += (sm - (c == tgt ? 1.0f : 0.0f)) * scale * m;
+                    }
+                }
+            }
+        } else {
+            for (int i = 0; i < numel; i++) {
+                int coord[DNN_MAX_DIMS];
+                int r = i;
+                for (int d = ndim - 1; d >= 0; d--) {
+                    coord[d] = r % logits->shape[d];
+                    r /= logits->shape[d];
+                }
+
+                int slice_idx = 0;
+                int stride = 1;
+                for (int d = ndim - 1; d >= 0; d--) {
+                    if (d != dim) {
+                        slice_idx += coord[d] * stride;
+                        stride *= logits->shape[d];
+                    }
+                }
+
+                float m = md[_mask_off(mask, ndim, coord, dim)];
+                if (m == 0.0f) continue;
+
+                float val   = ld[_bcast_off(logits, ndim, coord)];
+                float sm    = expf(val - max_vals[slice_idx]) / sum_exp[slice_idx];
+                int is_tgt  = (coord[dim] == td[slice_idx]) ? 1 : 0;
+
+                int off = _flat_off(logits, i);
+                ag[off] += (sm - (float)is_tgt) * gout * inv_mask_sum * m;
+            }
+        }
+    }
+}
+
+/* ── cross_entropy_masked forward ── */
+
+tensor *tensor_cross_entropy_masked(struct mem_pool *scratch,
+                                    const tensor *logits,
+                                    const tensor *target,
+                                    const tensor *mask,
+                                    int dim) {
+    assert(logits && target && mask);
+    int ndim = logits->ndim;
+    if (dim < 0) dim += ndim;
+    assert(dim >= 0 && dim < ndim && "tensor_cross_entropy_masked: dim out of range");
+
+    int numel    = _numel(ndim, logits->shape);
+    int dim_size = logits->shape[dim];
+    int n_slices = numel / dim_size;
+    float *ld = (float*)logits->data;
+    int   *td = (int*)target->data;
+    float *md = (float*)mask->data;
+
+    float *max_vals = _mem_pool_alloc(scratch, n_slices * sizeof(float), NULL);
+    float *sum_exp  = _mem_pool_alloc(scratch, n_slices * sizeof(float), NULL);
+
+    for (int s = 0; s < n_slices; s++) max_vals[s] = -INFINITY;
+
+    float total_loss = 0.0f;
+    float mask_sum = 0.0f;
+
+    if (ndim == 3 && dim == 2 && logits->strides[2] == 1) {
+        int B = logits->shape[0], T = logits->shape[1], C = logits->shape[2];
+        int s0 = logits->strides[0], s1 = logits->strides[1];
+        int off0 = logits->offset;
+        int m_s0 = mask->strides[0], m_s1 = mask->strides[1];
+        int m_off = mask->offset;
+        for (int b = 0; b < B; b++) {
+            for (int t = 0; t < T; t++) {
+                int r = b * T + t;
+                float m = md[m_off + b * m_s0 + t * m_s1];
+                if (m == 0.0f) continue;
+                mask_sum += m;
+
+                float *row = ld + off0 + b * s0 + t * s1;
+                float mx, se;
+                mx = -INFINITY;
+                se = 0.0f;
+                for (int j = 0; j < C; j++) {
+                    float v = row[j];
+                    if (v > mx) { se *= expf(mx - v); mx = v; }
+                    se += expf(v - mx);
+                }
+                max_vals[r] = mx;
+                sum_exp[r]  = se;
+                total_loss += (logf(se) + mx - row[td[r]]) * m;
+            }
+        }
+    } else if (ndim == 2 && dim == 1 && tensor_is_contiguous(logits)) {
+        int N = logits->shape[0], C = logits->shape[1];
+        int m_s0 = mask->strides[0], m_off = mask->offset;
+        for (int n = 0; n < N; n++) {
+            float m = md[m_off + n * m_s0];
+            if (m == 0.0f) continue;
+            mask_sum += m;
+
+            float *row = ld + n * C;
+            float mx, se;
+            mx = -INFINITY;
+            se = 0.0f;
+            for (int j = 0; j < C; j++) {
+                float v = row[j];
+                if (v > mx) { se *= expf(mx - v); mx = v; }
+                se += expf(v - mx);
+            }
+            max_vals[n] = mx;
+            sum_exp[n]  = se;
+            total_loss += (logf(se) + mx - row[td[n]]) * m;
+        }
+    } else {
+        /* General nD fallback — 3 passes over logits.
+         * Pass 1: find max per slice.  Pass 2: sum_exp + save target_logit.
+         * Pass 3: accumulate loss using mask (with stride-aware access).
+         */
+        float *target_logits = _mem_pool_alloc(scratch, n_slices * sizeof(float), NULL);
+        float *mask_slices   = _mem_pool_alloc(scratch, n_slices * sizeof(float), NULL);
+        for (int s = 0; s < n_slices; s++) { max_vals[s] = -INFINITY; sum_exp[s] = 0.0f; }
+
+        for (int i = 0; i < numel; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = ndim - 1; d >= 0; d--) {
+                coord[d] = r % logits->shape[d];
+                r /= logits->shape[d];
+            }
+            int slice_idx = 0;
+            int stride = 1;
+            for (int d = ndim - 1; d >= 0; d--) {
+                if (d != dim) {
+                    slice_idx += coord[d] * stride;
+                    stride *= logits->shape[d];
+                }
+            }
+
+            if (coord[dim] == 0)
+                mask_slices[slice_idx] = md[_mask_off(mask, ndim, coord, dim)];
+
+            float val = ld[_bcast_off(logits, ndim, coord)];
+            if (val > max_vals[slice_idx]) max_vals[slice_idx] = val;
+        }
+
+        for (int i = 0; i < numel; i++) {
+            int coord[DNN_MAX_DIMS];
+            int r = i;
+            for (int d = ndim - 1; d >= 0; d--) {
+                coord[d] = r % logits->shape[d];
+                r /= logits->shape[d];
+            }
+            int slice_idx = 0;
+            int stride = 1;
+            for (int d = ndim - 1; d >= 0; d--) {
+                if (d != dim) {
+                    slice_idx += coord[d] * stride;
+                    stride *= logits->shape[d];
+                }
+            }
+            float val = ld[_bcast_off(logits, ndim, coord)];
+            sum_exp[slice_idx] += expf(val - max_vals[slice_idx]);
+            if (coord[dim] == td[slice_idx])
+                target_logits[slice_idx] = val;
+        }
+
+        for (int s = 0; s < n_slices; s++) {
+            float m = mask_slices[s];
+            if (m == 0.0f) continue;
+            mask_sum += m;
+            float lse = max_vals[s] + logf(sum_exp[s]);
+            total_loss += (lse - target_logits[s]) * m;
+        }
+    }
+
+    if (mask_sum < 1.0f) mask_sum = 1.0f;
+    float inv_mask_sum = 1.0f / mask_sum;
+    float loss_val = total_loss * inv_mask_sum;
+
+    tensor *out = tensor_scratch(scratch, 1, (int[]){1}, 0);
+    ((float*)out->data)[0] = loss_val;
+
+    if (dnn_grad_enabled() && tensor_requires_grad(logits)) {
+        grad_fn *fn = _grad_fn_create(scratch);
+        fn->backward = cross_entropy_masked_backward;
+        fn->n_inputs = 1;
+        fn->inputs = _mem_pool_alloc(scratch, 1 * sizeof(tensor*), NULL);
+        fn->inputs[0] = (tensor*)logits;
+        fn->n_saved = 6;
+        fn->saved_tensors = _mem_pool_alloc(scratch, 6 * sizeof(tensor*), NULL);
+        fn->saved_tensors[0] = (tensor*)max_vals;
+        fn->saved_tensors[1] = (tensor*)sum_exp;
+        fn->saved_tensors[2] = (tensor*)target;
+        fn->saved_tensors[3] = (tensor*)mask;
+        int *dim_saved = _mem_pool_alloc(scratch, sizeof(int), NULL);
+        *dim_saved = dim;
+        fn->saved_tensors[4] = (tensor*)dim_saved;
+        float *inv_saved = _mem_pool_alloc(scratch, sizeof(float), NULL);
+        *inv_saved = inv_mask_sum;
+        fn->saved_tensors[5] = (tensor*)inv_saved;
+        out->requires_grad = 1;
+        out->grad_fn = fn;
+    }
+
+    return out;
+}
+
 /* ── dropout_backward ── */
 
 static void dropout_backward(grad_fn *fn, tensor *grad_output) {

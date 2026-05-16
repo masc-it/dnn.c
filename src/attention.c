@@ -686,8 +686,6 @@ tensor *tensor_attention_ex(struct mem_pool *scratch,
         assert(prefix_len > 0 && prefix_len <= N);
     if (mode == ATTENTION_CAUSAL)
         assert(prefix_len == 0);
-    /* P1: backward ignores seq_lens — forbid non-NULL until saved_tensors[5] */
-    assert(seq_lens == NULL && "seq_lens not yet supported in backward");
 
     float scale = 1.0f / sqrtf((float)d);
 
@@ -739,8 +737,9 @@ tensor *tensor_attention_ex(struct mem_pool *scratch,
         fn->inputs[2] = (tensor*)v;
         if (mask) fn->inputs[3] = (tensor*)mask;
 
-        fn->n_saved = 5;
-        fn->saved_tensors = _mem_pool_alloc(scratch, 5 * sizeof(tensor*), NULL);
+        int n_saved = seq_lens ? 6 : 5;
+        fn->n_saved = n_saved;
+        fn->saved_tensors = _mem_pool_alloc(scratch, n_saved * sizeof(tensor*), NULL);
         fn->saved_tensors[0] = P;
 
         float *scale_saved = _mem_pool_alloc(scratch, sizeof(float), NULL);
@@ -758,6 +757,12 @@ tensor *tensor_attention_ex(struct mem_pool *scratch,
         int *prefix_len_saved = _mem_pool_alloc(scratch, sizeof(int), NULL);
         *prefix_len_saved = prefix_len;
         fn->saved_tensors[4] = (tensor*)prefix_len_saved;
+
+        if (seq_lens) {
+            int *seq_lens_saved = _mem_pool_alloc(scratch, B * sizeof(int), NULL);
+            memcpy(seq_lens_saved, seq_lens, B * sizeof(int));
+            fn->saved_tensors[5] = (tensor*)seq_lens_saved;
+        }
 
         out->requires_grad = 1;
         out->grad_fn = fn;
@@ -788,14 +793,16 @@ static void attention_backward(grad_fn *fn, tensor *grad_output) {
     float   scale = *(float*)fn->saved_tensors[1];
     int     mask_present = *(int*)fn->saved_tensors[2];
 
-    /* Mode and prefix_len saved by tensor_attention_ex (backward-compat: check n_saved) */
+    /* Mode, prefix_len, and seq_lens saved by tensor_attention_ex */
     attention_mode mode = ATTENTION_CAUSAL;
     int prefix_len = 0;
     const int *seq_lens = NULL;
     if (fn->n_saved >= 5) {
         mode = (attention_mode)(*(int*)fn->saved_tensors[3]);
         prefix_len = *(int*)fn->saved_tensors[4];
-        /* seq_lens not saved yet — guarded by assert(seq_lens==NULL) in forward */
+    }
+    if (fn->n_saved >= 6) {
+        seq_lens = (const int*)fn->saved_tensors[5];
     }
 
     int B = q->shape[0], H = q->shape[1], N = q->shape[2], d = q->shape[3];

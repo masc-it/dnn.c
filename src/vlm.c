@@ -281,6 +281,126 @@ tensor *vision_lm_train_step(struct mem_pool *scratch_pool,
 }
 
 /* ══════════════════════════════════════════════════════════════════
+ *  Padded training step (variable-length batches with seq_lens)
+ * ══════════════════════════════════════════════════════════════════ */
+
+tensor *vision_lm_train_step_padded(struct mem_pool *scratch_pool,
+                                     vision_lm *vlm,
+                                     const tensor *images,
+                                     const tensor *input_ids,
+                                     const tensor *target_ids,
+                                     const tensor *loss_mask,
+                                     const int *text_lens,
+                                     adamw_opt *opt,
+                                     float grad_clip,
+                                     float *grad_norm_out) {
+    assert(vlm && images && input_ids && target_ids && loss_mask && text_lens && opt);
+    assert(input_ids->ndim == 2 && "input_ids must be 2D [B, Tmax]");
+    assert(target_ids->ndim == 2 && "target_ids must be 2D [B, Tmax]");
+    assert(loss_mask->ndim == 2 && "loss_mask must be 2D [B, Tmax]");
+    assert(images->shape[0] == input_ids->shape[0] && "image/text batch mismatch");
+    assert(input_ids->shape[0] == target_ids->shape[0] && "batch mismatch");
+    assert(input_ids->shape[1] == target_ids->shape[1] && "seq len mismatch");
+    assert(input_ids->shape[1] == loss_mask->shape[1] && "seq len mismatch");
+    assert(input_ids->shape[1] >= 1 && "need at least 1 target token");
+
+    int B = input_ids->shape[0];
+    int Tmax = input_ids->shape[1];
+    int I = vlm->n_img_tokens;
+
+    /* Build per-batch combined sequence lengths for attention */
+    int *combined_lens = _mem_pool_alloc(scratch_pool, B * sizeof(int), NULL);
+    for (int b = 0; b < B; b++) {
+        int tl = text_lens[b];
+        if (tl > Tmax) tl = Tmax;
+        combined_lens[b] = I + tl;
+    }
+
+    adamw_zero_grad(opt);
+
+    /* Build multimodal embeds [B, I+Tmax, D] */
+    tensor *embeds = vision_lm_build_embeds(scratch_pool, vlm, images, input_ids);
+
+    /* Forward with prefix-LM attention and per-batch seq_lens */
+    tensor *logits = decoder_lm_forward_embeds_ex(scratch_pool, vlm->lm, embeds,
+                                                  ATTENTION_PREFIX_LM,
+                                                  I,
+                                                  combined_lens);
+
+    /* Extract text logits [B, Tmax, vocab_size] */
+    tensor *logits_text = tensor_slice(scratch_pool, logits, 1, I, Tmax);
+
+    /* Masked CE — pad positions have loss_mask=0 and contribute nothing */
+    tensor *loss = tensor_cross_entropy_masked(scratch_pool, logits_text, target_ids, loss_mask, 2);
+
+    /* Backward */
+    dnn_backward(scratch_pool, loss);
+
+    /* Gradient norm */
+    float gn = 0.0f;
+    if (grad_clip > 0.0f) {
+        gn = clip_grad_norm(opt->params, opt->n_params, grad_clip);
+    } else {
+        gn = grad_norm(opt->params, opt->n_params);
+    }
+    if (grad_norm_out) *grad_norm_out = gn;
+
+    /* Update */
+    adamw_step(opt);
+
+    return loss;
+}
+
+/* ══════════════════════════════════════════════════════════════════
+ *  Masked training step (instruction tuning / answer-only supervision)
+ * ══════════════════════════════════════════════════════════════════ */
+
+tensor *vision_lm_train_step_masked(struct mem_pool *scratch_pool,
+                                     vision_lm *vlm,
+                                     const tensor *images,
+                                     const tensor *input_ids,
+                                     const tensor *target_ids,
+                                     const tensor *loss_mask,
+                                     adamw_opt *opt,
+                                     float grad_clip,
+                                     float *grad_norm_out) {
+    assert(vlm && images && input_ids && target_ids && loss_mask && opt);
+    assert(input_ids->ndim == 2 && "input_ids must be 2D [B, T]");
+    assert(target_ids->ndim == 2 && "target_ids must be 2D [B, T]");
+    assert(loss_mask->ndim == 2 && "loss_mask must be 2D [B, T]");
+    assert(input_ids->shape[0] == target_ids->shape[0] && "batch mismatch");
+    assert(input_ids->shape[1] == target_ids->shape[1] && "seq len mismatch");
+    assert(input_ids->shape[1] == loss_mask->shape[1] && "seq len mismatch");
+    assert(images->shape[0] == input_ids->shape[0] && "image/text batch mismatch");
+    assert(input_ids->shape[1] >= 1 && "need at least 1 target token");
+
+    adamw_zero_grad(opt);
+
+    /* Forward: same as normal train_step but uses masked CE */
+    tensor *logits_text = vision_lm_forward_text_logits(scratch_pool, vlm, images, input_ids);
+
+    /* Masked CE — only loss_mask=1 positions contribute */
+    tensor *loss = tensor_cross_entropy_masked(scratch_pool, logits_text, target_ids, loss_mask, 2);
+
+    /* Backward */
+    dnn_backward(scratch_pool, loss);
+
+    /* Gradient norm */
+    float gn = 0.0f;
+    if (grad_clip > 0.0f) {
+        gn = clip_grad_norm(opt->params, opt->n_params, grad_clip);
+    } else {
+        gn = grad_norm(opt->params, opt->n_params);
+    }
+    if (grad_norm_out) *grad_norm_out = gn;
+
+    /* Update */
+    adamw_step(opt);
+
+    return loss;
+}
+
+/* ══════════════════════════════════════════════════════════════════
  *  Autoregressive generation
  * ══════════════════════════════════════════════════════════════════ */
 

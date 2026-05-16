@@ -166,23 +166,41 @@ int *vision_lm_generate(struct mem_pool *scratch_pool,
                         int use_cache,
                         int *n_out);
 
-/* ── P1: Masked cross-entropy for padded batches / instruction tuning ──
- *   (declared for forward-compat; implementation not required in initial handoff)
+/* ── Padded training step (variable-length batches with optimized attention) ──
+ *
+ *   images:     [B, C, H, W]
+ *   input_ids:  [B, Tmax]  (padded with TOKENIZER_PAD_ID)
+ *   target_ids: [B, Tmax]
+ *   loss_mask:  [B, Tmax] float 0/1 — 0 at PAD positions, 1 at real targets
+ *   text_lens:  [B] int — valid text length per sample (before padding)
+ *
+ *   Combines seq_lens optimization in attention + masked CE loss.
  */
-/* tensor *tensor_cross_entropy_masked(struct mem_pool *scratch,
-                                      const tensor *logits,
-                                      const tensor *target,
-                                      const tensor *mask,
-                                      int dim); */
+tensor *vision_lm_train_step_padded(struct mem_pool *scratch_pool,
+                                     vision_lm *vlm,
+                                     const tensor *images,
+                                     const tensor *input_ids,
+                                     const tensor *target_ids,
+                                     const tensor *loss_mask,
+                                     const int *text_lens,
+                                     adamw_opt *opt,
+                                     float grad_clip,
+                                     float *grad_norm_out);
 
-/* tensor *vision_lm_train_step_masked(struct mem_pool *scratch_pool,
-                                       vision_lm *vlm,
-                                       const tensor *images,
-                                       const tensor *input_ids,
-                                       const tensor *target_ids,
-                                       const tensor *loss_mask,
-                                       adamw_opt *opt,
-                                       float grad_clip,
-                                       float *grad_norm_out); */
+/* ── Masked training step (instruction tuning / answer-only supervision) ──
+ *
+ *   Like vision_lm_train_step but uses masked CE so only positions
+ *   where loss_mask[b,t]=1 contribute to the loss.
+ *   Uses regular (non-padded) attention — all samples same T.
+ */
+tensor *vision_lm_train_step_masked(struct mem_pool *scratch_pool,
+                                     vision_lm *vlm,
+                                     const tensor *images,
+                                     const tensor *input_ids,
+                                     const tensor *target_ids,
+                                     const tensor *loss_mask,
+                                     adamw_opt *opt,
+                                     float grad_clip,
+                                     float *grad_norm_out);
 
 #endif /* DNN_VLM_H */
