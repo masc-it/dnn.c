@@ -26,16 +26,16 @@
 #include "context.h"
 #include "optim.h"
 #include "tokenizer.h"
+#include "mnist_data.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <assert.h>
 #include <time.h>
-#include <zlib.h>
+#include <sys/stat.h>
 
 /* ── Config ── */
-#define DATA_DIR       "data/mnist"
 #define TRAIN_N        60000
 #define TEST_N         10000
 #define IMG_ROWS       28
@@ -68,12 +68,8 @@
 #define EVAL_EVERY     1
 
 /* ══════════════════════════════════════════════════════════════════
- *  Data loading (IDX format)
+ *  Data download
  * ══════════════════════════════════════════════════════════════════ */
-
-static int read_be32(const unsigned char *p) {
-    return ((int)p[0] << 24) | ((int)p[1] << 16) | ((int)p[2] << 8) | p[3];
-}
 
 static int download_mnist(void) {
     int r = system("mkdir -p " DATA_DIR);
@@ -110,39 +106,23 @@ static int download_mnist(void) {
     return 0;
 }
 
-static float *load_images(const char *path, int *n_out) {
-    gzFile f = gzopen(path, "rb");
-    if (!f) { fprintf(stderr, "can't open %s\n", path); return NULL; }
-    unsigned char hdr[16];
-    if (gzread(f, hdr, 16) < 16) { gzclose(f); return NULL; }
-    int N = read_be32(hdr + 4);
-    int rows = read_be32(hdr + 8);
-    int cols = read_be32(hdr + 12);
-    *n_out = N;
-    int total = N * rows * cols;
-    unsigned char *raw = malloc(total);
-    if (gzread(f, raw, total) < total) { free(raw); gzclose(f); return NULL; }
-    gzclose(f);
-    float *data = malloc((size_t)total * sizeof(float));
-    for (int i = 0; i < total; i++) data[i] = raw[i] / 255.0f;
-    free(raw);
-    return data;
-}
 
-static int *load_labels(const char *path, int *n_out) {
-    gzFile f = gzopen(path, "rb");
-    if (!f) { fprintf(stderr, "can't open %s\n", path); return NULL; }
-    unsigned char hdr[8];
-    if (gzread(f, hdr, 8) < 8) { gzclose(f); return NULL; }
-    int N = read_be32(hdr + 4);
-    *n_out = N;
-    unsigned char *raw = malloc(N);
-    if (gzread(f, raw, N) < N) { free(raw); gzclose(f); return NULL; }
-    gzclose(f);
-    int *data = malloc((size_t)N * sizeof(int));
-    for (int i = 0; i < N; i++) data[i] = raw[i];
-    free(raw);
-    return data;
+
+/* ══════════════════════════════════════════════════════════════════
+ *  mkdir -p: create path component by component
+ * ══════════════════════════════════════════════════════════════════ */
+
+static void mkdir_p(const char *path) {
+    char buf[256];
+    snprintf(buf, sizeof(buf), "%s", path);
+    for (char *p = buf + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(buf, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(buf, 0755);
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -274,10 +254,10 @@ int main(void) {
 
     /* ── Load data ── */
     int n_train, n_test;
-    float *train_img = load_images(DATA_DIR "/train-images-idx3-ubyte", &n_train);
-    int   *train_lbl = load_labels(DATA_DIR "/train-labels-idx1-ubyte", &n_train);
-    float *test_img  = load_images(DATA_DIR "/t10k-images-idx3-ubyte", &n_test);
-    int   *test_lbl  = load_labels(DATA_DIR "/t10k-labels-idx1-ubyte", &n_test);
+    float *train_img = mnist_load_images(DATA_DIR "/train-images-idx3-ubyte", &n_train);
+    int   *train_lbl = mnist_load_labels(DATA_DIR "/train-labels-idx1-ubyte", &n_train);
+    float *test_img  = mnist_load_images(DATA_DIR "/t10k-images-idx3-ubyte", &n_test);
+    int   *test_lbl  = mnist_load_labels(DATA_DIR "/t10k-labels-idx1-ubyte", &n_test);
     if (!train_img || !train_lbl || !test_img || !test_lbl) {
         fprintf(stderr, "data load failed\n"); return 1;
     }
@@ -433,6 +413,20 @@ int main(void) {
             eval_print_sample(ctx.scratch, ctx.data, vlm,
                               train_img, train_lbl[s2], s2);
             dnn_no_grad_exit(ng);
+        }
+
+        /* ── Save checkpoint ── */
+        {
+            time_t now = time(NULL);
+            struct tm *tm = localtime(&now);
+            char ts[32];
+            strftime(ts, sizeof(ts), "%Y%m%dT%H%M%S", tm);
+            char path[128];
+            snprintf(path, sizeof(path),
+                     "examples/mnist_vlm/ckpt/%s.bin", ts);
+            mkdir_p("examples/mnist_vlm/ckpt");
+            module_save(&vlm->base, path);
+            printf("  ── saved %s\n", path);
         }
 
         if (val_acc > best_val_acc) {

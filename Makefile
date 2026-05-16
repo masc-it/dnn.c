@@ -80,6 +80,10 @@ MNIST_VLM_EXAMPLES := examples/mnist_vlm
 mnist_vlm: $(LIB)
 	$(MAKE) -C $(MNIST_VLM_EXAMPLES) $@
 
+mnist_vlm_preds: $(LIB)
+	$(MAKE) -C $(MNIST_VLM_EXAMPLES) $@
+	$(BUILDDIR)/mnist_vlm_preds
+
 run_mnist_vlm: mnist_vlm
 	$(BUILDDIR)/mnist_vlm
 

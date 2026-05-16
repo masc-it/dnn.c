@@ -11,11 +11,13 @@ LDLIBS := -lomp -lz -ldnn -framework Accelerate
 BUILDDIR := ../../build
 LIB := $(BUILDDIR)/libdnn.a
 
-.PHONY: all mnist_vlm
+.PHONY: all mnist_vlm mnist_vlm_preds
 
-all: $(BUILDDIR)/mnist_vlm
+all: $(BUILDDIR)/mnist_vlm $(BUILDDIR)/mnist_vlm_preds
 
 mnist_vlm: $(BUILDDIR)/mnist_vlm
+
+mnist_vlm_preds: $(BUILDDIR)/mnist_vlm_preds
 
 $(BUILDDIR):
 	mkdir -p $@
@@ -27,5 +29,9 @@ $(BUILDDIR)/mnist_vlm: mnist_vlm.c $(LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(OMPFLAGS) $(CPPFLAGS) \
 	    mnist_vlm.c $(LDFLAGS) $(LDLIBS) -o $@
 
+$(BUILDDIR)/mnist_vlm_preds: mnist_vlm_preds.c $(LIB) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(OMPFLAGS) $(CPPFLAGS) \
+	    mnist_vlm_preds.c $(LDFLAGS) $(LDLIBS) -o $@
+
 clean:
-	rm -f $(BUILDDIR)/mnist_vlm
+	rm -f $(BUILDDIR)/mnist_vlm $(BUILDDIR)/mnist_vlm_preds
