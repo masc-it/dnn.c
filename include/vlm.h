@@ -25,6 +25,7 @@ typedef struct vision_lm {
 
     decoder_lm *lm;               /* text decoder; owns token embed, blocks, norm, lm_head */
     conv2d     *patch_embed;      /* image patch projection: C -> d_model */
+    rms_norm   *image_norm;       /* RMSNorm after patch embed, before cat with text */
 
     tensor     *image_pos;        /* nullable [1, n_img_tokens, d_model], learned */
 

@@ -62,6 +62,10 @@ vision_lm *vision_lm_create(struct mem_pool *params_pool,
                                      0);
     module_add_child(&vlm->base, "patch_embed", &vlm->patch_embed->base);
 
+    /* RMSNorm after patch embed, stabilizes vision feature scale */
+    vlm->image_norm = rms_norm_create(params_pool, d_model, 1e-5f);
+    module_add_child(&vlm->base, "image_norm", &vlm->image_norm->base);
+
     /* Decoder LM */
     vlm->lm = decoder_lm_create(params_pool, vocab_size, d_model,
                                 n_layers, n_heads, d_k, intermediate_size);
@@ -187,6 +191,9 @@ tensor *vision_lm_build_embeds(struct mem_pool *scratch,
 
     /* Image patch embeds [B, I, D] */
     tensor *img = vision_lm_image_embeds(scratch, vlm, images);
+
+    /* RMSNorm on vision features before concat with text */
+    img = rms_norm_forward(scratch, vlm->image_norm, img);
 
     /* Text token embeds [B, T, D] */
     tensor *txt = decoder_lm_token_embeds(scratch, vlm->lm, text_ids);

@@ -28,7 +28,7 @@ BENCH_BINS = $(patsubst $(BENCHDIR)/%.c, $(BUILDDIR)/%, $(BENCH_SRCS))
 LIB      = $(BUILDDIR)/libdnn.a
 
 .PHONY: all clean test bench main_prep_data promessi_lm
-.PHONY: mnist_mlp mnist_cnn mnist_cnn_pool mnist_vlm
+.PHONY: mnist_mlp mnist_cnn mnist_cnn_pool mnist_vlm imagenet_vlm
 .PHONY: run_mnist_mlp run_mnist_cnn run_mnist_cnn_pool
 .PHONY: bench_conv2d bench_matmul bench_ops bench_multihead bench_transformer bench_all
 
@@ -86,6 +86,16 @@ mnist_vlm_preds: $(LIB)
 
 run_mnist_vlm: mnist_vlm
 	$(BUILDDIR)/mnist_vlm
+
+# ImageNet VLM example
+IMAGENET_VLM_EXAMPLES := examples/imagenet_vlm
+
+imagenet_vlm: $(LIB)
+	$(MAKE) -C $(IMAGENET_VLM_EXAMPLES) $@
+
+run_imagenet_vlm: imagenet_vlm
+	if [ -z "$(DATA_DIR)" ]; then echo "Usage: make run_imagenet_vlm DATA_DIR=/path/to/imagenet-shards"; exit 1; fi
+	$(BUILDDIR)/imagenet_vlm --data-dir "$(DATA_DIR)"
 
 main_prep_data: $(BUILDDIR)/main_prep_data
 	$(BUILDDIR)/main_prep_data

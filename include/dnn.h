@@ -18,5 +18,6 @@
 #include "transformer.h"
 #include "gpt.h"
 #include "vlm.h"
+#include "imagenet_vlm.h"
 
 #endif /* DNN_H */
