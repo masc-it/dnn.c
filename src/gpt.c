@@ -49,8 +49,8 @@ decoder_lm *decoder_lm_create(struct mem_pool *params_pool, int vocab_size, int 
         module_add_child(&lm->base, name, &lm->blocks[i]->base);
     }
 
-    /* Final layer norm */
-    lm->norm = layer_norm_create(params_pool, d_model, 1e-5f);
+    /* Final RMS norm (no bias, used by Llama/Mistral/GPT-2) */
+    lm->norm = rms_norm_create(params_pool, d_model, 1e-5f);
     module_add_child(&lm->base, "norm", &lm->norm->base);
 
     /* LM head: d_model → vocab_size (weight tied to embedding — share data via
@@ -93,8 +93,8 @@ tensor *decoder_lm_forward(struct mem_pool *scratch, decoder_lm *lm, const tenso
         h = transformer_block_forward(scratch, lm->blocks[i], h);
     }
 
-    /* Final layer norm */
-    h = layer_norm_forward(scratch, lm->norm, h);
+    /* Final RMS norm */
+    h = rms_norm_forward(scratch, lm->norm, h);
 
     /* LM head: [B, N, d_model] → [B, N, vocab_size] */
     tensor *logits = _lm_head_forward(scratch, lm, h);
@@ -288,7 +288,7 @@ int *decoder_lm_generate(struct mem_pool *scratch_pool, struct mem_pool *data_po
 
             /* Final norm + lm_head (only needed for last prompt token's logits) */
             if (p == prompt_len - 1) {
-                h = layer_norm_forward(scratch_pool, lm->norm, h);
+                h = rms_norm_forward(scratch_pool, lm->norm, h);
                 tensor *logits = _lm_head_forward(scratch_pool, lm, h);  /* [1, 1, vocab] */
                 float *ld = tensor_data_ptr(logits);
 
@@ -324,7 +324,7 @@ int *decoder_lm_generate(struct mem_pool *scratch_pool, struct mem_pool *data_po
                 h = transformer_block_forward_cached(scratch_pool, lm->blocks[i], h, caches[i]);
             }
 
-            h = layer_norm_forward(scratch_pool, lm->norm, h);
+            h = rms_norm_forward(scratch_pool, lm->norm, h);
             tensor *logits = _lm_head_forward(scratch_pool, lm, h);
             float *ld = tensor_data_ptr(logits);
 
@@ -450,7 +450,7 @@ void decoder_lm_init_weights(decoder_lm *lm) {
        so _init_linear skips it and only zeroes the bias. */
     _init_module_weights(&lm->base, std, residual_std);
 
-    /* Layer norm γ=1, β=0 — already correct after decoder_lm_create, skip */
+    /* RMS norm γ=1 — already correct after decoder_lm_create, skip */
 }
 
 /* ── RoPE position encoding ── */

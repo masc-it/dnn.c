@@ -22,7 +22,7 @@ typedef struct {
     embedding           *embed;               /* token embedding table */
     transformer_block  **blocks;              /* [n_layers] */
     int                  n_layers;
-    layer_norm          *norm;                /* final layer norm */
+    rms_norm            *norm;                /* final RMS norm */
     linear              *lm_head;             /* d_model → vocab_size */
     int                  d_model;
     int                  vocab_size;
@@ -139,7 +139,7 @@ void decoder_lm_enable_rope(struct mem_pool *params_pool,
  *   Embedding table, Q/K/V, FFN gate/up, LM head: Normal(0, 0.02)
  *   Attention out_proj, FFN down_proj (residual branches): Normal(0, 0.02 / sqrt(2*n_layers))
  *   All biases: zero
- *   Layer norm γ/β: unchanged (1/0 from decoder_lm_create)
+ *   RMS norm γ: unchanged (1 from decoder_lm_create)
  *
  * Call after decoder_lm_create(), before or after decoder_lm_enable_rope().
  */

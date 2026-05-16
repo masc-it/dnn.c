@@ -63,6 +63,23 @@ typedef struct layer_norm {
 layer_norm *layer_norm_create(struct mem_pool *params, int d, float eps);
 tensor     *layer_norm_forward(struct mem_pool *scratch, layer_norm *ln, const tensor *x);
 
+/* ── RMS Normalization (no bias) ──
+ *
+ *   y = x * rsqrt(mean(x²) + eps) * weight
+ *
+ *   weight — [d], init 1
+ *   eps    — small constant
+ */
+typedef struct rms_norm {
+    module  base;
+    tensor *weight;
+    float   eps;
+    int     d;
+} rms_norm;
+
+rms_norm *rms_norm_create(struct mem_pool *params, int d, float eps);
+tensor   *rms_norm_forward(struct mem_pool *scratch, rms_norm *rn, const tensor *x);
+
 /* ── Embedding ──
  *
  *   out = table[ids]

@@ -147,6 +147,31 @@ long long layer_norm_num_parameters(layer_norm *ln) {
     return module_num_parameters(&ln->base);
 }
 
+/* ── RMS Norm ── */
+
+rms_norm *rms_norm_create(struct mem_pool *params, int d, float eps) {
+    assert(d > 0);
+
+    rms_norm *rn = _mem_pool_alloc(params, sizeof(rms_norm), NULL);
+    module_init(&rn->base, params, "rms_norm");
+
+    rn->d   = d;
+    rn->eps = eps;
+
+    rn->weight = tensor_zeros(params, 1, (int[]){d}, 1);
+    float *wd = tensor_data_ptr(rn->weight);
+    for (int i = 0; i < d; i++) wd[i] = 1.0f;
+
+    module_param(&rn->base, "weight", rn->weight);
+    return rn;
+}
+
+tensor *rms_norm_forward(struct mem_pool *scratch, rms_norm *rn, const tensor *x) {
+    assert(rn);
+    assert(x);
+    return tensor_rms_norm(scratch, x, rn->weight, rn->eps);
+}
+
 /* ── Embedding ── */
 
 embedding *embedding_create(struct mem_pool *params, int vocab_size, int d_model) {

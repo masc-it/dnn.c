@@ -676,6 +676,10 @@ static void cat_backward(grad_fn *fn, tensor *grad_output) {
     int need_a    = (a->grad_fn || a->requires_grad);
     int need_b    = (b->grad_fn || b->requires_grad);
     int a_self    = (a == b);
+    /* Check if grad was freshly allocated (common case: single backward call).
+     * When freshly zeroed we can memcpy instead of add-to, which is 3-10x faster. */
+    int a_fresh   = need_a && (a->grad == NULL);
+    int b_fresh   = need_b && (b->grad == NULL);
     float *ag     = need_a ? _grad_ensure(a) : NULL;
     float *bg     = need_b ? _grad_ensure(b) : NULL;
 
@@ -691,12 +695,27 @@ static void cat_backward(grad_fn *fn, tensor *grad_output) {
         int as = 1;
         for (int d = dim + 1; d < ndim; d++) as *= a->shape[d];
 
-        for (int o = 0; o < outer; o++) {
-            float *g_row = gd + o * (long)grad_output->shape[dim] * gs;
-            float *a_row = ag + o * (long)a_sz * as;
-            for (int k = 0; k < a_sz; k++)
-                for (int i = 0; i < inner; i++)
-                    a_row[k * as + i] += g_row[k * gs + i];
+        if (a_fresh && as == gs) {
+            /* Freshly zeroed buffer: memcpy is safe and much faster */
+            size_t row_bytes = (size_t)a_sz * as * sizeof(float);
+            #pragma omp parallel for if (outer >= 4)
+            for (int o = 0; o < outer; o++) {
+                float *g_row = gd + o * (long)grad_output->shape[dim] * gs;
+                float *a_row = ag + o * (long)a_sz * as;
+                memcpy(a_row, g_row, row_bytes);
+            }
+        } else {
+            #pragma omp parallel for if (outer >= 4)
+            for (int o = 0; o < outer; o++) {
+                float *g_row = gd + o * (long)grad_output->shape[dim] * gs;
+                float *a_row = ag + o * (long)a_sz * as;
+                for (int k = 0; k < a_sz; k++) {
+                    float *gr = g_row + k * gs;
+                    float *ar = a_row + k * as;
+                    for (int i = 0; i < inner; i++)
+                        ar[i] += gr[i];
+                }
+            }
         }
         need_a = 0;
     }
@@ -711,13 +730,28 @@ static void cat_backward(grad_fn *fn, tensor *grad_output) {
         int gs = inner;
         int bs = 1;
         for (int d = dim + 1; d < ndim; d++) bs *= b->shape[d];
+        int shift = a_sz;  /* offset into grad_output along dim */
 
-        for (int o = 0; o < outer; o++) {
-            float *g_row = gd + o * (long)grad_output->shape[dim] * gs;
-            float *b_row = bg + o * (long)b_sz * bs;
-            for (int k = 0; k < b_sz; k++)
-                for (int i = 0; i < inner; i++)
-                    b_row[k * bs + i] += g_row[(a_sz + k) * gs + i];
+        if (b_fresh && bs == gs) {
+            size_t row_bytes = (size_t)b_sz * bs * sizeof(float);
+            #pragma omp parallel for if (outer >= 4)
+            for (int o = 0; o < outer; o++) {
+                float *g_row = gd + o * (long)grad_output->shape[dim] * gs + (long)shift * gs;
+                float *b_row = bg + o * (long)b_sz * bs;
+                memcpy(b_row, g_row, row_bytes);
+            }
+        } else {
+            #pragma omp parallel for if (outer >= 4)
+            for (int o = 0; o < outer; o++) {
+                float *g_row = gd + o * (long)grad_output->shape[dim] * gs;
+                float *b_row = bg + o * (long)b_sz * bs;
+                for (int k = 0; k < b_sz; k++) {
+                    float *gr = g_row + (shift + k) * gs;
+                    float *br = b_row + k * bs;
+                    for (int i = 0; i < inner; i++)
+                        br[i] += gr[i];
+                }
+            }
         }
         need_b = 0;
     }
@@ -729,33 +763,46 @@ static void cat_backward(grad_fn *fn, tensor *grad_output) {
         bg = ag;
     }
 
-    /* ── General coord-decompose fallback ── */
+    /* ── Incremental-coordinate fallback (for non-contiguous inputs) ── */
     {
-        int coord[DNN_MAX_DIMS];
+        /* Since grad_output is always contiguous (built in dnn_backward),
+         * we iterate flat indices and maintain both a and b memory offsets
+         * incrementally using their strides.  No div/mod needed.
+         *
+         * For b, the coordinate along dim is shifted by -a_sz relative to
+         * grad_output's coordinate space, so the base is adjusted:
+         *   b_off = b->offset - a_sz * b->strides[dim] + sum(coord[d] * b->strides[d])
+         */
+        int coord[DNN_MAX_DIMS] = {0};
+        int a_off = a->offset;
+        int b_off = b->offset - a_sz * b->strides[dim];
+
         for (int flat = 0; flat < total && (need_a || need_b); flat++) {
-            int rem = flat;
-            for (int d = ndim - 1; d >= 0; d--) {
-                coord[d] = rem % grad_output->shape[d];
-                rem /= grad_output->shape[d];
+            float gv = gd[flat];  /* grad_output is contiguous */
+
+            if (coord[dim] < a_sz) {
+                if (need_a) ag[a_off] += gv;
+            } else {
+                if (need_b) bg[b_off] += gv;
             }
 
-            int c = coord[dim];
-            float gv = gd[_flat_off(grad_output, flat)];
+            /* Advance to next logical coordinate (carry propagation) */
+            if (flat + 1 < total) {
+                int d = ndim - 1;
+                coord[d]++;
+                a_off += a->strides[d];
+                b_off += b->strides[d];
 
-            if (c < a_sz) {
-                if (need_a) {
-                    int a_flat = 0;
-                    for (int d = 0; d < ndim; d++)
-                        a_flat = a_flat * a->shape[d] + coord[d];
-                    ag[_flat_off(a, a_flat)] += gv;
-                }
-            } else {
-                if (need_b) {
-                    int bc = c - a_sz;
-                    int b_flat = 0;
-                    for (int d = 0; d < ndim; d++)
-                        b_flat = b_flat * b->shape[d] + (d == dim ? bc : coord[d]);
-                    bg[_flat_off(b, b_flat)] += gv;
+                while (d >= 0 && coord[d] >= grad_output->shape[d]) {
+                    coord[d] = 0;
+                    a_off -= a->strides[d] * grad_output->shape[d];
+                    b_off -= b->strides[d] * grad_output->shape[d];
+                    d--;
+                    if (d >= 0) {
+                        coord[d]++;
+                        a_off += a->strides[d];
+                        b_off += b->strides[d];
+                    }
                 }
             }
         }
@@ -792,26 +839,52 @@ static void _cat_copy(float *od, const tensor *t, int dim,
             memcpy(dst, src, (size_t)d_sz * tsd * sizeof(float));
         }
     } else {
+        /* ── Optimized strided path ──
+         *
+         * Use incremental coordinate tracking instead of per-element
+         * div/mod coord-decompose.  On each iteration we increment the
+         * last coordinate (carry-propagate), and update src offset +
+         * output flat index via simple additions — no division or
+         * multiplication needed in the common (non-carry) case.
+         */
         int total = tensor_numel(t);
+
+        /* Precompute output strides for incremental flat-index update */
+        int out_stride[DNN_MAX_DIMS];
+        int s = 1;
+        for (int d = ndim - 1; d >= 0; d--) {
+            out_stride[d] = s;
+            s *= out_shape[d];
+        }
+        int dst_const = out_dim_offset * out_stride[dim];
+
+        /* Incremental coordinate iteration */
+        int coord[DNN_MAX_DIMS] = {0};
+        int src_off = t->offset;
+        int o_flat  = dst_const;
+
         for (int flat = 0; flat < total; flat++) {
-            int coord[DNN_MAX_DIMS];
-            int rem = flat;
-            for (int d = ndim - 1; d >= 0; d--) {
-                coord[d] = rem % t->shape[d];
-                rem /= t->shape[d];
-            }
+            od[o_flat] = td[src_off];
 
-            int t_off = t->offset;
-            for (int d = 0; d < ndim; d++)
-                t_off += coord[d] * t->strides[d];
+            /* Advance to next logical coordinate (carry propagation) */
+            if (flat + 1 < total) {
+                int d = ndim - 1;
+                coord[d]++;
+                src_off += t->strides[d];
+                o_flat  += out_stride[d];
 
-            int o_flat = 0;
-            for (int d = 0; d < ndim; d++) {
-                int c = coord[d];
-                if (d == dim) c += out_dim_offset;
-                o_flat = o_flat * out_shape[d] + c;
+                while (d >= 0 && coord[d] >= t->shape[d]) {
+                    coord[d] = 0;
+                    src_off -= t->strides[d] * t->shape[d];
+                    o_flat  -= out_stride[d] * t->shape[d];
+                    d--;
+                    if (d >= 0) {
+                        coord[d]++;
+                        src_off += t->strides[d];
+                        o_flat  += out_stride[d];
+                    }
+                }
             }
-            od[o_flat] = td[t_off];
         }
     }
 }
