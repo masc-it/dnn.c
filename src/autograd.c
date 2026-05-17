@@ -52,64 +52,55 @@ float *_grad_ensure(tensor *t) {
 
 /* ── Backward ── */
 
-static int _in_list(tensor *t, tensor **list, int n) {
-    for (int i = 0; i < n; i++) if (list[i] == t) return 1;
+typedef struct tensor_vec {
+    tensor          **data;
+    int              n;
+    int              cap;
+    struct mem_pool *pool;
+} tensor_vec;
+
+static int _vec_contains(const tensor_vec *v, tensor *t) {
+    for (int i = 0; i < v->n; i++) if (v->data[i] == t) return 1;
     return 0;
 }
 
-/* Count reachable grad_fn nodes via DFS. Uses scratch-allocated seen array. */
-static int _count_reachable(tensor *t, tensor **seen, int *n_seen) {
-    if (!t->grad_fn) return 0;
-    if (_in_list(t, seen, *n_seen)) return 0;
-    seen[(*n_seen)++] = t;
-    int count = 1;
-    for (int i = 0; i < t->grad_fn->n_inputs; i++)
-        count += _count_reachable(t->grad_fn->inputs[i], seen, n_seen);
-    for (int i = 0; i < t->grad_fn->n_inputs; i++) {
-        tensor *p = t->grad_fn->inputs[i];
-        while (p->parent) {
-            p = p->parent;
-            if (p->grad_fn && !_in_list(p, seen, *n_seen))
-                count += _count_reachable(p, seen, n_seen);
-        }
+static void _vec_push(tensor_vec *v, tensor *t) {
+    if (v->n == v->cap) {
+        int new_cap = v->cap ? v->cap * 2 : 256;
+        tensor **new_data = _mem_pool_alloc(v->pool, (size_t)new_cap * sizeof(tensor*), NULL);
+        if (v->data)
+            memcpy(new_data, v->data, (size_t)v->n * sizeof(tensor*));
+        v->data = new_data;
+        v->cap = new_cap;
     }
-    return count;
+    v->data[v->n++] = t;
 }
 
-static void _build_topo_from(tensor *t, tensor **topo, int *n,
-                              tensor **seen, int *n_seen) {
+static void _build_topo_from(tensor *t, tensor_vec *topo, tensor_vec *seen) {
     if (!t->grad_fn) return;
-    if (_in_list(t, seen, *n_seen)) return;
-    seen[(*n_seen)++] = t;
+    if (_vec_contains(seen, t)) return;
+    _vec_push(seen, t);
 
     for (int i = 0; i < t->grad_fn->n_inputs; i++)
-        _build_topo_from(t->grad_fn->inputs[i], topo, n, seen, n_seen);
+        _build_topo_from(t->grad_fn->inputs[i], topo, seen);
 
     for (int i = 0; i < t->grad_fn->n_inputs; i++) {
         tensor *p = t->grad_fn->inputs[i];
         while (p->parent) {
             p = p->parent;
-            if (p->grad_fn && !_in_list(p, seen, *n_seen))
-                _build_topo_from(p, topo, n, seen, n_seen);
+            _build_topo_from(p, topo, seen);
         }
     }
 
-    topo[(*n)++] = t;
+    _vec_push(topo, t);
 }
 
 void dnn_backward(struct mem_pool *scratch, tensor *loss) {
     assert(loss);
 
-    /* First pass: count reachable grad_fn nodes */
-    tensor **tmp = _mem_pool_alloc(scratch, 256 * sizeof(tensor*), NULL);
-    int n_tmp = 0;
-    int n_nodes = _count_reachable(loss, tmp, &n_tmp);
-
-    tensor **topo = _mem_pool_alloc(scratch, n_nodes * sizeof(tensor*), NULL);
-    tensor **seen = _mem_pool_alloc(scratch, 256 * sizeof(tensor*), NULL);
-    int n_seen = 0, n = 0;
-    _build_topo_from(loss, topo, &n, seen, &n_seen);
-    assert(n == n_nodes && "dnn_backward: topo count mismatch");
+    tensor_vec topo = { .data = NULL, .n = 0, .cap = 0, .pool = scratch };
+    tensor_vec seen = { .data = NULL, .n = 0, .cap = 0, .pool = scratch };
+    _build_topo_from(loss, &topo, &seen);
 
     /* allocate and set loss gradient to all-ones */
     if (!loss->grad) {
@@ -119,8 +110,8 @@ void dnn_backward(struct mem_pool *scratch, tensor *loss) {
     for (int i = 0; i < numel; i++) loss->grad[i] = 1.0f;
 
     /* reverse topological order */
-    for (int i = n - 1; i >= 0; i--) {
-        tensor *t = topo[i];
+    for (int i = topo.n - 1; i >= 0; i--) {
+        tensor *t = topo.data[i];
         grad_fn *fn = t->grad_fn;
         if (!fn) continue;
         if (!t->grad) continue;
