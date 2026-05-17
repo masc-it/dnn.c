@@ -25,7 +25,7 @@ static tensor *make_int_tensor(int ndim, const int *shape) {
     int n = 1;
     for (int i = 0; i < ndim; i++) n *= shape[i];
     tensor *t = tensor_zeros_data(ctx.data, ndim, shape);
-    for (int i = 0; i < n; i++) ((int*)t->data)[i] = rand() % 100;
+    for (int i = 0; i < n; i++) ((int*)t->data)[i] = dnn_rng_uniform_int(dnn_get_rng(), 100);
     return t;
 }
 
@@ -64,7 +64,7 @@ int main(void) {
 
     dnn_ctx_init(&ctx, param_pool_sz, scratch_pool_sz, data_pool_sz);
 
-    srand(42);
+    dnn_seed(42);
 
     /* ── Create model ── */
     decoder_lm *lm = decoder_lm_create(ctx.params, vocab, d_model, n_layers, n_heads,

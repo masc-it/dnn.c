@@ -5,6 +5,7 @@
 #include "broadcast.h"
 #include "ops_activation_int.h"
 #include "simd.h"
+#include "rng.h"
 #include <stdlib.h>
 #include <assert.h>
 #include <string.h>
@@ -1463,7 +1464,7 @@ tensor *tensor_dropout(struct mem_pool *scratch, const tensor *t, float p) {
     if (tensor_is_contiguous(t)) {
         float *tp = td + t->offset;
         for (int i = 0; i < n; i++) {
-            mask[i] = ((float)rand() / (float)RAND_MAX) >= p ? 1 : 0;
+            mask[i] = dnn_rng_uniform(dnn_get_rng()) >= p ? 1 : 0;
             od[i]   = (float)mask[i] * tp[i] * scale;
         }
     } else {
@@ -1474,7 +1475,7 @@ tensor *tensor_dropout(struct mem_pool *scratch, const tensor *t, float p) {
                 coord[d] = r % t->shape[d];
                 r /= t->shape[d];
             }
-            mask[i] = ((float)rand() / (float)RAND_MAX) >= p ? 1 : 0;
+            mask[i] = dnn_rng_uniform(dnn_get_rng()) >= p ? 1 : 0;
             od[i]   = (float)mask[i] * td[_bcast_off(t, ndim, coord)] * scale;
         }
     }

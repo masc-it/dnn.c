@@ -13,7 +13,7 @@
 /* Fisher-Yates shuffle in-place */
 static void shuffle_int(int *arr, int n) {
     for (int i = n - 1; i > 0; i--) {
-        int j = rand() % (i + 1);
+        int j = dnn_rng_uniform_int(dnn_get_rng(), i + 1);
         int t  = arr[i]; arr[i] = arr[j]; arr[j] = t;
     }
 }

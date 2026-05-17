@@ -239,10 +239,10 @@ static void verify_accuracy(void) {
     printf("\n## Accuracy verification (simd_expf vs libm expf)\n");
 
 #if DNN_HAVE_NEON
-    srand(42);
+    dnn_seed(42);
     double max_rel_err = 0.0;
     for (int i = 0; i < 10000; i++) {
-        float x = (float)rand() / (float)RAND_MAX * 174.0f - 87.0f;
+        float x = dnn_rng_uniform(dnn_get_rng()) * 174.0f - 87.0f;
         float32x4_t vx = vdupq_n_f32(x);
         float simd_val = vgetq_lane_f32(simd_expf_f32(vx), 0);
         float ref_val  = expf(x);
@@ -286,10 +286,10 @@ static void run_kernel_benchmarks(void) {
     float *row      = malloc((size_t)ROW_C * sizeof(float));
     float *out_row  = malloc((size_t)ROW_C * sizeof(float));
 
-    srand(42);
-    for (int i = 0; i < N; i++)          in[i] = (float)rand() / RAND_MAX * 4.0f - 2.0f;
-    for (int i = 0; i < N; i++)          grad_out[i] = (float)rand() / RAND_MAX * 2.0f - 1.0f;
-    for (int i = 0; i < ROW_C; i++)      row[i] = (float)rand() / RAND_MAX * 10.0f - 5.0f;
+    dnn_seed(42);
+    for (int i = 0; i < N; i++)          in[i] = dnn_rng_uniform(dnn_get_rng()) * 4.0f - 2.0f;
+    for (int i = 0; i < N; i++)          grad_out[i] = dnn_rng_uniform(dnn_get_rng()) * 2.0f - 1.0f;
+    for (int i = 0; i < ROW_C; i++)      row[i] = dnn_rng_uniform(dnn_get_rng()) * 10.0f - 5.0f;
 
     typedef struct {
         const char *name;
@@ -391,7 +391,7 @@ static tensor *do_xent(tensor *x, bench_ctx *c) {
     if (!c->target) {
         int N = tensor_shape(x, 0);
         int *td = malloc((size_t)N * sizeof(int));
-        for (int i = 0; i < N; i++) td[i] = rand() % tensor_shape(x, 1);
+        for (int i = 0; i < N; i++) td[i] = dnn_rng_uniform_int(dnn_get_rng(), tensor_shape(x, 1));
         c->target = malloc(sizeof(tensor));
         memset(c->target, 0, sizeof(tensor));
         c->target->ndim = 1;
@@ -425,7 +425,7 @@ static tensor *do_add(tensor *x, bench_ctx *c) {
     int n = tensor_numel(x);
     if (!c->extra) {
         float *d = malloc((size_t)n * sizeof(float));
-        for (int i = 0; i < n; i++) d[i] = (float)rand() / RAND_MAX;
+        for (int i = 0; i < n; i++) d[i] = dnn_rng_uniform(dnn_get_rng());
         c->extra = malloc(sizeof(tensor));
         memset(c->extra, 0, sizeof(tensor));
         c->extra->ndim = tensor_ndim(x);
@@ -445,7 +445,7 @@ static tensor *do_mul(tensor *x, bench_ctx *c) {
     if (!c->extra) {
         int n = tensor_numel(x);
         float *d = malloc((size_t)n * sizeof(float));
-        for (int i = 0; i < n; i++) d[i] = (float)rand() / RAND_MAX;
+        for (int i = 0; i < n; i++) d[i] = dnn_rng_uniform(dnn_get_rng());
         c->extra = malloc(sizeof(tensor));
         memset(c->extra, 0, sizeof(tensor));
         c->extra->ndim = tensor_ndim(x);

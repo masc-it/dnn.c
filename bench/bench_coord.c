@@ -11,6 +11,7 @@
 #include <string.h>
 #include <time.h>
 #include <math.h>
+#include "rng.h"
 
 static dnn_ctx ctx;
 
@@ -50,7 +51,7 @@ static mock_tensor make_mock(int ndim, const int *shape) {
     t.offset = 0;
     t.contiguous = 1;
     t.data = malloc(s * sizeof(float));
-    for (int i = 0; i < s; i++) t.data[i] = (float)rand() / RAND_MAX;
+    for (int i = 0; i < s; i++) t.data[i] = dnn_rng_uniform(dnn_get_rng());
     return t;
 }
 

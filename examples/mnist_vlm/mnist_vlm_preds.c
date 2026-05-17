@@ -88,7 +88,7 @@ int main(void) {
     dnn_ctx_init(&ctx, 16*1024*1024, 64*1024*1024, 4*1024*1024);
 
     /* ── Create VLM with same config ── */
-    srand(time(NULL));
+    dnn_seed((uint64_t)time(NULL));
     vision_lm *vlm = vision_lm_create(ctx.params, VOCAB, D_MODEL,
                                        N_LAYERS, N_HEADS, D_K, INTERMEDIATE,
                                        1, IMG_ROWS, IMG_COLS, PATCH_SIZE, 1);
@@ -105,7 +105,7 @@ int main(void) {
         if (ch == EOF) break;
 
         int indices[10];
-        for (int i = 0; i < 10; i++) indices[i] = rand() % n_test;
+        for (int i = 0; i < 10; i++) indices[i] = dnn_rng_uniform_int(dnn_get_rng(), n_test);
 
         dnn_grad_ctx ng = dnn_no_grad_enter();
         printf("\n");

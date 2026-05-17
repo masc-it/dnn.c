@@ -1,4 +1,5 @@
 #include "vlm.h"
+#include "rng.h"
 #include "gpt.h"
 #include "ops.h"
 #include "pool.h"
@@ -11,14 +12,6 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
-
-/* ── Box-Muller normal random (duplicated from gpt.c for VLM weight init) ── */
-
-static float _randn(void) {
-    float u1 = (float)rand() / (float)RAND_MAX;
-    float u2 = (float)rand() / (float)RAND_MAX;
-    return sqrtf(-2.0f * logf(u1 + 1e-10f)) * cosf(6.283185307179586f * u2);
-}
 
 /* ══════════════════════════════════════════════════════════════════
  *  Constructor
@@ -105,7 +98,7 @@ void vision_lm_init_weights(vision_lm *vlm) {
         int nw = tensor_numel(w);
         float *wd = tensor_data_ptr(w);
         for (int i = 0; i < nw; i++)
-            wd[i] = _randn() * std;
+            wd[i] = dnn_rng_normal(dnn_get_rng()) * std;
 
         /* Zero bias */
         tensor *b = vlm->patch_embed->bias;
@@ -118,7 +111,7 @@ void vision_lm_init_weights(vision_lm *vlm) {
         int np = tensor_numel(vlm->image_pos);
         float *pd = tensor_data_ptr(vlm->image_pos);
         for (int i = 0; i < np; i++)
-            pd[i] = _randn() * 0.02f;
+            pd[i] = dnn_rng_normal(dnn_get_rng()) * 0.02f;
     }
 }
 

@@ -24,7 +24,7 @@ int main(void) {
            N_LAYERS, D_MODEL, N_HEADS);
 
     /* set seed for reproducibility */
-    srand(42);
+    dnn_seed(42);
 
     decoder_lm *lm = decoder_lm_create(ctx.params, VOCAB_SIZE, D_MODEL, N_LAYERS,
                                         N_HEADS, D_K, INTERMEDIATE);

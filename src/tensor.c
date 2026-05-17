@@ -1,4 +1,5 @@
 #include "tensor.h"
+#include "rng.h"
 #include "autograd_int.h"
 #include <stdlib.h>
 #include <string.h>
@@ -143,13 +144,9 @@ tensor *tensor_randn(struct mem_pool *pool, int ndim, const int *shape, int requ
     int n = tensor_numel_(shape, ndim);
     float *p = (float*)t->data;
     for (int i = 0; i < n; i += 2) {
-        float u1 = (float)rand() / (float)RAND_MAX;
-        float u2 = (float)rand() / (float)RAND_MAX;
-        float r = sqrtf(-2.0f * logf(u1 + 1e-10f));
-        float theta = 6.283185307179586f * u2;  /* 2*pi */
-        p[i] = r * cosf(theta);
+        p[i] = dnn_rng_normal(dnn_get_rng());
         if (i + 1 < n)
-            p[i + 1] = r * sinf(theta);
+            p[i + 1] = dnn_rng_normal(dnn_get_rng());
     }
     return t;
 }
@@ -159,8 +156,7 @@ tensor *tensor_uniform(struct mem_pool *pool, int ndim, const int *shape, int re
     int n = tensor_numel_(shape, ndim);
     float *p = (float*)t->data;
     for (int i = 0; i < n; i++) {
-        float u = (float)rand() / (float)RAND_MAX;  /* [0, 1) */
-        p[i] = (2.0f * u - 1.0f) * bound;           /* [-bound, bound) */
+        p[i] = (2.0f * dnn_rng_uniform(dnn_get_rng()) - 1.0f) * bound;  /* [-bound, bound) */
     }
     return t;
 }

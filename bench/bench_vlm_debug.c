@@ -20,7 +20,7 @@ int main(void) {
     int H_ = pp * patch, W_ = pp * patch;
 
     dnn_ctx_init(&ctx, 64*1024*1024, 512*1024*1024, 32*1024*1024);
-    srand(0);
+    dnn_seed(0);
 
     printf("Creating VLM...\n");
     vision_lm *vlm = vision_lm_create(ctx.params, 261, d_model, n_layers,

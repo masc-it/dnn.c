@@ -131,7 +131,7 @@ static void mkdir_p(const char *path) {
 
 static void shuffle_int(int *arr, int n) {
     for (int i = n - 1; i > 0; i--) {
-        int j = rand() % (i + 1);
+        int j = dnn_rng_uniform_int(dnn_get_rng(), i + 1);
         int t = arr[i]; arr[i] = arr[j]; arr[j] = t;
     }
 }
@@ -275,7 +275,7 @@ int main(void) {
     /* ── Create VLM ── */
     printf("Creating VLM (D=%d, L=%d, H=%d, d_k=%d, FF=%d)...\n",
            D_MODEL, N_LAYERS, N_HEADS, D_K, INTERMEDIATE);
-    srand(42);
+    dnn_seed(42);
 
     vision_lm *vlm = vision_lm_create(ctx.params, VOCAB, D_MODEL,
                                        N_LAYERS, N_HEADS, D_K, INTERMEDIATE,
@@ -405,8 +405,8 @@ int main(void) {
 
         /* 2 random validation samples */
         {
-            int s1 = tr_n + rand() % VAL_N;
-            int s2 = tr_n + rand() % VAL_N;
+            int s1 = tr_n + dnn_rng_uniform_int(dnn_get_rng(), VAL_N);
+            int s2 = tr_n + dnn_rng_uniform_int(dnn_get_rng(), VAL_N);
             dnn_grad_ctx ng = dnn_no_grad_enter();
             eval_print_sample(ctx.scratch, ctx.data, vlm,
                               train_img, train_lbl[s1], s1);

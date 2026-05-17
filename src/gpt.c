@@ -1,4 +1,5 @@
 #include "gpt.h"
+#include "rng.h"
 #include "rope.h"      /* tensor_rope_freqs_init */
 #include "ops.h"       /* tensor_cross_entropy */
 #include "pool.h"      /* mem_pool_reset / mark / release */
@@ -242,7 +243,7 @@ int decoder_lm_sample_with_temp(const float *logits, int vocab_size, float temp)
         sum += expf(logits[i] * inv_temp - mx);
     }
 
-    float r = (float)rand() / (float)RAND_MAX;
+    float r = dnn_rng_uniform(dnn_get_rng());
     float cum = 0.0f;
     for (int i = 0; i < vocab_size; i++) {
         cum += expf(logits[i] * inv_temp - mx) / sum;
@@ -427,21 +428,12 @@ long long decoder_lm_num_parameters(decoder_lm *lm) {
 
 /* ── Weight initialization (GPT-2 style) ── */
 
-/* Box-Muller normal random sample */
-static float _randn(void) {
-    float u1 = (float)rand() / (float)RAND_MAX;
-    float u2 = (float)rand() / (float)RAND_MAX;
-    return sqrtf(-2.0f * logf(u1 + 1e-10f)) * cosf(6.283185307179586f * u2);
-}
-
-
-
 static void _init_linear(linear *l, float std) {
     /* Weight may be NULL (tied lm_head) — skip. Bias always init. */
     if (l->weight && tensor_is_contiguous(l->weight)) {
         int nw = tensor_numel(l->weight);
         float *wd = tensor_data_ptr(l->weight);
-        for (int i = 0; i < nw; i++) wd[i] = _randn() * std;
+        for (int i = 0; i < nw; i++) wd[i] = dnn_rng_normal(dnn_get_rng()) * std;
     }
     memset(tensor_data_ptr(l->bias), 0, (size_t)tensor_numel(l->bias) * sizeof(float));
 }
@@ -474,7 +466,7 @@ void decoder_lm_init_weights(decoder_lm *lm) {
     /* Embedding table: Normal(0, std) */
     int ne = tensor_numel(lm->embed->weight);
     float *ed = tensor_data_ptr(lm->embed->weight);
-    for (int i = 0; i < ne; i++) ed[i] = _randn() * std;
+    for (int i = 0; i < ne; i++) ed[i] = dnn_rng_normal(dnn_get_rng()) * std;
 
     /* Walk all children recursively — inits all linears (weight + bias).
        lm_head weight is a tied view of embed->weight (already inited),

@@ -13,6 +13,7 @@
 #include "optim.h"
 #include "attention.h"
 #include "multihead.h"
+#include "rng.h"
 #include "rope.h"
 #include "tokenizer.h"
 #include "transformer.h"

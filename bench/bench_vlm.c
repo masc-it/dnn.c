@@ -30,7 +30,7 @@ static void bench_one(const char *label, int I, int T,
     int H_ = pp * patch, W_ = ((I + pp - 1) / pp) * patch;
 
     dnn_ctx_init(&ctx, 128*1024*1024, 512*1024*1024, 64*1024*1024);
-    srand(0);
+    dnn_seed(0);
 
     vision_lm *vlm = vision_lm_create(ctx.params, vocab, d_model, n_layers,
                                        n_heads, d_k, intermediate,
@@ -46,7 +46,7 @@ static void bench_one(const char *label, int I, int T,
     }
 
     int txt_ids[256];
-    for (int i = 0; i < T; i++) txt_ids[i] = rand() % vocab;
+    for (int i = 0; i < T; i++) txt_ids[i] = dnn_rng_uniform_int(dnn_get_rng(), vocab);
     tensor *text_ids = tensor_zeros_data(ctx.data, 2, (int[]){1, T});
     memcpy(tensor_data_ptr(text_ids), txt_ids, T * sizeof(int));
 

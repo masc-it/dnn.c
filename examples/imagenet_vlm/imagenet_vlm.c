@@ -206,7 +206,7 @@ static void show_preds(struct mem_pool *scratch, struct mem_pool *data,
     int saved_order[take];
     for (int i = 0; i < take; i++) {
         saved_order[i] = dl->shuffle_order[i];
-        dl->shuffle_order[i] = rand() % dl->total_samples;
+        dl->shuffle_order[i] = dnn_rng_uniform_int(dnn_get_rng(), dl->total_samples);
     }
     dl->pos = 0;
 
@@ -567,7 +567,7 @@ int main(int argc, char **argv) {
         printf("Val:   (none)\n");
 
     /* ── Create VLM ── */
-    srand(42);
+    dnn_seed(42);
     vision_lm *vlm = vision_lm_create(ctx.params, VOCAB_SIZE, D_MODEL,
                                        N_LAYERS, N_HEADS, D_K, INTERMEDIATE,
                                        IMG_C, IMG_H, IMG_W, PATCH_SIZE, 1);

@@ -42,7 +42,7 @@ static void bench_config(int B, int H, int N, int d, int warmup, int iters) {
     dnn_ctx_init(&ctx, param_sz, scratch_sz, data_sz);
 
     /* Create random Q, K, V */
-    srand(123);
+    dnn_seed(123);
     tensor *q = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
     tensor *k = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
     tensor *v = tensor_randn(ctx.params, 4, (int[]){B, H, N, d}, 1);
