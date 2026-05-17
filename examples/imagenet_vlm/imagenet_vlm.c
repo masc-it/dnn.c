@@ -20,11 +20,12 @@
 #include <sys/param.h>
 
 /* ── Config ── */
-#define IMG_H           224
-#define IMG_W           224
+#define IMG_H            64
+#define IMG_W            64
 #define IMG_C             3
 #define PATCH_SIZE       16
-#define N_IMG_TOK       196
+#define N_IMG_TOK        16
+#define PATCH_DIM       (IMG_C * PATCH_SIZE * PATCH_SIZE)
 
 #define D_MODEL         256
 #define N_LAYERS          2
@@ -125,8 +126,8 @@ static float eval_full_string(struct mem_pool *scratch, struct mem_pool *data,
     const int BS = 10;
     while (total < max_n) {
         int take = max_n - total < BS ? max_n - total : BS;
-        tensor *img = tensor_zeros_data(data, 4,
-                                        (int[]){take, IMG_C, IMG_H, IMG_W});
+        tensor *img = tensor_zeros_data(data, 3,
+                                        (int[]){take, N_IMG_TOK, PATCH_DIM});
         tensor *inp = tensor_zeros_data(data, 2, (int[]){take, IMAGENET_MAX_TEXT_LEN});
         tensor *tgt = tensor_zeros_data(data, 2, (int[]){take, IMAGENET_MAX_TEXT_LEN});
         tensor *msk = tensor_scratch(scratch, 2, (int[]){take, IMAGENET_MAX_TEXT_LEN}, 0);
@@ -211,8 +212,8 @@ static void show_preds(struct mem_pool *scratch, struct mem_pool *data,
     dl->pos = 0;
 
     int T_pred = IMAGENET_MAX_TEXT_LEN;
-    tensor *img = tensor_zeros_data(data, 4,
-                                  (int[]){take, IMG_C, IMG_H, IMG_W});
+    tensor *img = tensor_zeros_data(data, 3,
+                                  (int[]){take, N_IMG_TOK, PATCH_DIM});
     tensor *inp = tensor_zeros_data(data, 2, (int[]){take, T_pred});
     tensor *tgt = tensor_zeros_data(data, 2, (int[]){take, T_pred});
     tensor *msk = tensor_scratch(scratch, 2, (int[]){take, T_pred}, 0);
@@ -459,8 +460,8 @@ static int eval_real_blank_ce(struct mem_pool *scratch, struct mem_pool *data,
     dnn_grad_ctx ng = dnn_no_grad_enter();
     while (total < max_n) {
         int take = max_n - total < VAL_CE_PROBE_BS ? max_n - total : VAL_CE_PROBE_BS;
-        tensor *img = tensor_zeros_data(data, 4,
-                                        (int[]){take, IMG_C, IMG_H, IMG_W});
+        tensor *img = tensor_zeros_data(data, 3,
+                                        (int[]){take, N_IMG_TOK, PATCH_DIM});
         tensor *inp = tensor_zeros_data(data, 2, (int[]){take, IMAGENET_MAX_TEXT_LEN});
         tensor *tgt = tensor_zeros_data(data, 2, (int[]){take, IMAGENET_MAX_TEXT_LEN});
         tensor *msk = tensor_zeros_data(data, 2, (int[]){take, IMAGENET_MAX_TEXT_LEN});
@@ -494,8 +495,8 @@ static int eval_real_blank_ce(struct mem_pool *scratch, struct mem_pool *data,
         float real_lv = tensor_data_ptr(loss_real)[0];
         mem_pool_reset(scratch);
 
-        tensor *blank = tensor_zeros_data(data, 4,
-                                          (int[]){take, IMG_C, IMG_H, IMG_W});
+        tensor *blank = tensor_zeros_data(data, 3,
+                                          (int[]){take, N_IMG_TOK, PATCH_DIM});
         tensor *loss_blank = vision_lm_loss_padded(scratch, vlm, blank, inp, tgt, msk, tl);
         float blank_lv = tensor_data_ptr(loss_blank)[0];
 
@@ -633,8 +634,8 @@ int main(int argc, char **argv) {
             int take = remaining < BATCH_SIZE ? remaining : BATCH_SIZE;
             if (take <= 0) break;
 
-            tensor *img = tensor_scratch(ctx.scratch, 4,
-                                          (int[]){take, IMG_C, IMG_H, IMG_W}, 0);
+            tensor *img = tensor_scratch(ctx.scratch, 3,
+                                          (int[]){take, N_IMG_TOK, PATCH_DIM}, 0);
             tensor *input_ids = tensor_zeros_data(ctx.data, 2,
                                                    (int[]){take, TRAIN_T});
             tensor *target_ids = tensor_zeros_data(ctx.data, 2,

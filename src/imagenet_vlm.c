@@ -131,7 +131,7 @@ imagenet_vlm_dl *imagenet_vlm_dl_create(const char *split,
         imagenet_shard_header hdr;
         if (fread(&hdr, sizeof(hdr), 1, f) != 1
             || hdr.magic != IMAGENET_MAGIC
-            || (hdr.version != 1 && hdr.version != 2)
+            || (hdr.version != 1 && hdr.version != 2 && hdr.version != 3)
             || hdr.shard_idx != (int32_t)s
             || hdr.num_shards != (int32_t)max_idx
             || hdr.num_samples <= 0)
@@ -429,7 +429,7 @@ int imagenet_vlm_dl_next_batch(imagenet_vlm_dl *dl,
 
     int bs_actual = 0;
     int H = dl->H, W = dl->W, C = dl->C;
-    int px_bytes = dl->sample_pixel_bytes;
+    int px_elems = dl->sample_pixel_bytes;
     int T_max = input_ids->shape[1];
 
     for (; bs_actual < bs && dl->pos < dl->total_samples; bs_actual++, dl->pos++) {
@@ -450,15 +450,20 @@ int imagenet_vlm_dl_next_batch(imagenet_vlm_dl *dl,
         const int32_t *sample_hdr = (const int32_t *)(dl->buffer + sample_off);
         const int32_t *txt = sample_hdr + 2;
 
-        /* Skip caption field (version >= 2): caption_len(int32) follows text_ids. */
+        /* Skip caption field (version >= 2): caption_len(int32) follows text_ids.
+         * Version 3 stores normalized float32 patches instead of uint8 pixels. */
         int32_t cap_len = 0;
+        const uint8_t *image_payload;
         if (dl->current_shard_version >= 2) {
             cap_len = *(const int32_t *)(txt + stored_len);
+            if (cap_len < 0) return -1;
+            image_payload = (const uint8_t *)(txt + stored_len + 1) + cap_len;
+        } else {
+            image_payload = (const uint8_t *)(txt + stored_len);
         }
-        const uint8_t *pixels = (const uint8_t *)(txt + stored_len + 1) + cap_len;
 
-        /* Validate sample fits in buffer (accounting for optional caption) */
-        long expected_size = 8 + (long)stored_len * 4 + px_bytes;
+        long image_bytes = (long)px_elems * (dl->current_shard_version >= 3 ? (long)sizeof(float) : 1L);
+        long expected_size = 8 + (long)stored_len * 4 + image_bytes;
         if (dl->current_shard_version >= 2)
             expected_size += 4 + cap_len;
         if (sample_off + expected_size > dl->buffer_bytes)
@@ -483,8 +488,20 @@ int imagenet_vlm_dl_next_batch(imagenet_vlm_dl *dl,
         for (int t = stored_len; t < T_max; t++) lm_row[t] = 0.0f;
 
         float *img_row = tensor_data_ptr(img) + (long)bs_actual * img->strides[0];
-        int flip = dl->shuffle ? (int)(xorshift64(&dl->rng_state) & 1) : 0;
-        convert_pixels(img_row, pixels, H, W, C, dl->mean, dl->std, flip);
+        if (dl->current_shard_version >= 3) {
+            int p = IMAGENET_PATCH_SIZE;
+            if (H % p != 0 || W % p != 0) return -1;
+            int n_patches = (H / p) * (W / p);
+            int patch_dim = C * p * p;
+            if (img->ndim != 3 || img->shape[1] != n_patches || img->shape[2] != patch_dim)
+                return -1;
+            memcpy(img_row, image_payload, (size_t)n_patches * (size_t)patch_dim * sizeof(float));
+        } else {
+            if (img->ndim != 4 || img->shape[1] != C || img->shape[2] != H || img->shape[3] != W)
+                return -1;
+            int flip = dl->shuffle ? (int)(xorshift64(&dl->rng_state) & 1) : 0;
+            convert_pixels(img_row, image_payload, H, W, C, dl->mean, dl->std, flip);
+        }
     }
 
     return bs_actual;

@@ -144,13 +144,27 @@ tensor *vision_lm_image_embeds(struct mem_pool *scratch,
                                vision_lm *vlm,
                                const tensor *images) {
     assert(vlm && images);
-    assert(images->ndim == 4 && "images must be 4D [B, C, H, W]");
-    assert(images->shape[1] == vlm->image_channels);
-    assert(images->shape[2] == vlm->image_h);
-    assert(images->shape[3] == vlm->image_w);
     assert(tensor_is_contiguous(images) && "images must be contiguous");
 
     int B = images->shape[0];
+
+    if (images->ndim == 3) {
+        int patch_dim = vlm->image_channels * vlm->patch_size * vlm->patch_size;
+        assert(images->shape[1] == vlm->n_img_tokens && "patch count mismatch");
+        assert(images->shape[2] == patch_dim && "patch dim mismatch");
+
+        /* Pre-patched image input: [B, I, C*P*P].  Reuse conv2d weights as a
+         * linear patch projection by flattening [D,C,P,P] -> [D,C*P*P] and
+         * computing patches @ W^T + bias. */
+        tensor *w = tensor_reshape(scratch, vlm->patch_embed->weight, 2,
+                                   (int[]){vlm->d_model, patch_dim});
+        return tensor_matmul_add(scratch, images, w, 1, vlm->patch_embed->bias);
+    }
+
+    assert(images->ndim == 4 && "images must be 4D [B, C, H, W] or 3D [B, patches, patch_dim]");
+    assert(images->shape[1] == vlm->image_channels);
+    assert(images->shape[2] == vlm->image_h);
+    assert(images->shape[3] == vlm->image_w);
 
     /* Conv2d: [B, C, H, W] -> [B, D, Hp, Wp] */
     tensor *x = conv2d_forward(scratch, vlm->patch_embed, images);
@@ -423,11 +437,17 @@ int *vision_lm_generate(struct mem_pool *scratch_pool,
                         int use_cache,
                         int *n_out) {
     assert(vlm && image && prompt_ids);
-    assert(image->ndim == 4 && "image must be 4D [1, C, H, W]");
+    assert((image->ndim == 4 || image->ndim == 3) && "image must be 4D [1,C,H,W] or 3D [1,patches,patch_dim]");
     assert(image->shape[0] == 1 && "only batch=1 supported");
-    assert(image->shape[1] == vlm->image_channels);
-    assert(image->shape[2] == vlm->image_h);
-    assert(image->shape[3] == vlm->image_w);
+    if (image->ndim == 4) {
+        assert(image->shape[1] == vlm->image_channels);
+        assert(image->shape[2] == vlm->image_h);
+        assert(image->shape[3] == vlm->image_w);
+    } else {
+        int patch_dim = vlm->image_channels * vlm->patch_size * vlm->patch_size;
+        assert(image->shape[1] == vlm->n_img_tokens);
+        assert(image->shape[2] == patch_dim);
+    }
     assert(prompt_ids->ndim == 2 && "prompt_ids must be 2D [1, T]");
     assert(prompt_ids->shape[0] == 1 && "only batch=1 supported");
     assert(prompt_ids->contiguous && "prompt_ids must be contiguous");

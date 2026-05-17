@@ -21,6 +21,7 @@
 
 #define IMAGENET_MEAN          {0.485f, 0.456f, 0.406f}
 #define IMAGENET_STD           {0.229f, 0.224f, 0.225f}
+#define IMAGENET_PATCH_SIZE    16
 
 /* ══════════════════════════════════════════════════════════════════
  *  On-disk types
@@ -51,7 +52,7 @@ typedef struct __attribute__((packed)) {
 typedef struct imagenet_vlm_dl {
     /* Image geometry (from shard headers) */
     int H, W, C;
-    int sample_pixel_bytes;     /* H * W * C */
+    int sample_pixel_bytes;     /* H * W * C elements (bytes for v1/v2, floats for v3) */
 
     /* Shard info */
     int      num_shards;
@@ -123,7 +124,8 @@ void imagenet_vlm_dl_bucket(imagenet_vlm_dl *dl,
 
 /* Fills batch tensors from next samples in shuffle_order[].
  *
- *   img        — [bs, C, H, W] float32 NCHW (scratch pool)
+ *   img        — v1/v2: [bs, C, H, W] float32 NCHW (scratch pool)
+ *                v3:    [bs, num_patches, patch_dim] normalized float32 patches
  *   input_ids  — [bs, T_batch] int32 (data pool, pre-filled zeros)
  *   target_ids — [bs, T_batch] int32 (data pool, pre-filled zeros)
  *   loss_mask  — [bs, T_batch] float32 (scratch pool)

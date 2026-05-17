@@ -10,7 +10,7 @@
 
 /* ── Vision-Language Model (prefix-LM decoder-only VLM) ──
  *
- * Architecture: image patch embedding → [B,I,D] + text token embeds [B,T,D]
+ * Architecture: image patch embedding/projection → [B,I,D] + text token embeds [B,T,D]
  *   → concat to [B,I+T,D] → decoder-only GPT blocks (prefix-LM attention)
  *   → norm → tied lm_head → logits [B,I+T,vocab_size]
  *
@@ -82,7 +82,8 @@ long long vision_lm_num_parameters(vision_lm *vlm);
 
 /* ── Image patch embedding forward ──
  *
- *   images: [B, C, H, W] float, contiguous
+ *   images: [B, C, H, W] float, contiguous, or
+ *           [B, n_img_tokens, C*patch_size*patch_size] normalized patches.
  *   Returns: [B, n_img_tokens, d_model]
  */
 tensor *vision_lm_image_embeds(struct mem_pool *scratch,

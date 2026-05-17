@@ -17,8 +17,8 @@ Usage:
         --split train \
         --num-workers 8
 
-Output format (version 2, with caption):
-  [64B shard header]     version=2
+Output format (version 3, with caption + normalized patches):
+  [64B shard header]     version=3, H=W=64, C=3
   [body — tightly packed, NO padding]
     Each sample:
       [int32]  label               (0-999)
@@ -26,7 +26,8 @@ Output format (version 2, with caption):
       [int32 × text_len] text_ids  (byte tokens of class name + EOS)
       [int32]  caption_len         (bytes in caption string, 0 = none)
       [uint8 × caption_len] caption_bytes (raw UTF-8 bytes, NO EOS)
-      [uint8 × H×W×C]  pixels     (NHWC row-major)
+      [float32 × NUM_PATCHES × PATCH_DIM] normalized patches
+        shape [16, 768] for 64×64 RGB with 16×16 patches.
 """
 import argparse, json, os, re, struct, gc
 from multiprocessing import Pool, cpu_count
@@ -38,9 +39,15 @@ PngImagePlugin.MAX_TEXT_CHUNK = 1024 * 1024  # 1MB
 from tqdm import tqdm
 import io
 
-TARGET_H = TARGET_W = 224
+TARGET_H = TARGET_W = 64
+PATCH_SIZE = 16
+NUM_PATCHES = (TARGET_H // PATCH_SIZE) * (TARGET_W // PATCH_SIZE)
+PATCH_DIM = 3 * PATCH_SIZE * PATCH_SIZE
+RESIZE_SHORT = round(TARGET_H * 256 / 224)
+IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 EOS_ID = 258
-SHARD_VERSION = 2
+SHARD_VERSION = 3
 IDX_ENTRY_BYTES = 20
 SHARD_NAME_RE = re.compile(r"^(?P<split>.+)-(?P<idx>\d{5})-of-(?P<total>\d{5})\.(?P<ext>bin|idx)$")
 
@@ -59,20 +66,30 @@ def process_sample(args):
         if img_pil.mode != "RGB":
             img_pil = img_pil.convert("RGB")
         
-        # Resize short edge to 256
+        # Resize short edge to ImageNet-style 256/224 scale, then center crop to 64x64.
         w, h = img_pil.size
         s = min(w, h)
-        scale = 256.0 / s
+        scale = float(RESIZE_SHORT) / s
         new_w, new_h = int(w * scale), int(h * scale)
         img_pil = img_pil.resize((new_w, new_h), Image.BICUBIC)
         
-        # Center crop to 224x224
         left = (new_w - TARGET_W) // 2
         top  = (new_h - TARGET_H) // 2
         img_pil = img_pil.crop((left, top, left + TARGET_W, top + TARGET_H))
         
-        # Pixels as NHWC uint8 bytes
-        pixels = np.array(img_pil, dtype=np.uint8).tobytes()
+        # Normalize in Python and store patch vectors directly.
+        # Patch vector order is C-major within each 16x16 patch, matching flattened
+        # conv weight layout [out, C, kH, kW] used by C as a linear projection.
+        img = np.asarray(img_pil, dtype=np.float32) * (1.0 / 255.0)  # HWC
+        img = (img - IMAGENET_MEAN) / IMAGENET_STD
+        chw = np.transpose(img, (2, 0, 1))  # C,H,W
+        patches = (
+            chw.reshape(3, TARGET_H // PATCH_SIZE, PATCH_SIZE, TARGET_W // PATCH_SIZE, PATCH_SIZE)
+               .transpose(1, 3, 0, 2, 4)
+               .reshape(NUM_PATCHES, PATCH_DIM)
+               .astype("<f4", copy=False)
+        )
+        patch_bytes = patches.tobytes()
         
         # Build class label: byte tokens + EOS
         label_bytes = label_name.encode("ascii")
@@ -83,14 +100,14 @@ def process_sample(args):
         cap_encoded = caption_text.encode("utf-8") if caption_text else b""
         cap_len = len(cap_encoded)
         
-        # Pack: label + text_len + text_ids + cap_len + cap_bytes + pixels
+        # Pack: label + text_len + text_ids + cap_len + cap_bytes + normalized patches
         blob = (
             struct.pack("<i", label_id)
             + struct.pack("<i", text_len)
             + struct.pack(f"<{text_len}i", *text_ids)
             + struct.pack("<i", cap_len)
             + cap_encoded
-            + pixels
+            + patch_bytes
         )
         
         return (raw_pos, blob, label_id, text_len, cap_len)
