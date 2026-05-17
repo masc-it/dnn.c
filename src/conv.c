@@ -166,6 +166,84 @@ static void col2im(const float *dcol, float *dx,
 }
 
 /* ══════════════════════════════════════════════════════════════════
+ *  im2col / col2im — stride==kernel fast path (no overlap, no padding)
+ *
+ *  When stride == kH == kW && pad == 0, every output position reads from
+ *  a unique non-overlapping patch.  No zero-padding, no bounds checks.
+ *  col layout (K, M) is identical to the general path so GEMM is shared.
+ *
+ *  col2im is also simpler: each dcol element maps 1:1 to one dx position
+ *  (no accumulation scatter needed).
+ * ══════════════════════════════════════════════════════════════════ */
+
+static void im2col_strided_no_pad(const float *x, float *col,
+                                   int N, int C, int H, int W,
+                                   int kH, int kW, int stride) {
+    int H_out = H / stride;
+    int W_out = W / stride;
+    int M     = N * H_out * W_out;
+
+#pragma omp parallel for
+    for (int n = 0; n < N; n++) {
+        int n_off = n * H_out * W_out;
+        for (int c = 0; c < C; c++) {
+            int k_c = c * kH * kW;
+            for (int kh = 0; kh < kH; kh++) {
+                int k_kh = k_c + kh * kW;
+                for (int oh = 0; oh < H_out; oh++) {
+                    int ih = oh * stride + kh;
+                    const float *x_row = x + ((size_t)n * C + c) * H * W
+                                          + (size_t)ih * W;
+                    int m_base = n_off + oh * W_out;
+
+                    for (int kw = 0; kw < kW; kw++) {
+                        int k = k_kh + kw;
+                        float *cp = col + (size_t)k * M + m_base;
+                        const float *xp = x_row + kw;
+                        cp[0] = xp[0];
+                        for (int ow = 1; ow < W_out; ow++)
+                            cp[ow] = *(xp += stride);
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void col2im_strided_no_pad(const float *dcol, float *dx,
+                                   int N, int C, int H, int W,
+                                   int kH, int kW, int stride) {
+    int H_out = H / stride;
+    int W_out = W / stride;
+    int M     = N * H_out * W_out;
+
+    /* No overlap — each dcol entry writes to exactly one dx position.
+     * dx is zeroed before entry, so `+=` is equivalent to `=` here. */
+#pragma omp parallel for
+    for (int n = 0; n < N; n++) {
+        for (int c = 0; c < C; c++) {
+            for (int kh = 0; kh < kH; kh++) {
+                for (int oh = 0; oh < H_out; oh++) {
+                    int ih = oh * stride + kh;
+                    float *dx_row = dx + ((size_t)n * C + c) * H * W
+                                     + (size_t)ih * W;
+                    int m_base = (n * H_out + oh) * W_out;
+
+                    for (int kw = 0; kw < kW; kw++) {
+                        int k = (c * kH + kh) * kW + kw;
+                        const float *dc = dcol + (size_t)k * M + m_base;
+                        float *dxp = dx_row + kw;
+                        dxp[0] += dc[0];
+                        for (int ow = 1; ow < W_out; ow++)
+                            *(dxp += stride) += dc[ow];
+                    }
+                }
+            }
+        }
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════════
  *  Winograd F(2×2, 3×3) — replaces im2col+GEMM for stride=1, pad=1
  *
  *  Transforms:
@@ -401,12 +479,16 @@ static void conv2d_backward(grad_fn *fn, tensor *grad_output) {
         float *dcol = _mem_pool_alloc(fn->pool, (size_t)K * M * sizeof(float), NULL);
 
         /* dcol(K,M) = wd^T(K,out_C) @ gd^T(out_C,M)
-         *   Each row k of dcol is independent: sum_oc wd[oc][k] * gd[:,oc].
-         *   Parallelize over kernel elements — each thread writes one row.
+         *
+         *  Single sgemm replaces K separate sgemv calls (BLAS launch overhead ~5µs each).
+         *
+         *  wd stored as (out_C, K) row-major.  With CblasTrans: op(A)=wd^T has dims (K,out_C).
+         *  gd stored as (M, out_C) row-major.  With CblasTrans: op(B)=gd^T has dims (out_C,M).
+         *  Result: dcol(K, M) = A^T(K,out_C) @ B^T(out_C,M).
          */
+#if NO_CBLAS
 #pragma omp parallel for
         for (int k = 0; k < K; k++) {
-#if NO_CBLAS
             float *dcol_row = dcol + (size_t)k * M;
             for (int m = 0; m < M; m++) {
                 float sum = 0.0f;
@@ -415,19 +497,21 @@ static void conv2d_backward(grad_fn *fn, tensor *grad_output) {
                          * wd[(size_t)oc * K + k];
                 dcol_row[m] = sum;
             }
-#else
-            /* y(M) = gd(M,out_C) @ wd_col_k(out_C,)  — sgemv NoTrans
-             *   gd: M×out_C, lda=out_C
-             *   wd[:,k]: out_C elements, stride=K
-             *   y: M elements, stride=1
-             */
-            cblas_sgemv(CblasRowMajor, CblasNoTrans,
-                        M, out_C, 1.0f, gd, out_C, wd + k, K,
-                        0.0f, dcol + (size_t)k * M, 1);
-#endif
         }
+#else
+        cblas_sgemm(CblasRowMajor, CblasTrans, CblasTrans,
+                    K, M, out_C,
+                    1.0f, wd, K,
+                    gd, out_C,
+                    0.0f, dcol, M);
+#endif
 
-        col2im(dcol, xg, N, C, H, W, kH, kW, pad, stride);
+        /* Simplified col2im when stride==kernel (no overlap scatter).
+         * General col2im otherwise. */
+        if (kH == stride && kW == stride && pad == 0)
+            col2im_strided_no_pad(dcol, xg, N, C, H, W, kH, kW, stride);
+        else
+            col2im(dcol, xg, N, C, H, W, kH, kW, pad, stride);
 
         mem_pool_release(fn->pool, _dcm);
     }
@@ -744,7 +828,11 @@ tensor *tensor_conv2d(struct mem_pool *scratch, tensor *input, tensor *weight, t
         size_t _fcm = mem_pool_mark(scratch);
         float *col = _mem_pool_alloc(scratch, (size_t)K * M * sizeof(float), NULL);
 
-        im2col(xd, col, N, C, H, W, kH, kW, pad, stride);
+        /* Fast path: stride==kernel, pad==0 — no overlap, no bounds checks */
+        if (kH == stride && kW == stride && pad == 0)
+            im2col_strided_no_pad(xd, col, N, C, H, W, kH, kW, stride);
+        else
+            im2col(xd, col, N, C, H, W, kH, kW, pad, stride);
 
         /* Disable nested OMP before BLAS sections: each thread calls threaded BLAS */
         int _prev_omp_level = omp_get_max_active_levels();
