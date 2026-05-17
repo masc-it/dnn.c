@@ -137,6 +137,10 @@ tensor *tensor_sum(struct mem_pool *scratch, const tensor *t, int dim) {
 
 tensor *tensor_mean(struct mem_pool *scratch, const tensor *t, int dim) {
     assert(t);
+    int ndim = t->ndim;
+    if (dim < 0) dim += ndim;
+    assert(dim >= 0 && dim < ndim && "tensor_mean: dim out of range");
+
     float inv_n = 1.0f / (float)t->shape[dim];
 
     /* sum then scale: mean = sum(t, dim) * (1/n) */
