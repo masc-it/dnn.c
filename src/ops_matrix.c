@@ -513,90 +513,131 @@ static void matmul_add_backward(grad_fn *fn, tensor *grad_output) {
             float *bd = (float*)b->data;
             float *gd = (float*)grad_output->data;
             int a_s0 = a->strides[0], a_s1 = a->strides[1];
-            int g_s0 = grad_output->strides[0];
-            int a_off = a->offset;
-            (void)a_s1;
+            int b_s0 = b->strides[0], b_s1 = b->strides[1];
+            int g_s0 = grad_output->strides[0], g_s1 = grad_output->strides[1];
+            int a_off = a->offset, b_off = b->offset, g_off = grad_output->offset;
+            int a_contig = tensor_is_contiguous(a);
+            int b_contig = tensor_is_contiguous(b);
+            int g_contig = tensor_is_contiguous(grad_output);
 
             if (a->grad_fn || a->requires_grad) {
                 float *ag = _grad_ensure(a);
                 if (trans_b) {
-                    /* da = grad @ b  — CblasNoTrans on both */
-                    int ld_g = tensor_is_contiguous(grad_output) ? N : g_s0;
-                    int ld_b = tensor_is_contiguous(b) ? K : b->strides[0];
-                    int ld_a = tensor_is_contiguous(a) ? K : a_s0;
+                    /* da = grad @ b  — (M,K) = (M,N) @ (N,K) */
 #if NO_CBLAS
                     for (int i = 0; i < M; i++)
                         for (int k = 0; k < K; k++) {
                             float sum = 0.0f;
                             for (int j = 0; j < N; j++)
-                                sum += gd[i * ld_g + j] * bd[j * ld_b + k];
-                            ag[a_off + i * ld_a + k] += sum;
+                                sum += gd[g_off + i * g_s0 + j * g_s1]
+                                     * bd[b_off + j * b_s0 + k * b_s1];
+                            ag[a_off + i * a_s0 + k * a_s1] += sum;
                         }
 #else
-                    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
-                                M, K, N, 1.0f, gd, ld_g,
-                                bd, ld_b,
-                                1.0f, ag + a_off, ld_a);
+                    if (a_contig && b_contig && g_contig) {
+                        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasNoTrans,
+                                    M, K, N, 1.0f, gd + g_off, g_s0,
+                                    bd + b_off, b_s0,
+                                    1.0f, ag + a_off, a_s0);
+                    } else {
+                        for (int i = 0; i < M; i++)
+                            for (int k = 0; k < K; k++) {
+                                float sum = 0.0f;
+                                for (int j = 0; j < N; j++)
+                                    sum += gd[g_off + i * g_s0 + j * g_s1]
+                                         * bd[b_off + j * b_s0 + k * b_s1];
+                                ag[a_off + i * a_s0 + k * a_s1] += sum;
+                            }
+                    }
 #endif
                 } else {
-                    /* da = grad @ b^T — CblasTrans on b */
-                    int b_off = b->offset;
-                    int b_s0 = b->strides[0];
+                    /* da = grad @ b^T — (M,K) = (M,N) @ (N,K) */
 #if NO_CBLAS
                     for (int i = 0; i < M; i++)
                         for (int k = 0; k < K; k++) {
                             float sum = 0.0f;
                             for (int j = 0; j < N; j++)
-                                sum += gd[i * g_s0 + j] * bd[b_off + k * b_s0 + j];
-                            ag[a_off + i * a_s0 + k] += sum;
+                                sum += gd[g_off + i * g_s0 + j * g_s1]
+                                     * bd[b_off + k * b_s0 + j * b_s1];
+                            ag[a_off + i * a_s0 + k * a_s1] += sum;
                         }
 #else
-                    cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
-                                M, K, N, 1.0f, gd, g_s0,
-                                bd + b_off, b_s0,
-                                1.0f, ag + a_off, a_s0);
+                    if (a_contig && b_contig && g_contig) {
+                        cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
+                                    M, K, N, 1.0f, gd + g_off, g_s0,
+                                    bd + b_off, b_s0,
+                                    1.0f, ag + a_off, a_s0);
+                    } else {
+                        for (int i = 0; i < M; i++)
+                            for (int k = 0; k < K; k++) {
+                                float sum = 0.0f;
+                                for (int j = 0; j < N; j++)
+                                    sum += gd[g_off + i * g_s0 + j * g_s1]
+                                         * bd[b_off + k * b_s0 + j * b_s1];
+                                ag[a_off + i * a_s0 + k * a_s1] += sum;
+                            }
+                    }
 #endif
                 }
             }
 
             if ((b->grad_fn || b->requires_grad) && b != a) {
                 float *bg = _grad_ensure(b);
-                int b_off = b->offset;
                 if (trans_b) {
-                    /* db = grad^T @ a  — CblasTrans on grad, CblasNoTrans on a */
-                    int ld_g = tensor_is_contiguous(grad_output) ? N : g_s0;
-                    int ld_a = tensor_is_contiguous(a) ? K : a_s0;
-                    int ld_b = tensor_is_contiguous(b) ? K : b->strides[0];
+                    /* db = grad^T @ a — (N,K) = (N,M) @ (M,K) */
 #if NO_CBLAS
                     for (int j = 0; j < N; j++)
                         for (int k = 0; k < K; k++) {
                             float sum = 0.0f;
                             for (int i = 0; i < M; i++)
-                                sum += gd[i * ld_g + j] * ad[a_off + i * ld_a + k];
-                            bg[b_off + j * ld_b + k] += sum;
+                                sum += gd[g_off + i * g_s0 + j * g_s1]
+                                     * ad[a_off + i * a_s0 + k * a_s1];
+                            bg[b_off + j * b_s0 + k * b_s1] += sum;
                         }
 #else
-                    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                                N, K, M, 1.0f, gd, ld_g,
-                                ad + a_off, ld_a,
-                                1.0f, bg + b_off, ld_b);
+                    if (a_contig && b_contig && g_contig) {
+                        cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                                    N, K, M, 1.0f, gd + g_off, g_s0,
+                                    ad + a_off, a_s0,
+                                    1.0f, bg + b_off, b_s0);
+                    } else {
+                        for (int j = 0; j < N; j++)
+                            for (int k = 0; k < K; k++) {
+                                float sum = 0.0f;
+                                for (int i = 0; i < M; i++)
+                                    sum += gd[g_off + i * g_s0 + j * g_s1]
+                                         * ad[a_off + i * a_s0 + k * a_s1];
+                                bg[b_off + j * b_s0 + k * b_s1] += sum;
+                            }
+                    }
 #endif
                 } else {
-                    /* db = a^T @ grad  — CblasTrans on a, CblasNoTrans on grad */
-                    int b_s0 = b->strides[0];
+                    /* db = a^T @ grad — (K,N) = (K,M) @ (M,N) */
 #if NO_CBLAS
                     for (int k = 0; k < K; k++)
                         for (int j = 0; j < N; j++) {
                             float sum = 0.0f;
                             for (int i = 0; i < M; i++)
-                                sum += ad[a_off + i * a_s0 + k] * gd[i * g_s0 + j];
-                            bg[b_off + k * b_s0 + j] += sum;
+                                sum += ad[a_off + i * a_s0 + k * a_s1]
+                                     * gd[g_off + i * g_s0 + j * g_s1];
+                            bg[b_off + k * b_s0 + j * b_s1] += sum;
                         }
 #else
-                    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                                K, N, M, 1.0f, ad + a_off, a_s0,
-                                gd, g_s0,
-                                1.0f, bg + b_off, b_s0);
+                    if (a_contig && b_contig && g_contig) {
+                        cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                                    K, N, M, 1.0f, ad + a_off, a_s0,
+                                    gd + g_off, g_s0,
+                                    1.0f, bg + b_off, b_s0);
+                    } else {
+                        for (int k = 0; k < K; k++)
+                            for (int j = 0; j < N; j++) {
+                                float sum = 0.0f;
+                                for (int i = 0; i < M; i++)
+                                    sum += ad[a_off + i * a_s0 + k * a_s1]
+                                         * gd[g_off + i * g_s0 + j * g_s1];
+                                bg[b_off + k * b_s0 + j * b_s1] += sum;
+                            }
+                    }
 #endif
                 }
             }
@@ -604,39 +645,60 @@ static void matmul_add_backward(grad_fn *fn, tensor *grad_output) {
             if (a == b && (a->grad_fn || a->requires_grad)) {
                 float *ag = _grad_ensure(a);
                 if (trans_b) {
-                    int ld_g = tensor_is_contiguous(grad_output) ? N : g_s0;
-                    int ld_a = tensor_is_contiguous(a) ? K : a_s0;
+                    /* second term for shared input: db = grad^T @ a */
 #if NO_CBLAS
                     for (int j = 0; j < N; j++)
                         for (int k = 0; k < K; k++) {
                             float sum = 0.0f;
                             for (int i = 0; i < M; i++)
-                                sum += gd[i * ld_g + j] * ad[a_off + i * ld_a + k];
-                            ag[a_off + j * ld_a + k] += sum;
+                                sum += gd[g_off + i * g_s0 + j * g_s1]
+                                     * ad[a_off + i * a_s0 + k * a_s1];
+                            ag[a_off + j * a_s0 + k * a_s1] += sum;
                         }
 #else
-                    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                                N, K, M, 1.0f, gd, ld_g,
-                                ad + a_off, ld_a,
-                                1.0f, ag + a_off, ld_a);
+                    if (a_contig && g_contig) {
+                        cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                                    N, K, M, 1.0f, gd + g_off, g_s0,
+                                    ad + a_off, a_s0,
+                                    1.0f, ag + a_off, a_s0);
+                    } else {
+                        for (int j = 0; j < N; j++)
+                            for (int k = 0; k < K; k++) {
+                                float sum = 0.0f;
+                                for (int i = 0; i < M; i++)
+                                    sum += gd[g_off + i * g_s0 + j * g_s1]
+                                         * ad[a_off + i * a_s0 + k * a_s1];
+                                ag[a_off + j * a_s0 + k * a_s1] += sum;
+                            }
+                    }
 #endif
                 } else {
+                    /* second term for shared input: db = a^T @ grad */
 #if NO_CBLAS
-                    int b_s0 = b->strides[0];
-                    int b_off = b->offset;
-                    (void)b_s0; (void)b_off;
                     for (int k = 0; k < K; k++)
                         for (int j = 0; j < N; j++) {
                             float sum = 0.0f;
                             for (int i = 0; i < M; i++)
-                                sum += ad[a_off + i * a_s0 + k] * gd[i * g_s0 + j];
-                            ag[a_off + k * a_s0 + j] += sum;
+                                sum += ad[a_off + i * a_s0 + k * a_s1]
+                                     * gd[g_off + i * g_s0 + j * g_s1];
+                            ag[a_off + k * a_s0 + j * a_s1] += sum;
                         }
 #else
-                    cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
-                                K, N, M, 1.0f, ad + a_off, a_s0,
-                                gd, g_s0,
-                                1.0f, ag + a_off, a_s0);
+                    if (a_contig && g_contig) {
+                        cblas_sgemm(CblasRowMajor, CblasTrans, CblasNoTrans,
+                                    K, N, M, 1.0f, ad + a_off, a_s0,
+                                    gd + g_off, g_s0,
+                                    1.0f, ag + a_off, a_s0);
+                    } else {
+                        for (int k = 0; k < K; k++)
+                            for (int j = 0; j < N; j++) {
+                                float sum = 0.0f;
+                                for (int i = 0; i < M; i++)
+                                    sum += ad[a_off + i * a_s0 + k * a_s1]
+                                         * gd[g_off + i * g_s0 + j * g_s1];
+                                ag[a_off + k * a_s0 + j * a_s1] += sum;
+                            }
+                    }
 #endif
                 }
             }
@@ -930,30 +992,30 @@ tensor *tensor_matmul_add(struct mem_pool *scratch, const tensor *a,
 
         if (trans_b) {
             /* a @ b^T  where b is [N, K] */
-            int b_row_stride = b->strides[0];
+            int b_s0 = b->strides[0], b_s1 = b->strides[1];
             int b_off = b->offset;
 #if NO_CBLAS
             for (int i = 0; i < M; i++)
                 for (int j = 0; j < N; j++) {
                     float sum = 0.0f;
                     for (int k = 0; k < K; k++)
-                        sum += ad[a_off + i * a_s0 + k]
-                             * bd[b_off + j * b_row_stride + k];
+                        sum += ad[a_off + i * a_s0 + k * a_s1]
+                             * bd[b_off + j * b_s0 + k * b_s1];
                     od[out->offset + i * N + j] = sum + bdata[j];
                 }
 #else
             if (tensor_is_contiguous(a) && tensor_is_contiguous(b)) {
                 cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans,
                             M, N, K, 1.0f, ad + a_off, a_s0,
-                            bd + b_off, b_row_stride,
+                            bd + b_off, b_s0,
                             0.0f, od, N);
             } else {
                 for (int i = 0; i < M; i++)
                     for (int j = 0; j < N; j++) {
                         float sum = 0.0f;
                         for (int k = 0; k < K; k++)
-                            sum += ad[a_off + i * a_s0 + k]
-                                 * bd[b_off + j * b_row_stride + k];
+                            sum += ad[a_off + i * a_s0 + k * a_s1]
+                                 * bd[b_off + j * b_s0 + k * b_s1];
                         od[out->offset + i * N + j] = sum;
                     }
             }
