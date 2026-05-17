@@ -2,7 +2,7 @@
  *  imagenet_vlm — train VLM on ImageNet-1k
  *
  *  Treats classification as label-text generation with byte-level
- *  tokenizer, prefix-LM attention, bucketed padded batches.
+ *  tokenizer, prefix-LM attention, shuffled padded batches.
  * ══════════════════════════════════════════════════════════════════ */
 
 #include "dnn.h"
@@ -39,16 +39,15 @@
 #define MIN_LR          5e-5f
 #define GRAD_CLIP        5.0f
 #define WARMUP_EPOCHS     2
+#define PATCH_LR_MULT    3.0f
+#define VAL_CE_PROBE_EVERY 100
+#define VAL_CE_PROBE_N      64
+#define VAL_CE_PROBE_BS     16
 
-#define N_BUCKETS         4
-/* bucket_limits are exclusive upper bounds on text_lens (stored + BOS).
- * T per bucket must be >= bucket_limit - 1.
- * Longest synset name: 121 bytes + EOS = 122 stored; +BOS = 123.
- * Bucket 3 T=128 covers all. */
-#define BUCKET_LIMITS    {33, 65, 97, 129}
-#define BUCKET_T         {32, 64, 96, 128}
-
-static const int BUCKET_TMAX[N_BUCKETS] = BUCKET_T;
+/* Single padded sequence length. No bucketing: every shuffled batch uses
+ * IMAGENET_MAX_TEXT_LEN, masks out pad positions, and preserves sample order
+ * produced by the dataloader shuffle. */
+#define TRAIN_T          IMAGENET_MAX_TEXT_LEN
 
 /* ══════════════════════════════════════════════════════════════════
  *  eval_full_string — validation via full autoregressive label decode
@@ -284,6 +283,271 @@ static void show_preds(struct mem_pool *scratch, struct mem_pool *data,
 }
 
 /* ══════════════════════════════════════════════════════════════════
+ *  Training instrumentation helpers
+ * ══════════════════════════════════════════════════════════════════ */
+
+#define MAX_NAMED_PARAMS 256
+#define PARAM_NAME_MAX   256
+
+typedef struct {
+    char name[PARAM_NAME_MAX];
+    tensor *param;
+} named_param;
+
+typedef enum {
+    PG_PATCH = 0,
+    PG_IMG_NORM,
+    PG_IMG_POS,
+    PG_TOK_EMBED,
+    PG_BLOCKS,
+    PG_LM_NORM,
+    PG_LM_HEAD,
+    PG_OTHER,
+    PG_COUNT
+} param_group_id;
+
+typedef struct {
+    double grad_sq;
+    double weight_sq;
+    double update_sq;
+    long long n_params;
+} param_group_stat;
+
+static const char *PG_NAME[PG_COUNT] = {
+    "patch", "img_norm", "img_pos", "tok_emb", "blocks", "lm_norm", "lm_head", "other"
+};
+
+static int starts_with(const char *s, const char *prefix) {
+    size_t n = strlen(prefix);
+    return strncmp(s, prefix, n) == 0;
+}
+
+static param_group_id param_group_for_name(const char *name) {
+    if (starts_with(name, "patch_embed.")) return PG_PATCH;
+    if (starts_with(name, "image_norm.")) return PG_IMG_NORM;
+    if (strcmp(name, "image_pos") == 0) return PG_IMG_POS;
+    if (starts_with(name, "lm.embed.")) return PG_TOK_EMBED;
+    if (starts_with(name, "lm.blocks.")) return PG_BLOCKS;
+    if (starts_with(name, "lm.norm.")) return PG_LM_NORM;
+    if (starts_with(name, "lm.lm_head.")) return PG_LM_HEAD;
+    return PG_OTHER;
+}
+
+static void collect_named_params_rec(module *m, const char *prefix,
+                                      named_param *out, int max_out, int *n_out) {
+    for (module_item *item = m->items_head; item && *n_out < max_out; item = item->next) {
+        if (item->kind == MODULE_ITEM_PARAM) {
+            snprintf(out[*n_out].name, sizeof(out[*n_out].name), "%s%s", prefix, item->name);
+            out[*n_out].param = item->as.param;
+            (*n_out)++;
+        } else if (item->kind == MODULE_ITEM_CHILD) {
+            char child_prefix[PARAM_NAME_MAX];
+            snprintf(child_prefix, sizeof(child_prefix), "%s%s.", prefix, item->name);
+            collect_named_params_rec(item->as.child, child_prefix, out, max_out, n_out);
+        }
+    }
+}
+
+static int collect_named_params(module *m, named_param *out, int max_out) {
+    int n = 0;
+    collect_named_params_rec(m, "", out, max_out, &n);
+    return n;
+}
+
+static void reset_group_stats(param_group_stat st[PG_COUNT]) {
+    memset(st, 0, PG_COUNT * sizeof(param_group_stat));
+}
+
+static void collect_grad_weight_stats(named_param *params, int n_params,
+                                      param_group_stat st[PG_COUNT]) {
+    reset_group_stats(st);
+    for (int i = 0; i < n_params; i++) {
+        tensor *p = params[i].param;
+        int n = tensor_numel(p);
+        float *wd = tensor_data_ptr(p);
+        float *gd = tensor_grad(p);
+        param_group_id gid = param_group_for_name(params[i].name);
+        st[gid].n_params += n;
+        for (int j = 0; j < n; j++) {
+            double w = wd[j];
+            st[gid].weight_sq += w * w;
+            if (gd) {
+                double g = gd[j];
+                st[gid].grad_sq += g * g;
+            }
+        }
+    }
+}
+
+static long long total_param_numel(named_param *params, int n_params) {
+    long long total = 0;
+    for (int i = 0; i < n_params; i++) total += tensor_numel(params[i].param);
+    return total;
+}
+
+static float *snapshot_params(named_param *params, int n_params, long long *n_out) {
+    long long total = total_param_numel(params, n_params);
+    float *snap = malloc((size_t)total * sizeof(float));
+    if (!snap) { *n_out = 0; return NULL; }
+    long long off = 0;
+    for (int i = 0; i < n_params; i++) {
+        tensor *p = params[i].param;
+        int n = tensor_numel(p);
+        memcpy(snap + off, tensor_data_ptr(p), (size_t)n * sizeof(float));
+        off += n;
+    }
+    *n_out = total;
+    return snap;
+}
+
+static void collect_update_stats(named_param *params, int n_params,
+                                 const float *snap,
+                                 param_group_stat st[PG_COUNT]) {
+    long long off = 0;
+    for (int i = 0; i < n_params; i++) {
+        tensor *p = params[i].param;
+        int n = tensor_numel(p);
+        float *wd = tensor_data_ptr(p);
+        param_group_id gid = param_group_for_name(params[i].name);
+        for (int j = 0; j < n; j++) {
+            double d = (double)wd[j] - (double)snap[off + j];
+            st[gid].update_sq += d * d;
+        }
+        off += n;
+    }
+}
+
+static void batch_token_stats(const tensor *loss_mask, const int *text_lens, int B,
+                              int *tok_out, float *mean_len_out,
+                              int *min_len_out, int *max_len_out) {
+    int T = loss_mask->shape[1];
+    float *md = tensor_data_ptr((tensor *)loss_mask);
+    int tok = 0, min_len = text_lens[0], max_len = text_lens[0];
+    double sum_len = 0.0;
+    for (int b = 0; b < B; b++) {
+        int tl = text_lens[b];
+        if (tl < min_len) min_len = tl;
+        if (tl > max_len) max_len = tl;
+        sum_len += tl;
+        for (int t = 0; t < T; t++)
+            if (md[(long)b * loss_mask->strides[0] + t * loss_mask->strides[1]] != 0.0f)
+                tok++;
+    }
+    *tok_out = tok;
+    *mean_len_out = (float)(sum_len / (double)B);
+    *min_len_out = min_len;
+    *max_len_out = max_len;
+}
+
+static void print_group_stat(param_group_stat st[PG_COUNT], param_group_id gid) {
+    double w = sqrt(st[gid].weight_sq);
+    double u = sqrt(st[gid].update_sq);
+    double uw = (w > 0.0) ? u / w : 0.0;
+    double grms = (st[gid].n_params > 0)
+                ? sqrt(st[gid].grad_sq / (double)st[gid].n_params)
+                : 0.0;
+    printf("%s grms=%.2e u/w=%.2e", PG_NAME[gid], grms, uw);
+}
+
+static void print_key_group_stats(param_group_stat st[PG_COUNT]) {
+    printf("       grp ");
+    print_group_stat(st, PG_PATCH);
+    printf(" | ");
+    print_group_stat(st, PG_IMG_POS);
+    printf(" | ");
+    print_group_stat(st, PG_TOK_EMBED);
+    printf(" | ");
+    print_group_stat(st, PG_BLOCKS);
+    printf("\n");
+}
+
+static int count_mask_tokens(const tensor *loss_mask) {
+    int B = loss_mask->shape[0];
+    int T = loss_mask->shape[1];
+    float *md = tensor_data_ptr((tensor *)loss_mask);
+    int tok = 0;
+    for (int b = 0; b < B; b++)
+        for (int t = 0; t < T; t++)
+            if (md[(long)b * loss_mask->strides[0] + t * loss_mask->strides[1]] != 0.0f)
+                tok++;
+    return tok;
+}
+
+static int eval_real_blank_ce(struct mem_pool *scratch, struct mem_pool *data,
+                              vision_lm *vlm, imagenet_vlm_dl *dl,
+                              int max_n, float *real_ce_out,
+                              float *blank_ce_out) {
+    if (!dl || max_n <= 0) return -1;
+
+    long saved_pos = dl->pos;
+    imagenet_vlm_dl_reset(dl);
+
+    double real_sum = 0.0;
+    double blank_sum = 0.0;
+    int total_tok = 0;
+    int total = 0;
+
+    dnn_grad_ctx ng = dnn_no_grad_enter();
+    while (total < max_n) {
+        int take = max_n - total < VAL_CE_PROBE_BS ? max_n - total : VAL_CE_PROBE_BS;
+        tensor *img = tensor_zeros_data(data, 4,
+                                        (int[]){take, IMG_C, IMG_H, IMG_W});
+        tensor *inp = tensor_zeros_data(data, 2, (int[]){take, IMAGENET_MAX_TEXT_LEN});
+        tensor *tgt = tensor_zeros_data(data, 2, (int[]){take, IMAGENET_MAX_TEXT_LEN});
+        tensor *msk = tensor_zeros_data(data, 2, (int[]){take, IMAGENET_MAX_TEXT_LEN});
+        int tl[take], lbl[take];
+
+        int got = imagenet_vlm_dl_next_batch(dl, img, inp, tgt, msk, tl, lbl, take);
+        (void)lbl;
+        if (got < 0) {
+            mem_pool_reset(scratch);
+            mem_pool_reset(data);
+            dnn_no_grad_exit(ng);
+            dl->pos = saved_pos;
+            return -1;
+        }
+        if (got == 0) {
+            mem_pool_reset(scratch);
+            mem_pool_reset(data);
+            break;
+        }
+        for (int i = got; i < take; i++) tl[i] = 0;
+
+        int tok = count_mask_tokens(msk);
+        if (tok <= 0) {
+            total += got;
+            mem_pool_reset(scratch);
+            mem_pool_reset(data);
+            continue;
+        }
+
+        tensor *loss_real = vision_lm_loss_padded(scratch, vlm, img, inp, tgt, msk, tl);
+        float real_lv = tensor_data_ptr(loss_real)[0];
+        mem_pool_reset(scratch);
+
+        tensor *blank = tensor_zeros_data(data, 4,
+                                          (int[]){take, IMG_C, IMG_H, IMG_W});
+        tensor *loss_blank = vision_lm_loss_padded(scratch, vlm, blank, inp, tgt, msk, tl);
+        float blank_lv = tensor_data_ptr(loss_blank)[0];
+
+        real_sum += (double)real_lv * (double)tok;
+        blank_sum += (double)blank_lv * (double)tok;
+        total_tok += tok;
+        total += got;
+
+        mem_pool_reset(scratch);
+        mem_pool_reset(data);
+    }
+    dnn_no_grad_exit(ng);
+    dl->pos = saved_pos;
+
+    if (total_tok <= 0) return -1;
+    *real_ce_out = (float)(real_sum / (double)total_tok);
+    *blank_ce_out = (float)(blank_sum / (double)total_tok);
+    return total;
+}
+
+/* ══════════════════════════════════════════════════════════════════
  *  Main
  * ══════════════════════════════════════════════════════════════════ */
 
@@ -306,7 +570,7 @@ int main(int argc, char **argv) {
     }
 
     dnn_ctx ctx;
-    dnn_ctx_init(&ctx, 256*1024*1024, 1024*1024*1024, 64*1024*1024);
+    dnn_ctx_init(&ctx, 256*1024*1024, (size_t)4096*1024*1024, 256*1024*1024);
 
     /* ── Dataloaders ── */
     imagenet_vlm_dl *train_dl = imagenet_vlm_dl_create("train", data_dir, 1, 42);
@@ -343,12 +607,35 @@ int main(int argc, char **argv) {
 
     printf("VLM: %.2fM params  patches=%d  layers=%d  D=%d\n",
            vision_lm_num_parameters(vlm) / 1e6, N_IMG_TOK, N_LAYERS, D_MODEL);
+    if (vlm->image_pos)
+        printf("Image pos: enabled\n");
 
     /* ── Optimizer + scheduler ── */
     int n_params;
     tensor **all_params = module_parameters(&vlm->base, &n_params);
     adamw_opt *opt = adamw_create(ctx.params, all_params, n_params, LR,
                                    0.9f, 0.999f, 1e-8f, 1e-4f);
+
+    named_param named_params[MAX_NAMED_PARAMS];
+    int n_named_params = collect_named_params(&vlm->base, named_params, MAX_NAMED_PARAMS);
+    if (n_named_params >= MAX_NAMED_PARAMS)
+        printf("WARNING: instrumentation param list truncated at %d\n", MAX_NAMED_PARAMS);
+    else
+        printf("Instrumentation: %d named params\n", n_named_params);
+
+    float *lr_mults = malloc((size_t)n_params * sizeof(float));
+    if (!lr_mults) { fprintf(stderr, "Failed to allocate LR multipliers\n"); return 1; }
+    for (int i = 0; i < n_params; i++) lr_mults[i] = 1.0f;
+    tensor *patch_w = module_find_param(&vlm->base, "patch_embed.weight");
+    tensor *patch_b = module_find_param(&vlm->base, "patch_embed.bias");
+    int patch_mult_count = 0;
+    for (int i = 0; i < n_params; i++) {
+        if (all_params[i] == patch_w || all_params[i] == patch_b) {
+            lr_mults[i] = PATCH_LR_MULT;
+            patch_mult_count++;
+        }
+    }
+    printf("LR multipliers: patch_embed x%.1f (%d tensors)\n", PATCH_LR_MULT, patch_mult_count);
 
     int n_batches_approx = (imagenet_vlm_dl_total(train_dl) + BATCH_SIZE - 1) / BATCH_SIZE;
     int total_steps = n_batches_approx * MAX_EPOCHS;
@@ -362,36 +649,28 @@ int main(int argc, char **argv) {
     mkdir("ckpt", 0755);
 
     /* ── Training ── */
-    int bucket_limits[] = BUCKET_LIMITS;
-    int bucket_starts[N_BUCKETS + 1];
-
     for (int epoch = 0; epoch < MAX_EPOCHS; epoch++) {
+        vlm->use_image_pos = (vlm->image_pos != NULL);
         imagenet_vlm_dl_shuffle(train_dl);
-        imagenet_vlm_dl_bucket(train_dl, N_BUCKETS, bucket_limits, bucket_starts);
 
         double epoch_loss = 0.0;
         int batch_count = 0;
         struct timespec t0;
         clock_gettime(CLOCK_MONOTONIC, &t0);
 
-        int bucket_id = 0;
-        while (bucket_id < N_BUCKETS) {
-            int lo = bucket_starts[bucket_id];
-            int hi = bucket_starts[bucket_id + 1];
-            int available = hi - lo;
-            if (available <= 0) { bucket_id++; continue; }
-
-            int take = available < BATCH_SIZE ? available : BATCH_SIZE;
-            int T = BUCKET_TMAX[bucket_id];
+        while (1) {
+            int remaining = (int)imagenet_vlm_dl_remaining(train_dl);
+            int take = remaining < BATCH_SIZE ? remaining : BATCH_SIZE;
+            if (take <= 0) break;
 
             tensor *img = tensor_scratch(ctx.scratch, 4,
                                           (int[]){take, IMG_C, IMG_H, IMG_W}, 0);
             tensor *input_ids = tensor_zeros_data(ctx.data, 2,
-                                                   (int[]){take, T});
+                                                   (int[]){take, TRAIN_T});
             tensor *target_ids = tensor_zeros_data(ctx.data, 2,
-                                                    (int[]){take, T});
+                                                    (int[]){take, TRAIN_T});
             tensor *loss_mask = tensor_scratch(ctx.scratch, 2,
-                                                (int[]){take, T}, 0);
+                                                (int[]){take, TRAIN_T}, 0);
             int text_lens[take];
             int label_ids[take];
 
@@ -403,20 +682,49 @@ int main(int argc, char **argv) {
                         (long)train_dl->pos);
                 return 1;
             }
-            if (got == 0) { bucket_id++; continue; }
+            if (got == 0) break;
 
-            float grad_norm;
-            tensor *loss = vision_lm_train_step_padded(ctx.scratch, vlm,
-                                                         img, input_ids,
-                                                         target_ids, loss_mask,
-                                                         text_lens,
-                                                         opt, GRAD_CLIP, &grad_norm);
+            int next_batch = batch_count + 1;
+            int log_now = (next_batch % 10 == 0 || next_batch == 1);
+            int batch_tokens = 0, min_len = 0, max_len = 0;
+            float mean_len = 0.0f;
+            param_group_stat group_stats[PG_COUNT];
+            long long snap_n = 0;
+            float *snap = NULL;
+
+            adamw_zero_grad(opt);
+            tensor *loss = vision_lm_loss_padded(ctx.scratch, vlm,
+                                                  img, input_ids,
+                                                  target_ids, loss_mask,
+                                                  text_lens);
+            dnn_backward(ctx.scratch, loss);
+
+            if (log_now) {
+                batch_token_stats(loss_mask, text_lens, got,
+                                  &batch_tokens, &mean_len, &min_len, &max_len);
+                collect_grad_weight_stats(named_params, n_named_params, group_stats);
+                snap = snapshot_params(named_params, n_named_params, &snap_n);
+            }
+
+            float gn = 0.0f;
+            if (GRAD_CLIP > 0.0f)
+                gn = clip_grad_norm(opt->params, opt->n_params, GRAD_CLIP);
+            else
+                gn = grad_norm(opt->params, opt->n_params);
+
+            adamw_step_with_lr_multipliers(opt, lr_mults);
+            if (log_now && snap) {
+                (void)snap_n;
+                collect_update_stats(named_params, n_named_params, snap, group_stats);
+                free(snap);
+            }
+
             float lv = tensor_data_ptr(loss)[0];
             lr_scheduler_step(sched);
             epoch_loss += lv;
-            batch_count++;
+            batch_count = next_batch;
 
-            if (batch_count % 10 == 0 || batch_count == 1) {
+            if (log_now) {
                 struct timespec now;
                 clock_gettime(CLOCK_MONOTONIC, &now);
                 double elapsed = (now.tv_sec - t0.tv_sec)
@@ -424,11 +732,13 @@ int main(int argc, char **argv) {
                 float cur_lr = lr_scheduler_get_lr(sched);
                 double eta = (elapsed / batch_count)
                            * (n_batches_approx - batch_count);
-                printf("  e%d  batch %4d/%-4d  loss %.6f  lr %.2e  gn %.4e  T=%d  %.1f/s  eta %ds\n",
+                printf("e%d  batch %4d/%-4d  loss %.6f  avg %.6f  lr %.2e  gn %.4e  tok=%d  len=%.1f/%d-%d  %.1f/s  eta %ds\n",
                        epoch + 1, batch_count, n_batches_approx,
-                       epoch_loss / batch_count,
-                       cur_lr, grad_norm, T, batch_count / elapsed,
-                       (int)eta);
+                       lv, epoch_loss / batch_count,
+                       cur_lr, gn,
+                       batch_tokens, mean_len, min_len, max_len,
+                       batch_count / elapsed, (int)eta);
+                print_key_group_stats(group_stats);
             }
             if (batch_count % 500 == 0 && label_names && val_dl) {
                 show_preds(ctx.scratch, ctx.data, vlm, val_dl,
@@ -440,7 +750,17 @@ int main(int argc, char **argv) {
             mem_pool_reset(ctx.scratch);
             mem_pool_reset(ctx.data);
 
-            bucket_starts[bucket_id] += got;
+            if (batch_count % VAL_CE_PROBE_EVERY == 0 && val_dl) {
+                float real_ce = 0.0f, blank_ce = 0.0f;
+                int n_eval = eval_real_blank_ce(ctx.scratch, ctx.data, vlm, val_dl,
+                                                VAL_CE_PROBE_N, &real_ce, &blank_ce);
+                if (n_eval > 0) {
+                    printf("       val_ce n=%d real=%.6f blank=%.6f gap=%.6f\n",
+                           n_eval, real_ce, blank_ce, blank_ce - real_ce);
+                } else {
+                    printf("       val_ce failed\n");
+                }
+            }
         }
 
         struct timespec t1;
@@ -475,6 +795,7 @@ int main(int argc, char **argv) {
         }
     }
 
+    free(lr_mults);
     imagenet_vlm_dl_free(train_dl);
     if (val_dl) imagenet_vlm_dl_free(val_dl);
     if (label_names) {

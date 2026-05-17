@@ -52,6 +52,10 @@ adamw_opt *adamw_create(struct mem_pool *params_pool,
                          float beta1, float beta2, float eps, float weight_decay);
 void       adamw_free(adamw_opt *opt);
 void       adamw_step(adamw_opt *opt);
+/* AdamW step with per-parameter LR multipliers. lr_mults[i] scales opt->lr
+ * for opt->params[i]. Pass 1.0 for normal LR. Weight decay is scaled by the
+ * same effective group LR, matching param-group AdamW semantics. */
+void       adamw_step_with_lr_multipliers(adamw_opt *opt, const float *lr_mults);
 void       adamw_zero_grad(adamw_opt *opt);
 
 /* ── Gradient Clipping ── */

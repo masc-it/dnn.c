@@ -167,7 +167,7 @@ int *vision_lm_generate(struct mem_pool *scratch_pool,
                         int use_cache,
                         int *n_out);
 
-/* ── Padded training step (variable-length batches with optimized attention) ──
+/* ── Padded loss (variable-length batches with optimized attention) ──
  *
  *   images:     [B, C, H, W]
  *   input_ids:  [B, Tmax]  (padded with TOKENIZER_PAD_ID)
@@ -175,7 +175,20 @@ int *vision_lm_generate(struct mem_pool *scratch_pool,
  *   loss_mask:  [B, Tmax] float 0/1 — 0 at PAD positions, 1 at real targets
  *   text_lens:  [B] int — valid text length per sample (before padding)
  *
- *   Combines seq_lens optimization in attention + masked CE loss.
+ *   Builds prefix-LM seq_lens and returns masked CE. Caller owns backward,
+ *   clipping, optimizer step, and instrumentation.
+ */
+tensor *vision_lm_loss_padded(struct mem_pool *scratch_pool,
+                               vision_lm *vlm,
+                               const tensor *images,
+                               const tensor *input_ids,
+                               const tensor *target_ids,
+                               const tensor *loss_mask,
+                               const int *text_lens);
+
+/* ── Padded training step (variable-length batches with optimized attention) ──
+ *
+ *   Convenience wrapper around vision_lm_loss_padded + backward + clip + step.
  */
 tensor *vision_lm_train_step_padded(struct mem_pool *scratch_pool,
                                      vision_lm *vlm,

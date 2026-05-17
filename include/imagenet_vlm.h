@@ -132,7 +132,9 @@ void imagenet_vlm_dl_bucket(imagenet_vlm_dl *dl,
  *   bs         — requested batch size
  *
  *   T_batch is second dimension of input_ids/target_ids/loss_mask.
- *   Caller allocates per-bucket: 8, 16, 24, or 32.
+ *   Caller normally allocates IMAGENET_MAX_TEXT_LEN for fully padded,
+ *   non-bucketed shuffled batches. Shorter T_batch is allowed only if every
+ *   sampled label fits; otherwise returns -1.
  *
  *   Returns N samples written (0 < N <= bs).
  *   Returns 0 when epoch done (pos >= total_samples).

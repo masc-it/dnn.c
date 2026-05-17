@@ -259,16 +259,17 @@ void clip_grad_value(tensor **params, int n_params, float clip_value) {
     }
 }
 
-void adamw_step(adamw_opt *opt) {
+void adamw_step_with_lr_multipliers(adamw_opt *opt, const float *lr_mults) {
     opt->t++;
-    float lr  = opt->lr;
-    float b1  = opt->beta1;
-    float b2  = opt->beta2;
-    float eps = opt->eps;
-    float wd  = opt->weight_decay;
+    float base_lr = opt->lr;
+    float b1      = opt->beta1;
+    float b2      = opt->beta2;
+    float eps     = opt->eps;
+    float wd      = opt->weight_decay;
 
     float bias_corr1 = 1.0f - powf(b1, (float)opt->t);
     float bias_corr2 = 1.0f - powf(b2, (float)opt->t);
+    float bias_corr2_sqrt = sqrtf(bias_corr2);
 
 #pragma omp parallel for schedule(dynamic) if (opt->n_params >= 4)
     for (int i = 0; i < opt->n_params; i++) {
@@ -276,7 +277,7 @@ void adamw_step(adamw_opt *opt) {
         tensor *mt = opt->m[i];
         tensor *vt = opt->v[i];
 
-        int n    = tensor_numel(p);
+        int n     = tensor_numel(p);
         float *pd = tensor_data_ptr(p);
         float *md = tensor_data_ptr(mt);
         float *vd = tensor_data_ptr(vt);
@@ -284,8 +285,9 @@ void adamw_step(adamw_opt *opt) {
 
         assert(gd && "adamw_step: param has no gradient (did you call backward?)");
 
+        float mult = lr_mults ? lr_mults[i] : 1.0f;
+        float lr = base_lr * mult;
         float step_size = lr / bias_corr1;
-        float bias_corr2_sqrt = sqrtf(bias_corr2);
 #pragma omp simd
         for (int j = 0; j < n; j++) {
             float g = gd[j];
@@ -306,4 +308,8 @@ void adamw_step(adamw_opt *opt) {
             pd[j] -= step_size * md[j] / denom;
         }
     }
+}
+
+void adamw_step(adamw_opt *opt) {
+    adamw_step_with_lr_multipliers(opt, NULL);
 }

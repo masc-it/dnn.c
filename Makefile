@@ -97,6 +97,12 @@ run_imagenet_vlm: imagenet_vlm
 	if [ -z "$(DATA_DIR)" ]; then echo "Usage: make run_imagenet_vlm DATA_DIR=/path/to/imagenet-shards"; exit 1; fi
 	$(BUILDDIR)/imagenet_vlm --data-dir "$(DATA_DIR)"
 
+vlm_debug_2: $(BUILDDIR)/vlm_debug_2
+	$(BUILDDIR)/vlm_debug_2 --data-dir "$(DATA_DIR)" $(if $(CKPT),--ckpt $(CKPT),)
+
+$(BUILDDIR)/vlm_debug_2: vlm_debug_2.c $(LIB) | $(BUILDDIR)
+	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(OMPFLAGS) $(CPPFLAGS) $< $(LDFLAGS) $(LDLIBS) -o $@
+
 main_prep_data: $(BUILDDIR)/main_prep_data
 	$(BUILDDIR)/main_prep_data
 

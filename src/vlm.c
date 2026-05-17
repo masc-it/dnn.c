@@ -167,15 +167,8 @@ tensor *vision_lm_image_embeds(struct mem_pool *scratch,
     x = tensor_contiguous(scratch, x);
 
     /* Reshape to [B, n_img_tokens, d_model] */
-    tensor *img = tensor_reshape(scratch, x, 3,
-                                 (int[]){B, vlm->n_img_tokens, vlm->d_model});
-
-    /* Add learned image positional embeddings if enabled */
-    if (vlm->image_pos) {
-        img = tensor_add(scratch, img, vlm->image_pos);  /* broadcast [1,I,D] + [1,I,D] */
-    }
-
-    return img;
+    return tensor_reshape(scratch, x, 3,
+                          (int[]){B, vlm->n_img_tokens, vlm->d_model});
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -192,8 +185,15 @@ tensor *vision_lm_build_embeds(struct mem_pool *scratch,
     /* Image patch embeds [B, I, D] */
     tensor *img = vision_lm_image_embeds(scratch, vlm, images);
 
-    /* RMSNorm on vision features before concat with text */
+    /* RMSNorm visual features before adding learned image positions.
+     * This keeps image_pos from being normalized together with conv features
+     * and preserves a cleaner gradient path into patch_embed. */
     img = rms_norm_forward(scratch, vlm->image_norm, img);
+
+    /* Add learned image positional embeddings if enabled */
+    if (vlm->use_image_pos && vlm->image_pos) {
+        img = tensor_add(scratch, img, vlm->image_pos);  /* broadcast [1,I,D] + [1,I,D] */
+    }
 
     /* Text token embeds [B, T, D] */
     tensor *txt = decoder_lm_token_embeds(scratch, vlm->lm, text_ids);
@@ -291,17 +291,14 @@ tensor *vision_lm_train_step(struct mem_pool *scratch_pool,
  *  Padded training step (variable-length batches with seq_lens)
  * ══════════════════════════════════════════════════════════════════ */
 
-tensor *vision_lm_train_step_padded(struct mem_pool *scratch_pool,
-                                     vision_lm *vlm,
-                                     const tensor *images,
-                                     const tensor *input_ids,
-                                     const tensor *target_ids,
-                                     const tensor *loss_mask,
-                                     const int *text_lens,
-                                     adamw_opt *opt,
-                                     float grad_clip,
-                                     float *grad_norm_out) {
-    assert(vlm && images && input_ids && target_ids && loss_mask && text_lens && opt);
+tensor *vision_lm_loss_padded(struct mem_pool *scratch_pool,
+                               vision_lm *vlm,
+                               const tensor *images,
+                               const tensor *input_ids,
+                               const tensor *target_ids,
+                               const tensor *loss_mask,
+                               const int *text_lens) {
+    assert(vlm && images && input_ids && target_ids && loss_mask && text_lens);
     assert(input_ids->ndim == 2 && "input_ids must be 2D [B, Tmax]");
     assert(target_ids->ndim == 2 && "target_ids must be 2D [B, Tmax]");
     assert(loss_mask->ndim == 2 && "loss_mask must be 2D [B, Tmax]");
@@ -323,8 +320,6 @@ tensor *vision_lm_train_step_padded(struct mem_pool *scratch_pool,
         combined_lens[b] = I + tl;
     }
 
-    adamw_zero_grad(opt);
-
     /* Build multimodal embeds [B, I+Tmax, D] */
     tensor *embeds = vision_lm_build_embeds(scratch_pool, vlm, images, input_ids);
 
@@ -338,7 +333,25 @@ tensor *vision_lm_train_step_padded(struct mem_pool *scratch_pool,
     tensor *logits_text = tensor_slice(scratch_pool, logits, 1, I, Tmax);
 
     /* Masked CE — pad positions have loss_mask=0 and contribute nothing */
-    tensor *loss = tensor_cross_entropy_masked(scratch_pool, logits_text, target_ids, loss_mask, 2);
+    return tensor_cross_entropy_masked(scratch_pool, logits_text, target_ids, loss_mask, 2);
+}
+
+tensor *vision_lm_train_step_padded(struct mem_pool *scratch_pool,
+                                     vision_lm *vlm,
+                                     const tensor *images,
+                                     const tensor *input_ids,
+                                     const tensor *target_ids,
+                                     const tensor *loss_mask,
+                                     const int *text_lens,
+                                     adamw_opt *opt,
+                                     float grad_clip,
+                                     float *grad_norm_out) {
+    assert(opt);
+
+    adamw_zero_grad(opt);
+
+    tensor *loss = vision_lm_loss_padded(scratch_pool, vlm, images, input_ids,
+                                         target_ids, loss_mask, text_lens);
 
     /* Backward */
     dnn_backward(scratch_pool, loss);
