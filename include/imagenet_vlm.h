@@ -2,6 +2,7 @@
 #define DNN_IMAGENET_VLM_H
 
 #include <stdint.h>
+#include <pthread.h>
 #include "tensor.h"
 #include "tokenizer.h"
 
@@ -58,21 +59,37 @@ typedef struct imagenet_vlm_dl {
     int      num_shards;
     char     shard_pattern[256]; /* sprintf pattern for .bin paths */
 
-    /* Per-shard buffer (malloc, ~1 GB) */
-    uint8_t *buffer;
+    /* Double-buffered shard storage (malloc, ~1 GB each) */
+    uint8_t *buffers[2];
     long     buffer_capacity;
-    long     buffer_bytes;
-    int      current_shard;      /* -1 = none loaded */
+    long     buffer_bytes[2];
+    int      buffer_shard[2];        /* -1 if empty */
+    int      buffer_version[2];
+    int      buffer_num_samples[2];
+    int      active_buf;             /* 0 or 1 */
+
+    /* Active shard metadata */
+    int      current_shard;
+    int      shard_num_samples;
+    const imagenet_idx_entry *shard_entries;
+    int      current_shard_version;
+
+    /* Prefetch worker */
+    pthread_t prefetch_thread;
+    int       prefetch_started;
+    int       prefetch_done;
+    int       prefetch_result;
+    int       prefetch_target_shard;
+    int       prefetch_buf;
+    pthread_mutex_t prefetch_mu;
+    pthread_cond_t  prefetch_cv;
 
     /* Split index (mmap'd) */
     imagenet_idx_entry *idx;
     size_t              idx_bytes;
     int    total_samples;
 
-    /* Per-shard index view and metadata */
-    int    shard_num_samples;
-    const imagenet_idx_entry *shard_entries;
-    int    current_shard_version;  /* version from shard header, for format compat */
+    /* (shard_num_samples, shard_entries, current_shard_version moved to active section above) */
 
     /* Physical shard → idx range (immutable after create) */
     int *shard_start;        /* [num_shards + 1], idx index of first sample */

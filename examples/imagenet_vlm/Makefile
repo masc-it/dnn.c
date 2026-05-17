@@ -1,5 +1,5 @@
 CC       ?= gcc
-CFLAGS   := -Wall -Wextra -pedantic -std=c11 -O3 -ffinite-math-only -fno-signed-zeros -fno-trapping-math -g
+CFLAGS   := -Wall -Wextra -pedantic -std=c11 -O3 -ffinite-math-only -fno-signed-zeros -fno-trapping-math -g -pthread
 OMP_PREFIX = /opt/homebrew/opt/libomp
 INCDIRS  = -I../../include -I../../src -I$(OMP_PREFIX)/include
 CPPFLAGS = -DACCELERATE_NEW_LAPACK $(INCDIRS)

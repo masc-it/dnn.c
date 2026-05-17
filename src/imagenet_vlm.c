@@ -45,9 +45,9 @@ static void convert_pixels(float *dst, const uint8_t *src,
     }
 }
 
-static int load_shard(imagenet_vlm_dl *dl, int shard_idx) {
+static int read_shard_into(imagenet_vlm_dl *dl, int shard_idx, int buf_idx) {
     if (shard_idx < 0 || shard_idx >= dl->num_shards) return -1;
-    if (shard_idx == dl->current_shard) return 0;
+    if (buf_idx < 0 || buf_idx > 1) return -1;
 
     char path[256];
     snprintf(path, sizeof(path), dl->shard_pattern, shard_idx + 1);
@@ -71,17 +71,130 @@ static int load_shard(imagenet_vlm_dl *dl, int shard_idx) {
     if (body_bytes < 0 || body_bytes > dl->buffer_capacity) { fclose(f); return -1; }
     fseeko(f, (long)sizeof(hdr), SEEK_SET);
 
-    if ((long)fread(dl->buffer, 1, (size_t)body_bytes, f) < body_bytes) {
+    if ((long)fread(dl->buffers[buf_idx], 1, (size_t)body_bytes, f) < body_bytes) {
         fclose(f); return -1;
     }
     fclose(f);
 
-    dl->current_shard = shard_idx;
-    dl->buffer_bytes = body_bytes;
-    dl->shard_num_samples = (int)hdr.num_samples;
-    dl->shard_entries = dl->idx + dl->shard_start[shard_idx];
-    dl->current_shard_version = (int)hdr.version;
+    dl->buffer_bytes[buf_idx] = body_bytes;
+    dl->buffer_shard[buf_idx] = shard_idx;
+    dl->buffer_version[buf_idx] = (int)hdr.version;
+    dl->buffer_num_samples[buf_idx] = (int)hdr.num_samples;
 
+    return 0;
+}
+
+static void activate_buffer(imagenet_vlm_dl *dl, int buf_idx, int shard_idx) {
+    dl->active_buf = buf_idx;
+    dl->current_shard = shard_idx;
+    dl->shard_num_samples = dl->buffer_num_samples[buf_idx];
+    dl->shard_entries = dl->idx + dl->shard_start[shard_idx];
+    dl->current_shard_version = dl->buffer_version[buf_idx];
+}
+
+static void *prefetch_worker(void *arg) {
+    imagenet_vlm_dl *dl = (imagenet_vlm_dl *)arg;
+
+    int shard_idx, buf_idx;
+    pthread_mutex_lock(&dl->prefetch_mu);
+    shard_idx = dl->prefetch_target_shard;
+    buf_idx = dl->prefetch_buf;
+    pthread_mutex_unlock(&dl->prefetch_mu);
+
+    int rc = read_shard_into(dl, shard_idx, buf_idx);
+
+    pthread_mutex_lock(&dl->prefetch_mu);
+    dl->prefetch_result = rc;
+    dl->prefetch_done = 1;
+    pthread_cond_broadcast(&dl->prefetch_cv);
+    pthread_mutex_unlock(&dl->prefetch_mu);
+
+    return NULL;
+}
+
+static inline int inactive_buf(imagenet_vlm_dl *dl) {
+    return 1 - dl->active_buf;
+}
+
+static int wait_prefetch(imagenet_vlm_dl *dl) {
+    if (!dl->prefetch_started) return 0;
+
+    pthread_mutex_lock(&dl->prefetch_mu);
+    while (!dl->prefetch_done)
+        pthread_cond_wait(&dl->prefetch_cv, &dl->prefetch_mu);
+    pthread_mutex_unlock(&dl->prefetch_mu);
+
+    pthread_join(dl->prefetch_thread, NULL);
+    dl->prefetch_started = 0;
+
+    return dl->prefetch_result;
+}
+
+static void start_prefetch(imagenet_vlm_dl *dl, int shard_idx) {
+    if (shard_idx < 0 || shard_idx >= dl->num_shards) return;
+    if (shard_idx == dl->current_shard) return;
+
+    int ib = inactive_buf(dl);
+    if (dl->buffer_shard[ib] == shard_idx) return;
+
+    wait_prefetch(dl);
+
+    pthread_mutex_lock(&dl->prefetch_mu);
+    dl->prefetch_target_shard = shard_idx;
+    dl->prefetch_buf = ib;
+    dl->prefetch_done = 0;
+    dl->prefetch_result = 0;
+    dl->prefetch_started = 1;
+    pthread_mutex_unlock(&dl->prefetch_mu);
+
+    if (pthread_create(&dl->prefetch_thread, NULL, prefetch_worker, dl) != 0) {
+        /* Thread creation failed; reset so wait_prefetch doesn't deadlock. */
+        pthread_mutex_lock(&dl->prefetch_mu);
+        dl->prefetch_started = 0;
+        pthread_mutex_unlock(&dl->prefetch_mu);
+    }
+}
+
+static int shard_at_pos(imagenet_vlm_dl *dl, long pos) {
+    if (pos < 0 || pos >= dl->total_samples) return -1;
+    int gi = dl->shuffle_order[pos];
+    return (int)dl->idx[gi].shard;
+}
+
+static int next_different_shard(imagenet_vlm_dl *dl, long pos, int cur_shard) {
+    while (pos < dl->total_samples) {
+        int s = shard_at_pos(dl, pos);
+        if (s != cur_shard) return s;
+        pos++;
+    }
+    return -1;
+}
+
+static int ensure_shard_loaded(imagenet_vlm_dl *dl, int shard_idx) {
+    if (shard_idx < 0 || shard_idx >= dl->num_shards) return -1;
+    if (shard_idx == dl->current_shard) return 0;
+
+    int ib = 1 - dl->active_buf;
+
+    /* Case 1: prefetched buffer already has needed shard */
+    if (dl->buffer_shard[ib] == shard_idx) {
+        activate_buffer(dl, ib, shard_idx);
+        return 0;
+    }
+
+    /* Case 2: prefetch running, maybe this shard */
+    if (dl->prefetch_started) {
+        if (wait_prefetch(dl) != 0) return -1;
+        if (dl->buffer_shard[ib] == shard_idx) {
+            activate_buffer(dl, ib, shard_idx);
+            return 0;
+        }
+    }
+
+    /* Case 3: fallback sync load */
+    ib = 1 - dl->active_buf;
+    if (read_shard_into(dl, shard_idx, ib) != 0) return -1;
+    activate_buffer(dl, ib, shard_idx);
     return 0;
 }
 
@@ -120,6 +233,9 @@ imagenet_vlm_dl *imagenet_vlm_dl_create(const char *split,
 
     snprintf(dl->shard_pattern, sizeof(dl->shard_pattern),
              "%s/%s-%%05d-of-%05d.bin", data_dir, split, dl->num_shards);
+
+    pthread_mutex_init(&dl->prefetch_mu, NULL);
+    pthread_cond_init(&dl->prefetch_cv, NULL);
 
     /* ── Validate all shard headers ── */
     int header_H = 0, header_W = 0, header_C = 0;
@@ -245,11 +361,19 @@ imagenet_vlm_dl *imagenet_vlm_dl_create(const char *split,
         fclose(f);
     }
 
-    /* ── Allocate 1 GB buffer ── */
+    /* ── Allocate double buffers (1 GB each) ── */
     dl->buffer_capacity = (long)1024 * 1024 * 1024;
-    dl->buffer = malloc((size_t)dl->buffer_capacity);
-    if (!dl->buffer) { imagenet_vlm_dl_free(dl); return NULL; }
+    for (int i = 0; i < 2; i++) {
+        dl->buffers[i] = malloc((size_t)dl->buffer_capacity);
+        if (!dl->buffers[i]) { imagenet_vlm_dl_free(dl); return NULL; }
+        dl->buffer_bytes[i] = 0;
+        dl->buffer_shard[i] = -1;
+        dl->buffer_version[i] = 0;
+        dl->buffer_num_samples[i] = 0;
+    }
+    dl->active_buf = 0;
     dl->current_shard = -1;
+    dl->prefetch_started = 0;
 
     dl->pos = 0;
     dl->shuffle = shuffle;
@@ -267,7 +391,12 @@ imagenet_vlm_dl *imagenet_vlm_dl_create(const char *split,
 
 void imagenet_vlm_dl_free(imagenet_vlm_dl *dl) {
     if (!dl) return;
-    free(dl->buffer);
+    if (dl->prefetch_started)
+        wait_prefetch(dl);
+    free(dl->buffers[0]);
+    free(dl->buffers[1]);
+    pthread_mutex_destroy(&dl->prefetch_mu);
+    pthread_cond_destroy(&dl->prefetch_cv);
     free(dl->shuffle_order);
     free(dl->shard_start);
     free(dl->shard_count);
@@ -282,7 +411,13 @@ void imagenet_vlm_dl_free(imagenet_vlm_dl *dl) {
 }
 
 int imagenet_vlm_dl_reset(imagenet_vlm_dl *dl) {
+    if (dl->prefetch_started)
+        wait_prefetch(dl);
     dl->pos = 0;
+    dl->current_shard = -1;
+    dl->buffer_shard[0] = -1;
+    dl->buffer_shard[1] = -1;
+    dl->active_buf = 0;
     return 0;
 }
 
@@ -291,7 +426,13 @@ int imagenet_vlm_dl_reset(imagenet_vlm_dl *dl) {
  * ══════════════════════════════════════════════════════════════════ */
 
 void imagenet_vlm_dl_shuffle(imagenet_vlm_dl *dl) {
+    if (dl->prefetch_started)
+        wait_prefetch(dl);
     dl->pos = 0;
+    dl->current_shard = -1;
+    dl->buffer_shard[0] = -1;
+    dl->buffer_shard[1] = -1;
+    dl->active_buf = 0;
     if (!dl->shuffle) return;
 
     int S = dl->num_shards;
@@ -441,13 +582,15 @@ int imagenet_vlm_dl_next_batch(imagenet_vlm_dl *dl,
         if ((int)e->text_len + 1 > T_max) return -1;
 
         if ((int)e->shard != dl->current_shard) {
-            if (load_shard(dl, (int)e->shard) != 0) return -1;
+            if (ensure_shard_loaded(dl, (int)e->shard) != 0) return -1;
+            int ns = next_different_shard(dl, dl->pos, (int)e->shard);
+            start_prefetch(dl, ns);
         }
 
         long sample_off = (long)e->offset;
         if (sample_off < 0) return -1;
 
-        const int32_t *sample_hdr = (const int32_t *)(dl->buffer + sample_off);
+        const int32_t *sample_hdr = (const int32_t *)(dl->buffers[dl->active_buf] + sample_off);
         const int32_t *txt = sample_hdr + 2;
 
         /* Skip caption field (version >= 2): caption_len(int32) follows text_ids.
@@ -466,7 +609,7 @@ int imagenet_vlm_dl_next_batch(imagenet_vlm_dl *dl,
         long expected_size = 8 + (long)stored_len * 4 + image_bytes;
         if (dl->current_shard_version >= 2)
             expected_size += 4 + cap_len;
-        if (sample_off + expected_size > dl->buffer_bytes)
+        if (sample_off + expected_size > dl->buffer_bytes[dl->active_buf])
             return -1;
 
         int full_len = stored_len + 1;
