@@ -466,7 +466,9 @@ static void _init_module_weights(module *m, float std, float residual_std) {
 
 void decoder_lm_init_weights(decoder_lm *lm) {
     assert(lm);
-    float std = 0.02f;
+    /* Base std derived from d_model: 1/sqrt(d_model) gives per-vector norm ~1
+     * for embeddings and Kaiming fan-in for post-norm linears. */
+    float std = 1.0f / sqrtf((float)lm->d_model);
     float residual_std = std / sqrtf(2.0f * (float)lm->n_layers);
 
     /* Embedding table: Normal(0, std) */

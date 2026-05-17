@@ -93,12 +93,15 @@ void vision_lm_init_weights(vision_lm *vlm) {
     /* Init child LM (GPT-2 style) */
     decoder_lm_init_weights(vlm->lm);
 
-    /* Init patch_embed weight: Xavier-style normal */
+    /* Init patch_embed weight: Kaiming fan-in normal.
+     * Conv2d weight shape is (D, C, P, P). Input is normalized image pixels
+     * (identity activation), so fan_in = C * P * P and gain ≈ 1.
+     * Uses sqrt(1/fan_in) to preserve unit variance at the output.
+     * The following RMSNorm absorbs any residual scale. */
     {
         int C = vlm->image_channels;
         int P = vlm->patch_size;
-        int D = vlm->d_model;
-        float std = sqrtf(2.0f / (float)(C * P * P + D));
+        float std = sqrtf(1.0f / (float)(C * P * P));
 
         tensor *w = vlm->patch_embed->weight;
         int nw = tensor_numel(w);

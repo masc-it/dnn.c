@@ -130,10 +130,10 @@ transformer_block *transformer_block_create(struct mem_pool *params_pool, int d_
     block->out_proj = linear_create(params_pool, n_heads * d_k, d_model);
     module_add_child(&block->base, "out_proj", &block->out_proj->base);
 
-    /* Pre-attention and pre-FFN layer norms */
-    block->attn_norm = layer_norm_create(params_pool, d_model, 1e-5f);
+    /* Pre-attention and pre-FFN RMS norms (no bias, simpler gradient) */
+    block->attn_norm = rms_norm_create(params_pool, d_model, 1e-5f);
     module_add_child(&block->base, "attn_norm", &block->attn_norm->base);
-    block->ffn_norm = layer_norm_create(params_pool, d_model, 1e-5f);
+    block->ffn_norm = rms_norm_create(params_pool, d_model, 1e-5f);
     module_add_child(&block->base, "ffn_norm", &block->ffn_norm->base);
 
     block->ffn = swiglu_ffn_create(params_pool, d_model, intermediate_size);
@@ -158,9 +158,9 @@ tensor *transformer_block_forward_ex(struct mem_pool *scratch,
     assert(x->ndim >= 2);
     assert(x->shape[x->ndim - 1] == block->d_model);
 
-    /* ── Attention sublayer (pre-norm) ── */
+    /* ── Attention sublayer (pre-RMSNorm) ── */
     tensor *residual = (tensor*)x;
-    tensor *h = layer_norm_forward(scratch, block->attn_norm, x);
+    tensor *h = rms_norm_forward(scratch, block->attn_norm, x);
 
     /* Fused QKV projection + split heads: [B,N,d_model] → [B,N,3*H*d_k] */
     tensor *qkv = linear_forward(scratch, block->qkv_proj, h);
@@ -190,9 +190,9 @@ tensor *transformer_block_forward_ex(struct mem_pool *scratch,
     /* First residual: x = x + attn_proj */
     tensor *x_after_attn = tensor_add(scratch, residual, attn_proj);
 
-    /* ── FFN sublayer (pre-norm) ── */
+    /* ── FFN sublayer (pre-RMSNorm) ── */
     residual = x_after_attn;
-    h = layer_norm_forward(scratch, block->ffn_norm, x_after_attn);
+    h = rms_norm_forward(scratch, block->ffn_norm, x_after_attn);
 
     tensor *ffn_out = swiglu_ffn_forward(scratch, block->ffn, h);
 
@@ -228,8 +228,8 @@ tensor *transformer_block_forward_cached_ex(struct mem_pool *scratch,
     if (mode == ATTENTION_PREFIX_LM)
         assert(cache->seq_len == 0 && "prefix-LM prefill requires empty cache");
 
-    /* Pre-norm */
-    tensor *h = layer_norm_forward(scratch, block->attn_norm, x);
+    /* Pre-RMSNorm */
+    tensor *h = rms_norm_forward(scratch, block->attn_norm, x);
 
     /* Fused QKV projection + split heads */
     tensor *qkv = linear_forward(scratch, block->qkv_proj, h);  /* [B, N_new, 3*H*d_k] */
@@ -407,8 +407,8 @@ tensor *transformer_block_forward_cached_ex(struct mem_pool *scratch,
     /* First residual */
     tensor *x_after_attn = tensor_add(scratch, x, attn_proj);
 
-    /* ── FFN sublayer (pre-norm) ── */
-    h = layer_norm_forward(scratch, block->ffn_norm, x_after_attn);
+    /* ── FFN sublayer (pre-RMSNorm) ── */
+    h = rms_norm_forward(scratch, block->ffn_norm, x_after_attn);
     tensor *ffn_out = swiglu_ffn_forward(scratch, block->ffn, h);
 
     /* Second residual */

@@ -479,7 +479,16 @@ int imagenet_vlm_dl_next_batch(imagenet_vlm_dl *dl,
         for (int t = stored_len + 1; t < T_max; t++) tgt_row[t] = IMAGENET_PAD_ID;
 
         float *lm_row = (float *)tensor_data_ptr(loss_mask) + (long)bs_actual * loss_mask->strides[0];
-        for (int t = 0; t < stored_len; t++) lm_row[t] = 1.0f;
+        /* Decaying early-token weights: emphasize first bytes where vision
+         * signal is strongest, reduce as text context accumulates. */
+        for (int t = 0; t < stored_len; t++) {
+            float w = 1.0f;
+            if      (t == 0) w = 32.0f;
+            else if (t == 1) w = 16.0f;
+            else if (t == 2) w = 8.0f;
+            else if (t == 3) w = 2.0f;
+            lm_row[t] = w;
+        }
         for (int t = stored_len; t < T_max; t++) lm_row[t] = 0.0f;
 
         float *img_row = tensor_data_ptr(img) + (long)bs_actual * img->strides[0];

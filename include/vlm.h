@@ -60,7 +60,7 @@ vision_lm *vision_lm_create(struct mem_pool *params_pool,
 /* ── Weight initialization ──
  *
  *   - decoder_lm_init_weights on child LM
- *   - patch_embed weight: Xavier-style normal std sqrt(2/(C*P*P + d_model))
+ *   - patch_embed weight: Kaiming fan-in normal std sqrt(1/(C*P*P))
  *   - patch_embed bias: zero
  *   - image_pos: normal std=0.02 (if enabled)
  */

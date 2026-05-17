@@ -9,12 +9,16 @@ BUILDDIR = ../../build
 LDFLAGS  = -L$(OMP_PREFIX)/lib -L$(BUILDDIR)
 LDLIBS   = -lomp -lz -ldnn -framework Accelerate
 
-.PHONY: all imagenet_vlm clean
+.PHONY: all imagenet_vlm vlm_init_probe clean
 
-all: imagenet_vlm
+all: imagenet_vlm vlm_init_probe
 
 imagenet_vlm: imagenet_vlm.c $(BUILDDIR)/libdnn.a
 	$(CC) $(CFLAGS) $(OMPFLAGS) $(CPPFLAGS) $< $(LDFLAGS) $(LDLIBS) -o $(BUILDDIR)/$@
 
+vlm_init_probe: vlm_init_probe.c $(BUILDDIR)/libdnn.a
+	$(CC) $(CFLAGS) $(OMPFLAGS) $(CPPFLAGS) $< $(LDFLAGS) $(LDLIBS) -o $(BUILDDIR)/$@
+	$(CC) $(CFLAGS) $(OMPFLAGS) $(CPPFLAGS) $< $(LDFLAGS) $(LDLIBS) -o $(BUILDDIR)/$@
+
 clean:
-	rm -f $(BUILDDIR)/imagenet_vlm
+	rm -f $(BUILDDIR)/imagenet_vlm $(BUILDDIR)/vlm_init_probe

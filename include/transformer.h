@@ -58,7 +58,7 @@ tensor *kv_cache_get_V(struct mem_pool *scratch, kv_cache *kvc);
  *   x = x + out_proj( merge_heads( causal_attn( split_heads( QKV( norm(x) ) ) ) ) )
  *   x = x + swiglu_ffn( norm(x) )
  *
- * Layer norm before each sublayer, residual connections around each.
+ * RMS norm before each sublayer, residual connections around each.
  * All parameters allocated in params pool.  Autograd wired through
  * all sub-operations.
  */
@@ -70,8 +70,8 @@ typedef struct {
     int        n_heads;
     int        d_k;
     int        d_model;
-    layer_norm *attn_norm;         /* pre-attention layer norm */
-    layer_norm *ffn_norm;          /* pre-FFN layer norm */
+    rms_norm *attn_norm;           /* pre-attention RMS norm */
+    rms_norm *ffn_norm;            /* pre-FFN RMS norm */
     swiglu_ffn *ffn;               /* d_model → intermediate → d_model */
     /* RoPE frequency tables (borrowed from decoder_lm, not owned) */
     tensor    *freqs_cos;           /* [max_seq_len, d_k/2], NULL = no RoPE */
