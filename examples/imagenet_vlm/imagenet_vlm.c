@@ -38,7 +38,7 @@
 #define LR              5e-4f
 #define MIN_LR          5e-5f
 #define GRAD_CLIP        5.0f
-#define WARMUP_EPOCHS     2
+#define WARMUP_EPOCHS     1
 #define PATCH_LR_MULT    3.0f
 #define VAL_CE_PROBE_EVERY 100
 #define VAL_CE_PROBE_N      64
@@ -48,6 +48,66 @@
  * IMAGENET_MAX_TEXT_LEN, masks out pad positions, and preserves sample order
  * produced by the dataloader shuffle. */
 #define TRAIN_T          IMAGENET_MAX_TEXT_LEN
+
+/* ── Helpers ── */
+
+static int vlm_decode_ar(struct mem_pool *scratch, struct mem_pool *data,
+                          vision_lm *vlm, tensor *img,
+                          int take, int got, int max_decode,
+                          int tokens[][IMAGENET_MAX_TEXT_LEN]) {
+    int finished[take];
+    for (int i = 0; i < take; i++) {
+        for (int t = 0; t < IMAGENET_MAX_TEXT_LEN; t++)
+            tokens[i][t] = TOKENIZER_PAD_ID;
+        tokens[i][0] = (i < got) ? TOKENIZER_BOS_ID : TOKENIZER_PAD_ID;
+        finished[i] = (i >= got);
+    }
+
+    int seq_len = 1;
+    int all_done = 0;
+    while (seq_len <= max_decode && !all_done) {
+        tensor *prompt = tensor_zeros_data(data, 2, (int[]){take, seq_len});
+        int *pd = (int *)tensor_data_ptr(prompt);
+        for (int i = 0; i < take; i++)
+            for (int t = 0; t < seq_len; t++)
+                pd[(long)i * seq_len + t] = tokens[i][t];
+
+        tensor *logits = vision_lm_forward(scratch, vlm, img, prompt);
+        float *ld = tensor_data_ptr(logits);
+
+        all_done = 1;
+        for (int i = 0; i < got; i++) {
+            if (finished[i]) continue;
+            int last_tok = N_IMG_TOK + seq_len - 1;
+            float *row = ld + (long)i * logits->strides[0]
+                          + (long)last_tok * vlm->vocab_size;
+            int pred = 0;
+            for (int v = 1; v < vlm->vocab_size; v++)
+                if (row[v] > row[pred]) pred = v;
+            tokens[i][seq_len] = pred;
+            if (pred == TOKENIZER_EOS_ID || seq_len == max_decode)
+                finished[i] = 1;
+            else
+                all_done = 0;
+        }
+        seq_len++;
+        mem_pool_reset(scratch);
+    }
+    return seq_len;
+}
+
+static void vlm_tokens_to_str(const int tokens[], int seq_len,
+                               char *out, int out_size) {
+    int pn = 0;
+    for (int t = 1; t < seq_len; t++) {
+        int tok = tokens[t];
+        if (tok == TOKENIZER_EOS_ID) break;
+        if (tok < 0 || tok > 255) break;
+        if (pn < out_size - 1)
+            out[pn++] = (tok >= 32 && tok < 127) ? (char)tok : '?';
+    }
+    out[pn] = '\0';
+}
 
 /* ══════════════════════════════════════════════════════════════════
  *  eval_full_string — validation via full autoregressive label decode
@@ -86,56 +146,11 @@ static float eval_full_string(struct mem_pool *scratch, struct mem_pool *data,
 
         int max_decode = IMAGENET_MAX_TEXT_LEN - 1;
         int tokens[take][IMAGENET_MAX_TEXT_LEN];
-        int finished[take];
-        for (int i = 0; i < take; i++) {
-            for (int t = 0; t < IMAGENET_MAX_TEXT_LEN; t++)
-                tokens[i][t] = TOKENIZER_PAD_ID;
-            tokens[i][0] = (i < got) ? TOKENIZER_BOS_ID : TOKENIZER_PAD_ID;
-            finished[i] = (i >= got);
-        }
-
-        int seq_len = 1;
-        int all_done = 0;
-        while (seq_len <= max_decode && !all_done) {
-            tensor *prompt = tensor_zeros_data(data, 2, (int[]){take, seq_len});
-            int *pd = (int *)tensor_data_ptr(prompt);
-            for (int i = 0; i < take; i++)
-                for (int t = 0; t < seq_len; t++)
-                    pd[(long)i * seq_len + t] = tokens[i][t];
-
-            tensor *logits = vision_lm_forward(scratch, vlm, img, prompt);
-            float *ld = tensor_data_ptr(logits);
-
-            all_done = 1;
-            for (int i = 0; i < got; i++) {
-                if (finished[i]) continue;
-                int last_tok = N_IMG_TOK + seq_len - 1;
-                float *row = ld + (long)i * logits->strides[0]
-                              + (long)last_tok * vlm->vocab_size;
-                int pred = 0;
-                for (int v = 1; v < vlm->vocab_size; v++)
-                    if (row[v] > row[pred]) pred = v;
-                tokens[i][seq_len] = pred;
-                if (pred == TOKENIZER_EOS_ID || seq_len == max_decode)
-                    finished[i] = 1;
-                else
-                    all_done = 0;
-            }
-            seq_len++;
-            mem_pool_reset(scratch);
-        }
+        int seq_len = vlm_decode_ar(scratch, data, vlm, img, take, got, max_decode, tokens);
 
         for (int i = 0; i < got; i++) {
             char pred_name[IMAGENET_MAX_TEXT_LEN];
-            int pn = 0;
-            for (int t = 1; t < seq_len && t <= max_decode; t++) {
-                int tok = tokens[i][t];
-                if (tok == TOKENIZER_EOS_ID) break;
-                if (tok < 0 || tok > 255) break;
-                if (pn < (int)sizeof(pred_name) - 1)
-                    pred_name[pn++] = (tok >= 32 && tok < 127) ? (char)tok : '?';
-            }
-            pred_name[pn] = '\0';
+            vlm_tokens_to_str(tokens[i], seq_len, pred_name, sizeof(pred_name));
             if (lbl[i] >= 0 && lbl[i] < n_names && strcmp(pred_name, names[lbl[i]]) == 0)
                 correct++;
             total++;
@@ -216,58 +231,13 @@ static void show_preds(struct mem_pool *scratch, struct mem_pool *data,
     /* Autoregressive decode: predict one byte at a time until EOS. */
     int max_decode = IMAGENET_MAX_TEXT_LEN - 1;
     int tokens[take][IMAGENET_MAX_TEXT_LEN];  /* [i][0]=BOS, [i][1..]=predicted bytes */
-    int finished[take];
-    for (int i = 0; i < take; i++) {
-        for (int t = 0; t < IMAGENET_MAX_TEXT_LEN; t++)
-            tokens[i][t] = TOKENIZER_PAD_ID;
-        tokens[i][0] = (i < got) ? TOKENIZER_BOS_ID : TOKENIZER_PAD_ID;
-        finished[i] = (i >= got);
-    }
-
-    int seq_len = 1;
-    int all_done = 0;
-    while (seq_len <= max_decode && !all_done) {
-        tensor *prompt = tensor_zeros_data(data, 2, (int[]){take, seq_len});
-        int *pd = (int *)tensor_data_ptr(prompt);
-        for (int i = 0; i < take; i++)
-            for (int t = 0; t < seq_len; t++)
-                pd[(long)i * seq_len + t] = tokens[i][t];
-
-        tensor *logits = vision_lm_forward(scratch, vlm, img, prompt);
-        float *ld = tensor_data_ptr(logits);
-
-        all_done = 1;
-        for (int i = 0; i < got; i++) {
-            if (finished[i]) continue;
-            int last_tok = N_IMG_TOK + seq_len - 1;
-            float *row = ld + (long)i * logits->strides[0]
-                          + (long)last_tok * vlm->vocab_size;
-            int pred = 0;
-            for (int v = 1; v < vlm->vocab_size; v++)
-                if (row[v] > row[pred]) pred = v;
-            tokens[i][seq_len] = pred;
-            if (pred == TOKENIZER_EOS_ID || seq_len == max_decode)
-                finished[i] = 1;
-            else
-                all_done = 0;
-        }
-        seq_len++;
-        mem_pool_reset(scratch);
-    }
+    int seq_len = vlm_decode_ar(scratch, data, vlm, img, take, got, max_decode, tokens);
 
     /* Decode predicted byte sequences to strings and print. */
     printf("  ── preds ──\n");
     for (int i = 0; i < got; i++) {
         char pred_name[IMAGENET_MAX_TEXT_LEN];
-        int pn = 0;
-        for (int t = 1; t < seq_len && t <= max_decode; t++) {
-            int tok = tokens[i][t];
-            if (tok == TOKENIZER_EOS_ID) break;
-            if (tok < 0 || tok > 255) break;
-            if (pn < (int)sizeof(pred_name) - 1)
-                pred_name[pn++] = (tok >= 32 && tok < 127) ? (char)tok : '?';
-        }
-        pred_name[pn] = '\0';
+        vlm_tokens_to_str(tokens[i], seq_len, pred_name, sizeof(pred_name));
         int ok = strcmp(pred_name, names ? names[lbl[i]] : "") == 0;
         printf("  [%d] true=%-20s VS pred=%-20s %s\n",
                lbl[i],
