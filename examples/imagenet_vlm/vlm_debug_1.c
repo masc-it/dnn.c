@@ -208,7 +208,6 @@ static int find_param_by_substr(tensor **params, int n_params,
 static void report_grad_by_group(vision_lm *vlm, tensor **params, int n_params) {
     const char *img_params[] = {
         "patch_embed.weight", "patch_embed.bias",
-        "image_norm.weight",
         "image_pos",
         NULL
     };

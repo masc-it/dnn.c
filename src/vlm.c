@@ -62,9 +62,7 @@ vision_lm *vision_lm_create(struct mem_pool *params_pool,
                                      0);
     module_add_child(&vlm->base, "patch_embed", &vlm->patch_embed->base);
 
-    /* RMSNorm after patch embed, stabilizes vision feature scale */
-    vlm->image_norm = rms_norm_create(params_pool, d_model, 1e-5f);
-    module_add_child(&vlm->base, "image_norm", &vlm->image_norm->base);
+
 
     /* Decoder LM */
     vlm->lm = decoder_lm_create(params_pool, vocab_size, d_model,
@@ -97,7 +95,7 @@ void vision_lm_init_weights(vision_lm *vlm) {
      * Conv2d weight shape is (D, C, P, P). Input is normalized image pixels
      * (identity activation), so fan_in = C * P * P and gain ≈ 1.
      * Uses sqrt(1/fan_in) to preserve unit variance at the output.
-     * The following RMSNorm absorbs any residual scale. */
+     * Transformer pre-RMSNorm handles any residual scale before attention. */
     {
         int C = vlm->image_channels;
         int P = vlm->patch_size;
@@ -187,11 +185,6 @@ tensor *vision_lm_build_embeds(struct mem_pool *scratch,
 
     /* Image patch embeds [B, I, D] */
     tensor *img = vision_lm_image_embeds(scratch, vlm, images);
-
-    /* RMSNorm visual features before adding learned image positions.
-     * This keeps image_pos from being normalized together with conv features
-     * and preserves a cleaner gradient path into patch_embed. */
-    img = rms_norm_forward(scratch, vlm->image_norm, img);
 
     /* Add learned image positional embeddings if enabled */
     if (vlm->use_image_pos && vlm->image_pos) {

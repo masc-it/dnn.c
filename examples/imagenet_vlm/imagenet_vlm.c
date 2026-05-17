@@ -39,10 +39,11 @@
 #define MIN_LR          5e-5f
 #define GRAD_CLIP        5.0f
 #define WARMUP_EPOCHS     1
-#define PATCH_LR_MULT    3.0f
-#define VAL_CE_PROBE_EVERY 100
+#define PATCH_LR_MULT    1.0f
+#define VAL_CE_PROBE_EVERY 300
 #define VAL_CE_PROBE_N      64
 #define VAL_CE_PROBE_BS     16
+#define VAL_EPOCH_CE_PROBE_N 256
 
 /* Single padded sequence length. No bucketing: every shuffled batch uses
  * IMAGENET_MAX_TEXT_LEN, masks out pad positions, and preserves sample order
@@ -266,7 +267,6 @@ typedef struct {
 
 typedef enum {
     PG_PATCH = 0,
-    PG_IMG_NORM,
     PG_IMG_POS,
     PG_TOK_EMBED,
     PG_BLOCKS,
@@ -284,7 +284,7 @@ typedef struct {
 } param_group_stat;
 
 static const char *PG_NAME[PG_COUNT] = {
-    "patch", "img_norm", "img_pos", "tok_emb", "blocks", "lm_norm", "lm_head", "other"
+    "patch", "img_pos", "tok_emb", "blocks", "lm_norm", "lm_head", "other"
 };
 
 static int starts_with(const char *s, const char *prefix) {
@@ -294,7 +294,6 @@ static int starts_with(const char *s, const char *prefix) {
 
 static param_group_id param_group_for_name(const char *name) {
     if (starts_with(name, "patch_embed.")) return PG_PATCH;
-    if (starts_with(name, "image_norm.")) return PG_IMG_NORM;
     if (strcmp(name, "image_pos") == 0) return PG_IMG_POS;
     if (starts_with(name, "lm.embed.")) return PG_TOK_EMBED;
     if (starts_with(name, "lm.blocks.")) return PG_BLOCKS;
@@ -619,6 +618,7 @@ int main(int argc, char **argv) {
     mkdir("ckpt", 0755);
 
     /* ── Training ── */
+    float best_eval_loss = INFINITY;
     for (int epoch = 0; epoch < MAX_EPOCHS; epoch++) {
         vlm->use_image_pos = (vlm->image_pos != NULL);
         imagenet_vlm_dl_shuffle(train_dl);
@@ -710,27 +710,27 @@ int main(int argc, char **argv) {
                        batch_count / elapsed, (int)eta);
                 print_key_group_stats(group_stats);
             }
+            
             if (batch_count % 500 == 0 && label_names && val_dl) {
                 show_preds(ctx.scratch, ctx.data, vlm, val_dl,
                            (const char **)label_names);
                 mem_pool_reset(ctx.scratch);
                 mem_pool_reset(ctx.data);
+
+                float real_ce = 0.0f, blank_ce = 0.0f;
+                int n_eval = eval_real_blank_ce(
+                    ctx.scratch, ctx.data, vlm, val_dl,
+                    VAL_CE_PROBE_N, &real_ce, &blank_ce);
+                if (n_eval > 0) {
+                    printf("val_ce n=%d real=%.6f blank=%.6f gap=%.6f\n",
+                           n_eval, real_ce, blank_ce, blank_ce - real_ce);
+                } else {
+                    printf("val_ce failed\n");
+                }
             }
 
             mem_pool_reset(ctx.scratch);
             mem_pool_reset(ctx.data);
-
-            if (batch_count % VAL_CE_PROBE_EVERY == 0 && val_dl) {
-                float real_ce = 0.0f, blank_ce = 0.0f;
-                int n_eval = eval_real_blank_ce(ctx.scratch, ctx.data, vlm, val_dl,
-                                                VAL_CE_PROBE_N, &real_ce, &blank_ce);
-                if (n_eval > 0) {
-                    printf("       val_ce n=%d real=%.6f blank=%.6f gap=%.6f\n",
-                           n_eval, real_ce, blank_ce, blank_ce - real_ce);
-                } else {
-                    printf("       val_ce failed\n");
-                }
-            }
         }
 
         struct timespec t1;
@@ -751,7 +751,31 @@ int main(int argc, char **argv) {
             }
         }
 
-        /* ── Checkpoint ── */
+        /* ── Eval loss ── */
+        float epoch_ce_real = INFINITY, epoch_ce_blank = INFINITY;
+        int epoch_eval_n = eval_real_blank_ce(ctx.scratch, ctx.data, vlm, val_dl,
+                                              VAL_EPOCH_CE_PROBE_N,
+                                              &epoch_ce_real, &epoch_ce_blank);
+        if (epoch_eval_n > 0) {
+            printf("  ── epoch-end val_ce real=%.6f blank=%.6f gap=%.6f (n=%d)\n",
+                   epoch_ce_real, epoch_ce_blank,
+                   epoch_ce_blank - epoch_ce_real, epoch_eval_n);
+        } else if (!val_dl) {
+            printf("  ── epoch-end val_ce skipped (no val set)\n");
+        } else {
+            printf("  ── epoch-end val_ce failed\n");
+        }
+
+        /* ── Checkpoint (conditional: eval loss improved) ── */
+        if (epoch_eval_n > 0 && epoch_ce_real < best_eval_loss) {
+            best_eval_loss = epoch_ce_real;
+            char path[128];
+            snprintf(path, sizeof(path), "ckpt/imagenet_vlm_best.bin");
+            module_save(&vlm->base, path);
+            printf("  ── best checkpoint saved (val_ce=%.6f) <%s>\n", epoch_ce_real, path);
+        }
+
+        /* ── Periodic checkpoint (unconditional timestamped) ── */
         {
             char path[128];
             time_t now = time(NULL);

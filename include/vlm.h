@@ -25,8 +25,6 @@ typedef struct vision_lm {
 
     decoder_lm *lm;               /* text decoder; owns token embed, blocks, norm, lm_head */
     conv2d     *patch_embed;      /* image patch projection: C -> d_model */
-    rms_norm   *image_norm;       /* RMSNorm after patch embed, before cat with text */
-
     tensor     *image_pos;        /* nullable [1, n_img_tokens, d_model], learned */
 
     int use_image_pos;
@@ -63,6 +61,9 @@ vision_lm *vision_lm_create(struct mem_pool *params_pool,
  *   - patch_embed weight: Kaiming fan-in normal std sqrt(1/(C*P*P))
  *   - patch_embed bias: zero
  *   - image_pos: normal std=0.02 (if enabled)
+ *
+ *   No separate RMSNorm on image patches — the transformer block's
+ *   pre-attention RMSNorm per-position handles scale before Q/K/V.
  */
 void vision_lm_init_weights(vision_lm *vlm);
 
