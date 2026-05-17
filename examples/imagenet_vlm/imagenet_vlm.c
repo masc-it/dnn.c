@@ -26,14 +26,14 @@
 #define PATCH_SIZE       16
 #define N_IMG_TOK       196
 
-#define D_MODEL         128
+#define D_MODEL         256
 #define N_LAYERS          2
-#define N_HEADS           2
+#define N_HEADS           4
 #define D_K             64
-#define INTERMEDIATE   256
+#define INTERMEDIATE   512
 
 #define VOCAB_SIZE      261
-#define BATCH_SIZE       64
+#define BATCH_SIZE       32
 #define MAX_EPOCHS        10
 #define LR              5e-4f
 #define MIN_LR          5e-5f
