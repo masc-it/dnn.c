@@ -136,23 +136,6 @@ int main(void) {
                        epoch_loss / epoch_batches, current_lr, grad_norm, batch_s);
             }
 
-            /* ── Generate sample every GEN_EVERY batches ── */
-            if ((b + 1) % GEN_EVERY == 0) {
-                mem_pool_reset(ctx.scratch);
-
-                int n_out;
-                tensor *prompt = tensor_zeros_data(ctx.data, 2, (int[]){1, 1});
-                ((int*)prompt->data)[0] = TOKENIZER_BOS_ID;  /* <|im_start|> */
-
-                int *gen_ids = decoder_lm_generate(ctx.scratch, ctx.data, lm, prompt, GEN_NEW_TOKENS,
-                                                    0.0f, 1, &n_out);
-
-                tokenizer tok = tokenizer_with_chat_template();
-                char *text = tokenizer_decode(&tok, gen_ids, n_out);
-                printf("  ── gen (batch %d):\n  >> %s\n", b + 1, text);
-                free(text);
-            }
-
             /* free scratch + data */
             mem_pool_reset(ctx.scratch);
             mem_pool_reset(ctx.data);
@@ -167,6 +150,24 @@ int main(void) {
         printf("  ── epoch %2d done  avg loss %.6f  lr %.2e  %.2fs  %.1f batch/s\n",
                epoch + 1, epoch_loss / epoch_batches,
                epoch_end_lr, epoch_sec, n_batches / epoch_sec);
+
+        /* ── Generate sample at end of epoch ── */
+        {
+            mem_pool_reset(ctx.scratch);
+            mem_pool_reset(ctx.data);
+
+            int n_out;
+            tensor *prompt = tensor_zeros_data(ctx.data, 2, (int[]){1, 1});
+            ((int*)prompt->data)[0] = TOKENIZER_BOS_ID;
+
+            int *gen_ids = decoder_lm_generate(ctx.scratch, ctx.data, lm, prompt, GEN_NEW_TOKENS,
+                                                0.0f, 1, &n_out);
+
+            tokenizer tok = tokenizer_with_chat_template();
+            char *text = tokenizer_decode(&tok, gen_ids, n_out);
+            printf("  ── gen (epoch %d):\n  >> %s\n", epoch + 1, text);
+            free(text);
+        }
     }
 
     printf("\nTraining complete.  Total steps: %d\n", total_steps);

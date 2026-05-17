@@ -23,7 +23,7 @@ $(BUILDDIR):
 $(LIB):
 	$(MAKE) -C ../..
 
-$(BUILDDIR)/promessi_lm: promessi_lm.c promessi_data.c $(LIB) | $(BUILDDIR)
+$(BUILDDIR)/promessi_lm: promessi_lm.c promessi_data.c promessi.h $(LIB) | $(BUILDDIR)
 	$(CC) $(CFLAGS) $(EXTRA_CFLAGS) $(OMPFLAGS) $(CPPFLAGS) \
 	    promessi_lm.c promessi_data.c $(LDFLAGS) $(LDLIBS) -o $@
 

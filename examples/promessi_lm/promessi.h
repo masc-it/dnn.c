@@ -21,7 +21,7 @@
 #define MAX_EPOCHS      10
 #define LR            8e-4f
 #define MIN_LR            6e-5f
-#define OVERFIT         1    /* 1 = train on 10 batches only for overfit test */
+#define OVERFIT         0    /* 1 = train on 10 batches only for overfit test */
 #if OVERFIT
 #  undef  MAX_EPOCHS
 #  define MAX_EPOCHS 1000

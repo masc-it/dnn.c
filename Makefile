@@ -114,6 +114,8 @@ PROMESSI_EXAMPLES := examples/promessi_lm
 
 promessi_lm: $(LIB)
 	$(MAKE) -C $(PROMESSI_EXAMPLES) $@
+
+run_promessi_lm: promessi_lm
 	$(BUILDDIR)/promessi_lm
 
 # pattern rule for building bench binaries
