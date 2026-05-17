@@ -114,13 +114,14 @@ tensor *tensor_rope(struct mem_pool *scratch, tensor *x, const tensor *freqs_cos
     /* Apply rotation in-place */
     _rope_apply(xd, x->offset, N, d, num_outer, fc, fs);
 
-    /* Create lightweight view tensor sharing x's data buffer.
-     * Copied from x, but without a new data allocation. */
+    /* Create lightweight op output sharing x's data buffer.
+     * Not a view for autograd: downstream grads must land on out->grad so
+     * rope_backward can apply the inverse rotation into x->grad. */
     tensor *out = _mem_pool_alloc(scratch, sizeof(tensor), x);
     out->data        = x->data;
     out->offset      = x->offset;
-    out->pool        = x->pool;    /* inherit pool from input (for _grad_ensure) */
-    out->parent      = x;          /* view: parent chain for _grad_ensure */
+    out->pool        = x->pool;    /* scratch pool for out->grad */
+    out->parent      = NULL;
     out->grad_fn     = NULL;
     out->grad        = NULL;
 
