@@ -283,7 +283,8 @@ void adamw_step_with_lr_multipliers(adamw_opt *opt, const float *lr_mults) {
         float *vd = tensor_data_ptr(vt);
         float *gd = tensor_grad(p);
 
-        assert(gd && "adamw_step: param has no gradient (did you call backward?)");
+        /* Skip params not in the backward graph */
+        if (!gd) continue;
 
         float mult = lr_mults ? lr_mults[i] : 1.0f;
         float lr = base_lr * mult;

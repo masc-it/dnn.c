@@ -24,7 +24,8 @@ typedef struct vision_lm {
     module      base;             /* first field */
 
     decoder_lm *lm;               /* text decoder; owns token embed, blocks, norm, lm_head */
-    conv2d     *patch_embed;      /* image patch projection: C -> d_model */
+    conv2d     *patch_embed;      /* conv patchifier for 4D raw image input [B,C,H,W] */
+    linear     *img_proj;         /* linear projection for 3D pre-patched input [B,I,C*P*P] */
     tensor     *image_pos;        /* nullable [1, n_img_tokens, d_model], learned */
 
     int use_image_pos;

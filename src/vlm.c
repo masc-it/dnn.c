@@ -46,7 +46,8 @@ vision_lm *vision_lm_create(struct mem_pool *params_pool,
     vlm->n_img_tokens  = vlm->patch_h * vlm->patch_w;
     vlm->use_image_pos = use_image_pos;
 
-    /* Patch embedding: conv2d(C, d_model, kernel=patch, stride=patch, pad=0) */
+    /* Patch embedding: conv2d(C, d_model, kernel=patch, stride=patch, pad=0)
+     * Used for 4D raw image input [B,C,H,W]. */
     vlm->patch_embed = conv2d_create(params_pool,
                                      image_channels,
                                      d_model,
@@ -55,7 +56,13 @@ vision_lm *vision_lm_create(struct mem_pool *params_pool,
                                      0);
     module_add_child(&vlm->base, "patch_embed", &vlm->patch_embed->base);
 
-
+    /* Image projection: linear(C*P*P, d_model)
+     * Used for 3D pre-patched input [B, n_img_tokens, C*P*P]. */
+    {
+        int patch_dim = image_channels * patch_size * patch_size;
+        vlm->img_proj = linear_create(params_pool, patch_dim, d_model);
+        module_add_child(&vlm->base, "img_proj", &vlm->img_proj->base);
+    }
 
     /* Decoder LM */
     vlm->lm = decoder_lm_create(params_pool, vocab_size, d_model,
@@ -84,11 +91,14 @@ void vision_lm_init_weights(vision_lm *vlm) {
     /* Init child LM (GPT-2 style) */
     decoder_lm_init_weights(vlm->lm);
 
-    /* Init patch_embed weight: Kaiming fan-in normal.
-     * Conv2d weight shape is (D, C, P, P). Input is normalized image pixels
-     * (identity activation), so fan_in = C * P * P and gain ≈ 1.
-     * Uses sqrt(1/fan_in) to preserve unit variance at the output.
-     * Transformer pre-RMSNorm handles any residual scale before attention. */
+    /* Init patch_embed (conv2d) weight: Kaiming fan-in normal.
+     * Input is normalized image pixels (identity activation), so
+     * fan_in = C * P * P and gain ≈ 1. Uses sqrt(1/fan_in) to preserve
+     * unit variance at the output.
+     * Transformer pre-RMSNorm handles any residual scale before attention.
+     *
+     * img_proj (linear) is NOT re-initialized here — linear_create
+     * sets Uniform(-1/sqrt(in), 1/sqrt(in)) per default init. */
     {
         int C = vlm->image_channels;
         int P = vlm->patch_size;
@@ -153,12 +163,8 @@ tensor *vision_lm_image_embeds(struct mem_pool *scratch,
         assert(images->shape[1] == vlm->n_img_tokens && "patch count mismatch");
         assert(images->shape[2] == patch_dim && "patch dim mismatch");
 
-        /* Pre-patched image input: [B, I, C*P*P].  Reuse conv2d weights as a
-         * linear patch projection by flattening [D,C,P,P] -> [D,C*P*P] and
-         * computing patches @ W^T + bias. */
-        tensor *w = tensor_reshape(scratch, vlm->patch_embed->weight, 2,
-                                   (int[]){vlm->d_model, patch_dim});
-        return tensor_matmul_add(scratch, images, w, 1, vlm->patch_embed->bias);
+        /* Pre-patched image input: [B, I, C*P*P] -> [B, I, D] via linear. */
+        return linear_forward(scratch, vlm->img_proj, images);
     }
 
     assert(images->ndim == 4 && "images must be 4D [B, C, H, W] or 3D [B, patches, patch_dim]");

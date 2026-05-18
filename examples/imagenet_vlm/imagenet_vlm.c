@@ -28,7 +28,7 @@
 #define PATCH_DIM       (IMG_C * PATCH_SIZE * PATCH_SIZE)
 
 #define D_MODEL         256
-#define N_LAYERS          2
+#define N_LAYERS          3
 #define N_HEADS           4
 #define D_K             64
 #define INTERMEDIATE   512
@@ -36,10 +36,10 @@
 #define VOCAB_SIZE      261
 #define BATCH_SIZE       32
 #define MAX_EPOCHS        10
-#define LR              5e-4f
-#define MIN_LR          5e-5f
+#define LR              2e-4f
+#define MIN_LR          2e-5f
 #define GRAD_CLIP        5.0f
-#define WARMUP_EPOCHS     1
+#define WARMUP_EPOCHS     2
 #define PATCH_LR_MULT    1.0f
 #define VAL_CE_PROBE_EVERY 300
 #define VAL_CE_PROBE_N      64
@@ -294,7 +294,7 @@ static int starts_with(const char *s, const char *prefix) {
 }
 
 static param_group_id param_group_for_name(const char *name) {
-    if (starts_with(name, "patch_embed.")) return PG_PATCH;
+    if (starts_with(name, "patch_embed.") || starts_with(name, "img_proj.")) return PG_PATCH;
     if (strcmp(name, "image_pos") == 0) return PG_IMG_POS;
     if (starts_with(name, "lm.embed.")) return PG_TOK_EMBED;
     if (starts_with(name, "lm.blocks.")) return PG_BLOCKS;
@@ -337,7 +337,7 @@ static void collect_grad_weight_stats(named_param *params, int n_params,
         float *wd = tensor_data_ptr(p);
         float *gd = tensor_grad(p);
         param_group_id gid = param_group_for_name(params[i].name);
-        st[gid].n_params += n;
+        if (gd) st[gid].n_params += n;
         for (int j = 0; j < n; j++) {
             double w = wd[j];
             st[gid].weight_sq += w * w;
@@ -385,28 +385,6 @@ static void collect_update_stats(named_param *params, int n_params,
         }
         off += n;
     }
-}
-
-static void batch_token_stats(const tensor *loss_mask, const int *text_lens, int B,
-                              int *tok_out, float *mean_len_out,
-                              int *min_len_out, int *max_len_out) {
-    int T = loss_mask->shape[1];
-    float *md = tensor_data_ptr((tensor *)loss_mask);
-    int tok = 0, min_len = text_lens[0], max_len = text_lens[0];
-    double sum_len = 0.0;
-    for (int b = 0; b < B; b++) {
-        int tl = text_lens[b];
-        if (tl < min_len) min_len = tl;
-        if (tl > max_len) max_len = tl;
-        sum_len += tl;
-        for (int t = 0; t < T; t++)
-            if (md[(long)b * loss_mask->strides[0] + t * loss_mask->strides[1]] != 0.0f)
-                tok++;
-    }
-    *tok_out = tok;
-    *mean_len_out = (float)(sum_len / (double)B);
-    *min_len_out = min_len;
-    *max_len_out = max_len;
 }
 
 static void print_group_stat(param_group_stat st[PG_COUNT], param_group_id gid) {
@@ -596,16 +574,19 @@ int main(int argc, char **argv) {
     float *lr_mults = malloc((size_t)n_params * sizeof(float));
     if (!lr_mults) { fprintf(stderr, "Failed to allocate LR multipliers\n"); return 1; }
     for (int i = 0; i < n_params; i++) lr_mults[i] = 1.0f;
-    tensor *patch_w = module_find_param(&vlm->base, "patch_embed.weight");
-    tensor *patch_b = module_find_param(&vlm->base, "patch_embed.bias");
+    tensor *patch_w  = module_find_param(&vlm->base, "patch_embed.weight");
+    tensor *patch_b  = module_find_param(&vlm->base, "patch_embed.bias");
+    tensor *proj_w   = module_find_param(&vlm->base, "img_proj.weight");
+    tensor *proj_b   = module_find_param(&vlm->base, "img_proj.bias");
     int patch_mult_count = 0;
     for (int i = 0; i < n_params; i++) {
-        if (all_params[i] == patch_w || all_params[i] == patch_b) {
+        if (all_params[i] == patch_w || all_params[i] == patch_b ||
+            all_params[i] == proj_w || all_params[i] == proj_b) {
             lr_mults[i] = PATCH_LR_MULT;
             patch_mult_count++;
         }
     }
-    printf("LR multipliers: patch_embed x%.1f (%d tensors)\n", PATCH_LR_MULT, patch_mult_count);
+    printf("LR multipliers: vision proj x%.1f (%d tensors)\n", PATCH_LR_MULT, patch_mult_count);
 
     int n_batches_approx = (imagenet_vlm_dl_total(train_dl) + BATCH_SIZE - 1) / BATCH_SIZE;
     int total_steps = n_batches_approx * MAX_EPOCHS;
@@ -657,8 +638,6 @@ int main(int argc, char **argv) {
 
             int next_batch = batch_count + 1;
             int log_now = (next_batch % 10 == 0 || next_batch == 1);
-            int batch_tokens = 0, min_len = 0, max_len = 0;
-            float mean_len = 0.0f;
             param_group_stat group_stats[PG_COUNT];
             long long snap_n = 0;
             float *snap = NULL;
@@ -671,8 +650,6 @@ int main(int argc, char **argv) {
             dnn_backward(ctx.scratch, loss);
 
             if (log_now) {
-                batch_token_stats(loss_mask, text_lens, got,
-                                  &batch_tokens, &mean_len, &min_len, &max_len);
                 collect_grad_weight_stats(named_params, n_named_params, group_stats);
                 snap = snapshot_params(named_params, n_named_params, &snap_n);
             }
@@ -703,11 +680,10 @@ int main(int argc, char **argv) {
                 float cur_lr = lr_scheduler_get_lr(sched);
                 double eta = (elapsed / batch_count)
                            * (n_batches_approx - batch_count);
-                printf("e%d  batch %4d/%-4d  loss %.6f  avg %.6f  lr %.2e  gn %.4e  tok=%d  len=%.1f/%d-%d  %.1f/s  eta %ds\n",
+                printf("e%d  batch %4d/%-4d  loss %.6f  avg %.6f  lr %.2e  gn %.4e  %.1f/s  eta %ds\n",
                        epoch + 1, batch_count, n_batches_approx,
                        lv, epoch_loss / batch_count,
                        cur_lr, gn,
-                       batch_tokens, mean_len, min_len, max_len,
                        batch_count / elapsed, (int)eta);
                 print_key_group_stats(group_stats);
             }
